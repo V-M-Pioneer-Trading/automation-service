@@ -11,6 +11,10 @@ export interface ShipTask {
   survey: SurveyData | null;
   tradeSymbol: string | null;
   marketWaypoint: string | null;
+  /** Null whenever the ship needs a fresh assignment from the planner (meta#10): a brand new task, or the moment a cycle completes. */
+  asteroidWaypoint: string | null;
+  /** Consecutive tick failures against the current asteroidWaypoint; resets on any successful tick. */
+  failureCount: number;
 }
 
 export class ShipTaskRepo {
@@ -31,7 +35,7 @@ export class ShipTaskRepo {
 
   async get(shipSymbol: string): Promise<ShipTask | null> {
     const { rows } = await this.pool.query(
-      `SELECT ship_symbol, phase, waiting_until, survey, trade_symbol, market_waypoint
+      `SELECT ship_symbol, phase, waiting_until, survey, trade_symbol, market_waypoint, asteroid_waypoint, failure_count
        FROM ship_task WHERE ship_symbol = $1`,
       [shipSymbol]
     );
@@ -44,13 +48,16 @@ export class ShipTaskRepo {
       survey: row.survey,
       tradeSymbol: row.trade_symbol,
       marketWaypoint: row.market_waypoint,
+      asteroidWaypoint: row.asteroid_waypoint,
+      failureCount: row.failure_count,
     };
   }
 
   async save(task: ShipTask): Promise<void> {
     await this.pool.query(
       `UPDATE ship_task
-       SET phase = $2, waiting_until = $3, survey = $4, trade_symbol = $5, market_waypoint = $6, updated_at = $7
+       SET phase = $2, waiting_until = $3, survey = $4, trade_symbol = $5, market_waypoint = $6,
+           asteroid_waypoint = $7, failure_count = $8, updated_at = $9
        WHERE ship_symbol = $1`,
       [
         task.shipSymbol,
@@ -59,6 +66,8 @@ export class ShipTaskRepo {
         task.survey,
         task.tradeSymbol,
         task.marketWaypoint,
+        task.asteroidWaypoint,
+        task.failureCount,
         this.clock.now(),
       ]
     );

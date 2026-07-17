@@ -6,6 +6,8 @@ import { ServiceConfig, configFromEnv } from "./config";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients, UpstreamCallError } from "./gameClients";
+import { KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
+import { Planner } from "./planner";
 import { MiningScheduler } from "./scheduler";
 import { ShipTaskRepo } from "./shipTaskRepo";
 
@@ -21,7 +23,6 @@ export interface MiningConfig {
   agentServiceUrl: string;
   fleetServiceUrl: string;
   miningShipSymbol: string;
-  miningAsteroidWaypoint: string;
   schedulerIntervalMs: number;
 }
 
@@ -37,15 +38,16 @@ export function createApp(pool: Pool, clock: Clock = systemClock, mining?: Minin
   const state = new AutopilotState();
   const events = new EventLog(pool, clock);
   const shipTaskRepo = new ShipTaskRepo(pool, clock);
+  const knobs = new KnobRepo(pool);
 
-  const scheduler =
-    mining !== undefined
-      ? new MiningScheduler(state, shipTaskRepo, events, createGameClients(mining), clock, {
-          shipSymbol: mining.miningShipSymbol,
-          asteroidWaypoint: mining.miningAsteroidWaypoint,
-          intervalMs: mining.schedulerIntervalMs,
-        })
-      : null;
+  const scheduler = (() => {
+    if (mining === undefined) return null;
+    const gameClients = createGameClients(mining);
+    return new MiningScheduler(state, shipTaskRepo, events, gameClients, clock, new Planner(gameClients, knobs), knobs, {
+      shipSymbol: mining.miningShipSymbol,
+      intervalMs: mining.schedulerIntervalMs,
+    });
+  })();
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
@@ -98,6 +100,38 @@ export function createApp(pool: Pool, clock: Clock = systemClock, mining?: Minin
       const parsed = typeof raw === "string" ? Number(raw) : NaN;
       const limit = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, MAX_EVENTS_LIMIT) : 100;
       res.json({ events: await events.list(limit) });
+    })
+  );
+
+  app.get(
+    "/planner/knobs",
+    asyncHandler(async (_req, res) => {
+      res.json({ knobs: await knobs.getAll() });
+    })
+  );
+
+  app.put(
+    "/planner/knobs/:name",
+    asyncHandler(async (req, res) => {
+      const value = req.body?.value;
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        res.status(400).json({ error: { message: "value must be a finite number" } });
+        return;
+      }
+      try {
+        const knob = await knobs.set(req.params.name, value);
+        res.json({ knob });
+      } catch (err) {
+        if (err instanceof KnobNotFoundError) {
+          res.status(404).json({ error: { message: err.message } });
+          return;
+        }
+        if (err instanceof KnobOutOfRangeError) {
+          res.status(400).json({ error: { message: err.message } });
+          return;
+        }
+        throw err;
+      }
     })
   );
 

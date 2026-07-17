@@ -22,7 +22,7 @@ function makeShip(overrides: Record<string, unknown> = {}) {
     symbol: "MINING-1",
     nav: {
       systemSymbol: "X1-TEST",
-      waypointSymbol: "X1-TEST-STATION",
+      waypointSymbol: "X1-TEST-MARKET",
       status: "DOCKED",
       route: { arrival: "2026-01-01T00:00:00Z" },
     },
@@ -79,6 +79,10 @@ describe("automation-service mining loop", () => {
     agentResponseDelayMs = 0;
 
     agent = startStubServer((req, _body, res) => {
+      if (req.url === "/agent" && req.method === "GET") {
+        respondJson(res, 200, { credits: 100_000 });
+        return;
+      }
       if (req.url === "/ships/MINING-1" && req.method === "GET") {
         // Real SpaceTraders auto-flips IN_TRANSIT -> IN_ORBIT once the arrival
         // time passes, with no client action required. Mirror that here against
@@ -140,7 +144,10 @@ describe("automation-service mining loop", () => {
     nav = startStubServer((req, _body, res) => {
       if (req.url === "/systems/X1-TEST/waypoints") {
         respondJson(res, 200, {
-          data: [{ symbol: "X1-TEST-MARKET", traits: [{ symbol: "MARKETPLACE" }] }],
+          data: [
+            { symbol: "X1-TEST-MARKET", type: "PLANET", x: 0, y: 0, traits: [{ symbol: "MARKETPLACE" }] },
+            { symbol: "X1-TEST-BELT", type: "ASTEROID_FIELD", x: 10, y: 0, traits: [] },
+          ],
         });
       } else if (req.url === "/waypoints/X1-TEST-MARKET/market") {
         respondJson(res, 200, { symbol: "X1-TEST-MARKET", tradeGoods: [{ symbol: "IRON_ORE", sellPrice: 50 }] });
@@ -180,7 +187,6 @@ describe("automation-service mining loop", () => {
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
-      miningAsteroidWaypoint: "X1-TEST-BELT",
       schedulerIntervalMs: 15,
     });
     gateways.push(gateway);
@@ -308,6 +314,13 @@ describe("automation-service mining loop", () => {
     // an abort that lands while that await is in flight must still stop the
     // result from being recorded as something the (now-aborted) autopilot did.
     agentResponseDelayMs = 250;
+    // Pre-seed an already-assigned target so tick 1 goes straight to dispatch
+    // (orbit) rather than spending its one atomic action on planning first —
+    // this test is specifically about discarding an in-flight dispatch.
+    await pool.query(
+      `INSERT INTO ship_task (ship_symbol, phase, asteroid_waypoint, updated_at) VALUES ($1, $2, $3, $4)`,
+      ["MINING-1", "TRAVEL_TO_ASTEROID", "X1-TEST-BELT", clock.now()]
+    );
     const gateway = app();
 
     await request(gateway).post("/autopilot/arm").send({ token: "test-token" });

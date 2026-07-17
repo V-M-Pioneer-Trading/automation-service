@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { KNOB_DEFINITIONS } from "./knobs";
 
 export function createPool(databaseUrl: string): Pool {
   return new Pool({ connectionString: databaseUrl });
@@ -35,4 +36,30 @@ export async function migrate(pool: Pool): Promise<void> {
       updated_at TIMESTAMPTZ NOT NULL
     )
   `);
+  // asteroid_waypoint is NULL whenever the ship needs a fresh assignment from the
+  // planner (meta#10) — a brand new task, or the moment a cycle completes.
+  // failure_count drives reassignment away from a target that keeps erroring.
+  await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS asteroid_waypoint TEXT`);
+  await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS failure_count INTEGER NOT NULL DEFAULT 0`);
+
+  // Planner knobs (meta#10): value + default + min/max, schema-validated on write.
+  // Seeded from KNOB_DEFINITIONS below; existing rows are left alone so an operator's
+  // tuning survives a redeploy.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS knob (
+      name TEXT PRIMARY KEY,
+      value DOUBLE PRECISION NOT NULL,
+      default_value DOUBLE PRECISION NOT NULL,
+      min_value DOUBLE PRECISION NOT NULL,
+      max_value DOUBLE PRECISION NOT NULL
+    )
+  `);
+  for (const def of KNOB_DEFINITIONS) {
+    await pool.query(
+      `INSERT INTO knob (name, value, default_value, min_value, max_value)
+       VALUES ($1, $2, $2, $3, $4)
+       ON CONFLICT (name) DO NOTHING`,
+      [def.name, def.default, def.min, def.max]
+    );
+  }
 }

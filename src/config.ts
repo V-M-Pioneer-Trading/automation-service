@@ -3,12 +3,11 @@ export interface ServiceConfig {
   navigationServiceUrl: string;
   agentServiceUrl: string;
   fleetServiceUrl: string;
-  // Tracer-bullet simplification (meta#9): the mining loop drives one
-  // pre-configured ship to one pre-configured asteroid field. Choosing which
-  // ship to fly and which field to mine is the planner's job (meta#10) — this
-  // ticket proves the FSM end-to-end, not fleet-wide task assignment.
+  // Tracer-bullet simplification (meta#9, still true post-meta#10): the mining
+  // loop drives one pre-configured ship. Which asteroid field it mines is now
+  // chosen dynamically by the planner (meta#10); fleet-wide multi-ship
+  // dispatch is still future work.
   miningShipSymbol: string;
-  miningAsteroidWaypoint: string;
   // How often the scheduler checks whether a ship's current wait has elapsed.
   // Real deploys want seconds; tests want this near-instant.
   schedulerIntervalMs: number;
@@ -28,6 +27,5 @@ export const configFromEnv = (): ServiceConfig => ({
   agentServiceUrl: requireEnv("AGENT_SERVICE_URL"),
   fleetServiceUrl: requireEnv("FLEET_SERVICE_URL"),
   miningShipSymbol: requireEnv("MINING_SHIP_SYMBOL"),
-  miningAsteroidWaypoint: requireEnv("MINING_ASTEROID_WAYPOINT"),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 5000),
 });

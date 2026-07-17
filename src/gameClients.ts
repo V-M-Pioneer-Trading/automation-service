@@ -28,7 +28,14 @@ export interface SurveyData {
 
 export interface WaypointSummary {
   symbol: string;
+  type: string;
+  x: number;
+  y: number;
   traits: { symbol: string }[];
+}
+
+export interface AgentSnapshot {
+  credits: number;
 }
 
 export interface MarketData {
@@ -79,6 +86,8 @@ export function createGameClients(config: {
   return {
     getShip: (shipSymbol: string, authHeader: string) =>
       callJson<ShipSnapshot>(`${config.agentServiceUrl}/ships/${shipSymbol}`, authHeader),
+
+    getAgent: (authHeader: string) => callJson<AgentSnapshot>(`${config.agentServiceUrl}/agent`, authHeader),
 
     getSystemWaypoints: (systemSymbol: string, authHeader: string) =>
       callJson<{ data: WaypointSummary[] }>(

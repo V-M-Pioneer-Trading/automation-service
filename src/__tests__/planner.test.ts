@@ -1,0 +1,268 @@
+import http from "http";
+import { AddressInfo } from "net";
+import request from "supertest";
+import { Pool } from "pg";
+import { createApp } from "../server";
+import { createPool, migrate } from "../db";
+import { Clock } from "../clock";
+
+class FakeClock implements Clock {
+  constructor(private current: Date) {}
+  now(): Date {
+    return this.current;
+  }
+  advance(ms: number) {
+    this.current = new Date(this.current.getTime() + ms);
+  }
+}
+
+function makeShip(overrides: Record<string, unknown> = {}) {
+  return {
+    symbol: "MINING-1",
+    nav: {
+      systemSymbol: "X1-TEST",
+      waypointSymbol: "X1-TEST-MARKET",
+      status: "DOCKED",
+      route: { arrival: "2026-01-01T00:00:00Z" },
+    },
+    cooldown: { expiration: null },
+    fuel: { current: 100, capacity: 100 },
+    cargo: { units: 0, capacity: 1, inventory: [] as { symbol: string; units: number }[] },
+    ...overrides,
+  };
+}
+
+function startStubServer(handler: (req: http.IncomingMessage, body: string, res: http.ServerResponse) => void) {
+  const calls: { method: string; url: string; body: string }[] = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      calls.push({ method: req.method ?? "", url: req.url ?? "", body });
+      handler(req, body, res);
+    });
+  });
+  return { server, calls };
+}
+
+const respondJson = (res: http.ServerResponse, status: number, data: unknown) => {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(data));
+};
+
+describe("automation-service planner (meta#10)", () => {
+  let pool: Pool;
+  let clock: FakeClock;
+  let credits = 100_000;
+  let fleetShouldFail = false;
+
+  let agent: ReturnType<typeof startStubServer>;
+  let fleet: ReturnType<typeof startStubServer>;
+  let nav: ReturnType<typeof startStubServer>;
+  let agentUrl: string, fleetUrl: string, navUrl: string;
+
+  beforeAll(async () => {
+    pool = createPool(process.env.DATABASE_URL!);
+    await migrate(pool);
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  beforeEach(async () => {
+    await pool.query("TRUNCATE event_log, ship_task RESTART IDENTITY");
+    await pool.query("UPDATE knob SET value = default_value"); // reset any prior test's writes
+    clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
+    credits = 100_000;
+    fleetShouldFail = false;
+
+    agent = startStubServer((req, _body, res) => {
+      if (req.url === "/agent" && req.method === "GET") {
+        respondJson(res, 200, { credits });
+        return;
+      }
+      if (req.url === "/ships/MINING-1" && req.method === "GET") {
+        respondJson(res, 200, makeShip());
+        return;
+      }
+      respondJson(res, 404, { error: "not found" });
+    });
+
+    fleet = startStubServer((_req, _body, res) => {
+      if (fleetShouldFail) {
+        respondJson(res, 500, { error: "upstream boom" });
+        return;
+      }
+      respondJson(res, 404, { error: "unused in this suite" });
+    });
+
+    nav = startStubServer((req, _body, res) => {
+      if (req.url === "/systems/X1-TEST/waypoints") {
+        respondJson(res, 200, {
+          data: [
+            { symbol: "X1-TEST-MARKET", type: "PLANET", x: 0, y: 0, traits: [{ symbol: "MARKETPLACE" }] },
+            // Near field: cheap, reachable, low round-trip time -> higher score.
+            { symbol: "X1-TEST-BELT-NEAR", type: "ASTEROID_FIELD", x: 10, y: 0, traits: [] },
+            // Far field: still reachable in one hop (within fuel capacity) but costs more time -> lower score.
+            { symbol: "X1-TEST-BELT-FAR", type: "ASTEROID_FIELD", x: 90, y: 0, traits: [] },
+            // Unreachable field: farther than any single tank can cover, and no
+            // intermediate fuel station to hop through.
+            { symbol: "X1-TEST-BELT-UNREACHABLE", type: "ASTEROID_FIELD", x: 500, y: 0, traits: [] },
+          ],
+        });
+      } else {
+        respondJson(res, 404, { error: "unhandled: " + req.url });
+      }
+    });
+
+    await Promise.all([
+      new Promise<void>((r) => agent.server.listen(0, r)),
+      new Promise<void>((r) => fleet.server.listen(0, r)),
+      new Promise<void>((r) => nav.server.listen(0, r)),
+    ]);
+    agentUrl = `http://127.0.0.1:${(agent.server.address() as AddressInfo).port}`;
+    fleetUrl = `http://127.0.0.1:${(fleet.server.address() as AddressInfo).port}`;
+    navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
+  });
+
+  let gateways: ReturnType<typeof createApp>[] = [];
+
+  afterEach(async () => {
+    await Promise.all(gateways.map((g) => request(g).post("/autopilot/abort")));
+    gateways = [];
+    await Promise.all([
+      new Promise<void>((r) => agent.server.close(() => r())),
+      new Promise<void>((r) => fleet.server.close(() => r())),
+      new Promise<void>((r) => nav.server.close(() => r())),
+    ]);
+  });
+
+  const app = () => {
+    const gateway = createApp(pool, clock, {
+      agentServiceUrl: agentUrl,
+      fleetServiceUrl: fleetUrl,
+      navigationServiceUrl: navUrl,
+      miningShipSymbol: "MINING-1",
+      schedulerIntervalMs: 15,
+    });
+    gateways.push(gateway);
+    return gateway;
+  };
+
+  const waitForAssignment = async (gateway: ReturnType<typeof createApp>, timeoutMs = 2000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const res = await request(gateway).get("/autopilot/ships/MINING-1");
+      if (res.status === 200 && res.body.task.asteroidWaypoint !== null) return res.body.task;
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    throw new Error("timed out waiting for a planner assignment");
+  };
+
+  it("knob table: reads defaults, accepts an in-range write, rejects out-of-range and unknown names", async () => {
+    const gateway = app();
+
+    const listRes = await request(gateway).get("/planner/knobs");
+    expect(listRes.status).toBe(200);
+    const reserveFloor = listRes.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
+    expect(reserveFloor).toMatchObject({ value: 0, default: 0, min: 0 });
+
+    const okRes = await request(gateway).put("/planner/knobs/credit.reserveFloor").send({ value: 1000 });
+    expect(okRes.status).toBe(200);
+    expect(okRes.body.knob.value).toBe(1000);
+
+    const rangeRes = await request(gateway).put("/planner/knobs/credit.reserveFloor").send({ value: -5 });
+    expect(rangeRes.status).toBe(400);
+
+    const unknownRes = await request(gateway).put("/planner/knobs/does.not.exist").send({ value: 1 });
+    expect(unknownRes.status).toBe(404);
+
+    const persistedRes = await request(gateway).get("/planner/knobs");
+    const persisted = persistedRes.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
+    expect(persisted.value).toBe(1000); // the rejected write never took effect
+  });
+
+  it("assigns the reachable, highest-scoring asteroid field and logs the scoring inputs for replay", async () => {
+    const gateway = app();
+    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+
+    const task = await waitForAssignment(gateway);
+    expect(task.asteroidWaypoint).toBe("X1-TEST-BELT-NEAR");
+
+    const eventsRes = await request(gateway).get("/autopilot/events?limit=50");
+    const assignmentEvent = eventsRes.body.events.find((e: { type: string }) => e.type === "planner_assignment");
+    expect(assignmentEvent).toBeDefined();
+    expect(assignmentEvent.detail.chosen).toBe("X1-TEST-BELT-NEAR");
+    expect(assignmentEvent.detail.currentCredits).toBe(100_000);
+
+    const candidateSymbols = assignmentEvent.detail.candidates.map((c: { waypoint: string }) => c.waypoint);
+    expect(candidateSymbols).toEqual(
+      expect.arrayContaining(["X1-TEST-BELT-NEAR", "X1-TEST-BELT-FAR", "X1-TEST-BELT-UNREACHABLE"])
+    );
+    const unreachable = assignmentEvent.detail.candidates.find(
+      (c: { waypoint: string }) => c.waypoint === "X1-TEST-BELT-UNREACHABLE"
+    );
+    expect(unreachable.reachable).toBe(false);
+    const near = assignmentEvent.detail.candidates.find((c: { waypoint: string }) => c.waypoint === "X1-TEST-BELT-NEAR");
+    const far = assignmentEvent.detail.candidates.find((c: { waypoint: string }) => c.waypoint === "X1-TEST-BELT-FAR");
+    expect(near.score).toBeGreaterThan(far.score); // closer field scores higher (less time per cycle)
+  });
+
+  it("never assigns work that would breach the credit reserve floor", async () => {
+    const gateway = app();
+
+    // Set the floor above what the agent can afford after any candidate's estimated fuel cost.
+    await request(gateway).put("/planner/knobs/credit.reserveFloor").send({ value: 99_999 });
+    credits = 100_000; // fuel cost > 1 credit for any reachable field, so every candidate would breach the floor
+
+    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+
+    // Give the scheduler a few ticks to run and confirm it never assigns.
+    await new Promise((r) => setTimeout(r, 200));
+
+    const task = await request(gateway).get("/autopilot/ships/MINING-1").then((r) => r.body.task);
+    expect(task.asteroidWaypoint).toBeNull();
+
+    const eventsRes = await request(gateway).get("/autopilot/events?limit=50");
+    const eventTypes = eventsRes.body.events.map((e: { type: string }) => e.type);
+    expect(eventTypes).toContain("planner_no_viable_target");
+
+    const assignmentEvent = eventsRes.body.events.find((e: { type: string }) => e.type === "planner_assignment");
+    const allBreach = assignmentEvent.detail.candidates
+      .filter((c: { reachable: boolean }) => c.reachable)
+      .every((c: { breachesReserveFloor: boolean }) => c.breachesReserveFloor === true);
+    expect(allBreach).toBe(true);
+  });
+
+  it("reassigns away from a target after it fails repeatedly, without a separate periodic planner sweep", async () => {
+    // Every fleet-service call errors, so the ship can never progress past dispatching
+    // orbit/navigate against its assigned target.
+    fleetShouldFail = true;
+
+    const gateway = app();
+    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+
+    await waitForAssignment(gateway); // first assignment happens immediately
+
+    const deadline = Date.now() + 3000;
+    let failedEventSeen = false;
+    while (Date.now() < deadline && !failedEventSeen) {
+      const eventsRes = await request(gateway).get("/autopilot/events?limit=100");
+      failedEventSeen = eventsRes.body.events.some((e: { type: string }) => e.type === "mining_task_failed");
+      if (!failedEventSeen) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(failedEventSeen).toBe(true);
+
+    // Reassignment happens on the very next tick after the failure, not a separate sweep:
+    // a second planner_assignment shows up without any extra external trigger.
+    const secondAssignmentDeadline = Date.now() + 2000;
+    let assignmentCount = 0;
+    while (Date.now() < secondAssignmentDeadline && assignmentCount < 2) {
+      const eventsRes = await request(gateway).get("/autopilot/events?limit=100");
+      assignmentCount = eventsRes.body.events.filter((e: { type: string }) => e.type === "planner_assignment").length;
+      if (assignmentCount < 2) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(assignmentCount).toBeGreaterThanOrEqual(2);
+  }, 10_000);
+});

@@ -231,7 +231,9 @@ async function dispatchSell(
     return { task, event: "mining_refuel", detail: { shipSymbol: task.shipSymbol } };
   }
   return {
-    task: { ...withPhase(task, "TRAVEL_TO_ASTEROID"), marketWaypoint: null, tradeSymbol: null },
+    // asteroidWaypoint: null hands the next target back to the planner (meta#10)
+    // instead of looping back to whatever field this cycle just finished.
+    task: { ...withPhase(task, "TRAVEL_TO_ASTEROID"), marketWaypoint: null, tradeSymbol: null, asteroidWaypoint: null },
     event: "mining_cycle_complete",
     detail: { shipSymbol: task.shipSymbol },
   };
