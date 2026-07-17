@@ -1,17 +1,22 @@
 # automation-service
 
-Autopilot lifecycle, mining loop, planner, and append-only event log for the
-SpaceTraders fleet ([meta#8](https://github.com/V-M-Pioneer-Trading/meta/issues/8),
+Autopilot lifecycle, mining loop, planner, shadow mode, and append-only event
+log for the SpaceTraders fleet
+([meta#8](https://github.com/V-M-Pioneer-Trading/meta/issues/8),
 [meta#9](https://github.com/V-M-Pioneer-Trading/meta/issues/9),
-[meta#10](https://github.com/V-M-Pioneer-Trading/meta/issues/10)).
+[meta#10](https://github.com/V-M-Pioneer-Trading/meta/issues/10),
+[meta#21](https://github.com/V-M-Pioneer-Trading/meta/issues/21)).
 
 ## What it does
 
-- **Arm**: `POST /autopilot/arm { token }` holds the SpaceTraders account
-  token **in memory only** — nothing token-shaped is ever written to
+- **Arm**: `POST /autopilot/arm { token, mode? }` holds the SpaceTraders
+  account token **in memory only** — nothing token-shaped is ever written to
   Postgres or echoed back. A restart always disarms; there is no
   auto-resume. Arming is allowed from any status (including re-arming after
   a pause or abort), and starts the mining scheduler if one is configured.
+  `mode` is `"live"` (default) or `"shadow"` — see below. Switching between
+  them always goes through an explicit re-arm; there's no other way to
+  change it.
 - **Pause**: `POST /autopilot/pause` — only valid while armed. The scheduler
   keeps polling so an already-dispatched wait (a transit or a cooldown) gets
   to finish and its result gets recorded, but no *new* action is dispatched
@@ -19,7 +24,8 @@ SpaceTraders fleet ([meta#8](https://github.com/V-M-Pioneer-Trading/meta/issues/
 - **Abort**: `POST /autopilot/abort` — valid while armed or paused, clears
   the held token and stops the scheduler immediately (no further dispatch,
   not even finishing an in-flight wait).
-- **Status**: `GET /autopilot/status` — current lifecycle state.
+- **Status**: `GET /autopilot/status` — current lifecycle state and mode
+  (`mode` is `null` whenever no token is held, i.e. disarmed or aborted).
 - **Event log**: every transition and every mining action is appended to
   Postgres (`GET /autopilot/events?limit=`, newest first) and survives
   restarts even though the lifecycle state itself does not.
@@ -135,6 +141,27 @@ unknown name, `400` for a value outside `[min, max]`.
 | `fuel.creditsPerUnitDistance` | `5` | Assumed credits cost per unit of travel distance. |
 | `credit.reserveFloor` | `0` | The planner never assigns work that would drop credits below this. |
 | `mine.failureRetryLimit` | `3` | Consecutive tick failures on one target before reassigning away from it. |
+
+## Shadow mode (meta#21)
+
+Arming with `mode: "shadow"` runs the planner's full scoring/assignment cycle
+on the same schedule as live mode, and logs every decision as a
+`planner_shadow_assignment` event (same scoring-input detail shape as live's
+`planner_assignment`) — but never touches `ship_task` and never calls
+`advanceMiningTask`, which is where every ship-action call to fleet-service
+lives. Nothing is ever "assigned" for real in shadow, so the same cycle
+recomputes and re-logs every tick: a continuous preview of what live mode
+would decide, safe to run unattended before trusting it with a live session.
+
+Switching from shadow to live (or back) always requires an explicit re-arm —
+there's no other way to change `mode`, so an operator can't accidentally
+drift from dry-run into live dispatch mid-session. Switching live to shadow
+while a live dispatch is genuinely in flight (a real navigate/extract/sell
+call already sent) doesn't undo that call — SpaceTraders has already acted
+on it — but the scheduler discards its result rather than persisting or
+logging it as something the (now-shadow) autopilot did; the ship's
+`ship_task` phase resumes from wherever it was before the switch the next
+time the operator re-arms live.
 
 ## Configuration
 

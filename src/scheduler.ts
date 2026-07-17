@@ -55,9 +55,31 @@ export class MiningScheduler {
     this.timer = null;
   }
 
+  /**
+   * True unless the operator has since aborted, or switched to shadow mode —
+   * the two ways an already-in-flight live dispatch's result must be discarded
+   * instead of persisted. Deliberately NOT status === "armed": pausing mid-flight
+   * still lets that one in-flight result land (that's the whole point of pause
+   * letting the current wait finish), so "paused" must stay a pass here too.
+   */
+  private isStillLive(): boolean {
+    return this.state.getStatus() !== "aborted" && this.state.getMode() === "live";
+  }
+
   async tick(): Promise<void> {
     const status: AutopilotStatus = this.state.getStatus();
     if (status !== "armed" && status !== "paused") return;
+
+    // Shadow mode (meta#21): run the planner's scoring/assignment cycle and log
+    // every decision, but never touch ship_task or advanceMiningTask — that's
+    // where every ship-action call to fleet-service lives. Nothing is ever
+    // "assigned" in shadow, so the same cycle replays and re-logs every tick,
+    // which is the point: it's a continuous preview of what live mode would do.
+    if (this.state.getMode() === "shadow") {
+      if (status !== "armed") return; // same "nothing new while paused" rule as live
+      await this.runShadowCycle();
+      return;
+    }
 
     const task = await this.repo.getOrCreate(this.config.shipSymbol);
 
@@ -92,10 +114,11 @@ export class MiningScheduler {
     }
     if (result === null) return; // still waiting
 
-    // The dispatch above already happened — it can't be un-sent — but an abort
-    // during those awaits must still stop it from taking further effect: no
-    // persisted phase transition, no event claiming the autopilot did this.
-    if (this.state.getStatus() === "aborted") {
+    // The dispatch above already happened — it can't be un-sent — but an abort,
+    // or a re-arm into shadow mode, during those awaits must still stop it from
+    // taking further effect: no persisted phase transition, no event claiming
+    // the (now shadow, or now stopped) autopilot did this.
+    if (!this.isStillLive()) {
       await this.events.append("mining_discarded_after_abort", { shipSymbol: this.config.shipSymbol, event: result.event });
       return;
     }
@@ -103,6 +126,26 @@ export class MiningScheduler {
     const finalTask: ShipTask = task.failureCount > 0 ? { ...result.task, failureCount: 0 } : result.task;
     await this.repo.save(finalTask);
     await this.events.append(result.event, result.detail);
+  }
+
+  private async runShadowCycle(): Promise<void> {
+    const token = this.state.getToken();
+    if (token === null) return; // disarmed between the status check above and here
+    const authHeader = `Bearer ${token}`;
+
+    const ship = await this.clients.getShip(this.config.shipSymbol, authHeader);
+    const assignment = await this.planner.assignMiningTarget({
+      ship,
+      systemSymbol: ship.nav.systemSymbol,
+      authHeader,
+    });
+
+    // A switch back to live (re-arm), a pause, or an abort mid-flight all mean
+    // this particular decision is stale — still fine to have computed it (it's
+    // read-only), just not worth logging as "what shadow just decided".
+    if (this.state.getStatus() !== "armed" || this.state.getMode() !== "shadow") return;
+
+    await this.events.append("planner_shadow_assignment", assignment.detail);
   }
 
   private async assignTarget(task: ShipTask): Promise<void> {
@@ -118,13 +161,15 @@ export class MiningScheduler {
     });
 
     // "Don't start anything new while paused" applies here too, not just at the
-    // top-of-tick check — a pause landing during these awaits must still stop the
-    // in-flight decision from being persisted as a new assignment.
+    // top-of-tick check — a pause, abort, or switch to shadow mode landing during
+    // these awaits must still stop the in-flight decision from being persisted
+    // as a new live assignment.
     const statusAfterAssignment = this.state.getStatus();
-    if (statusAfterAssignment === "aborted" || statusAfterAssignment === "paused") {
+    if (statusAfterAssignment !== "armed" || this.state.getMode() !== "live") {
       await this.events.append("planner_discarded_after_abort_or_pause", {
         shipSymbol: this.config.shipSymbol,
         status: statusAfterAssignment,
+        mode: this.state.getMode(),
       });
       return;
     }
@@ -152,10 +197,10 @@ export class MiningScheduler {
       failureCount,
     });
 
-    // An abort landing while the failed dispatch was in flight must still stop
-    // this failure from mutating ship_task — same discard invariant as the
-    // success path above, just for the error path.
-    if (this.state.getStatus() === "aborted") return;
+    // An abort, or a switch to shadow mode, landing while the failed dispatch
+    // was in flight must still stop this failure from mutating ship_task —
+    // same discard invariant as the success path above, just for the error path.
+    if (!this.isStillLive()) return;
 
     // A trade good already sits in the cargo hold uncommitted to any sale (it was
     // extracted but the market/sell leg is what's failing) — abandoning the

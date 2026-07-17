@@ -1,6 +1,6 @@
 import express from "express";
 import { Pool } from "pg";
-import { AutopilotState, InvalidTransitionError } from "./autopilotState";
+import { AutopilotMode, AutopilotState, InvalidTransitionError } from "./autopilotState";
 import { Clock, systemClock } from "./clock";
 import { ServiceConfig, configFromEnv } from "./config";
 import { createPool, migrate } from "./db";
@@ -54,7 +54,7 @@ export function createApp(pool: Pool, clock: Clock = systemClock, mining?: Minin
   });
 
   app.get("/autopilot/status", (_req, res) => {
-    res.json({ status: state.getStatus() });
+    res.json({ status: state.getStatus(), mode: state.getMode() });
   });
 
   app.post(
@@ -65,11 +65,16 @@ export function createApp(pool: Pool, clock: Clock = systemClock, mining?: Minin
         res.status(400).json({ error: { message: "token is required" } });
         return;
       }
+      const mode: unknown = req.body?.mode ?? "live";
+      if (mode !== "live" && mode !== "shadow") {
+        res.status(400).json({ error: { message: 'mode must be "live" or "shadow"' } });
+        return;
+      }
       const from = state.getStatus();
-      state.arm(token);
+      state.arm(token, mode as AutopilotMode);
       scheduler?.start();
-      await events.append("armed", { from });
-      res.json({ status: state.getStatus() });
+      await events.append("armed", { from, mode });
+      res.json({ status: state.getStatus(), mode: state.getMode() });
     })
   );
 
@@ -80,7 +85,7 @@ export function createApp(pool: Pool, clock: Clock = systemClock, mining?: Minin
         state[action]();
         if (action === "abort") scheduler?.stop();
         await events.append(eventType, { from });
-        res.json({ status: state.getStatus() });
+        res.json({ status: state.getStatus(), mode: state.getMode() });
       } catch (err) {
         if (err instanceof InvalidTransitionError) {
           res.status(409).json({ error: { message: err.message } });

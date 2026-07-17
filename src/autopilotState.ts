@@ -1,4 +1,5 @@
 export type AutopilotStatus = "disarmed" | "armed" | "paused" | "aborted";
+export type AutopilotMode = "live" | "shadow";
 
 export class InvalidTransitionError extends Error {
   constructor(public action: string, public from: AutopilotStatus) {
@@ -17,14 +18,22 @@ const ABORT_ALLOWED_FROM: AutopilotStatus[] = ["armed", "paused"];
 export class AutopilotState {
   private status: AutopilotStatus = "disarmed";
   private token: string | null = null;
+  // Follows the token's lifecycle (set on arm, cleared on abort, unchanged by
+  // pause) rather than status's — mode is only meaningful while a token is held.
+  private mode: AutopilotMode | null = null;
 
   getStatus(): AutopilotStatus {
     return this.status;
   }
 
-  /** Arming (or re-arming, from any state) replaces the held token. */
-  arm(token: string): void {
+  getMode(): AutopilotMode | null {
+    return this.mode;
+  }
+
+  /** Arming (or re-arming, from any state) replaces the held token and mode. Switching shadow<->live always goes through here. */
+  arm(token: string, mode: AutopilotMode = "live"): void {
     this.token = token;
+    this.mode = mode;
     this.status = "armed";
   }
 
@@ -46,5 +55,6 @@ export class AutopilotState {
     }
     this.status = "aborted";
     this.token = null;
+    this.mode = null;
   }
 }

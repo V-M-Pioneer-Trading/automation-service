@@ -35,7 +35,7 @@ describe("automation-service autopilot lifecycle", () => {
   it("starts disarmed", async () => {
     const res = await request(app()).get("/autopilot/status");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: "disarmed" });
+    expect(res.body).toEqual({ status: "disarmed", mode: null });
   });
 
   it("arms with a token and logs the transition, without persisting the token", async () => {
@@ -44,10 +44,10 @@ describe("automation-service autopilot lifecycle", () => {
 
     const armRes = await request(gateway).post("/autopilot/arm").send({ token: "secret-st-token" });
     expect(armRes.status).toBe(200);
-    expect(armRes.body).toEqual({ status: "armed" });
+    expect(armRes.body).toEqual({ status: "armed", mode: "live" });
 
     const statusRes = await request(gateway).get("/autopilot/status");
-    expect(statusRes.body).toEqual({ status: "armed" });
+    expect(statusRes.body).toEqual({ status: "armed", mode: "live" });
 
     const eventsRes = await request(gateway).get("/autopilot/events");
     expect(eventsRes.body.events).toHaveLength(1);
@@ -71,7 +71,7 @@ describe("automation-service autopilot lifecycle", () => {
 
     const res = await request(gateway).post("/autopilot/pause");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: "paused" });
+    expect(res.body).toEqual({ status: "paused", mode: "live" });
 
     const eventsRes = await request(gateway).get("/autopilot/events");
     expect(eventsRes.body.events[0]).toMatchObject({ type: "paused", detail: { from: "armed" } });
@@ -89,7 +89,7 @@ describe("automation-service autopilot lifecycle", () => {
 
     const res = await request(gateway).post("/autopilot/abort");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: "aborted" });
+    expect(res.body).toEqual({ status: "aborted", mode: null });
 
     const eventsRes = await request(gateway).get("/autopilot/events");
     expect(eventsRes.body.events[0]).toMatchObject({ type: "aborted", detail: { from: "armed" } });
@@ -102,7 +102,7 @@ describe("automation-service autopilot lifecycle", () => {
 
     const res = await request(gateway).post("/autopilot/abort");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: "aborted" });
+    expect(res.body).toEqual({ status: "aborted", mode: null });
   });
 
   it("rejects aborting when disarmed", async () => {
@@ -117,7 +117,7 @@ describe("automation-service autopilot lifecycle", () => {
 
     const res = await request(gateway).post("/autopilot/arm").send({ token: "t2" });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: "armed" });
+    expect(res.body).toEqual({ status: "armed", mode: "live" });
   });
 
   it("a fresh app instance (simulated restart) always starts disarmed even though prior events persisted", async () => {
