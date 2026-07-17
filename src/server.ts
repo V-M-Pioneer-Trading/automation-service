@@ -5,6 +5,9 @@ import { Clock, systemClock } from "./clock";
 import { ServiceConfig, configFromEnv } from "./config";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
+import { createGameClients, UpstreamCallError } from "./gameClients";
+import { MiningScheduler } from "./scheduler";
+import { ShipTaskRepo } from "./shipTaskRepo";
 
 const MAX_EVENTS_LIMIT = 1000;
 
@@ -13,12 +16,36 @@ type AsyncHandler = (req: express.Request, res: express.Response) => Promise<voi
 const asyncHandler = (fn: AsyncHandler) => (req: express.Request, res: express.Response, next: express.NextFunction) =>
   fn(req, res).catch(next);
 
-export function createApp(pool: Pool, clock: Clock = systemClock) {
+export interface MiningConfig {
+  navigationServiceUrl: string;
+  agentServiceUrl: string;
+  fleetServiceUrl: string;
+  miningShipSymbol: string;
+  miningAsteroidWaypoint: string;
+  schedulerIntervalMs: number;
+}
+
+/**
+ * mining: optional so ticket-8's lifecycle-only tests (and any deployment that
+ * hasn't configured a mining target yet) keep working with autopilot arm/pause/
+ * abort but no ship-driving scheduler at all.
+ */
+export function createApp(pool: Pool, clock: Clock = systemClock, mining?: MiningConfig) {
   const app = express();
   app.use(express.json());
 
   const state = new AutopilotState();
   const events = new EventLog(pool, clock);
+  const shipTaskRepo = new ShipTaskRepo(pool, clock);
+
+  const scheduler =
+    mining !== undefined
+      ? new MiningScheduler(state, shipTaskRepo, events, createGameClients(mining), clock, {
+          shipSymbol: mining.miningShipSymbol,
+          asteroidWaypoint: mining.miningAsteroidWaypoint,
+          intervalMs: mining.schedulerIntervalMs,
+        })
+      : null;
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
@@ -38,6 +65,7 @@ export function createApp(pool: Pool, clock: Clock = systemClock) {
       }
       const from = state.getStatus();
       state.arm(token);
+      scheduler?.start();
       await events.append("armed", { from });
       res.json({ status: state.getStatus() });
     })
@@ -48,6 +76,7 @@ export function createApp(pool: Pool, clock: Clock = systemClock) {
       try {
         const from = state.getStatus();
         state[action]();
+        if (action === "abort") scheduler?.stop();
         await events.append(eventType, { from });
         res.json({ status: state.getStatus() });
       } catch (err) {
@@ -72,23 +101,39 @@ export function createApp(pool: Pool, clock: Clock = systemClock) {
     })
   );
 
+  if (scheduler !== null) {
+    app.get(
+      "/autopilot/ships/:shipSymbol",
+      asyncHandler(async (req, res) => {
+        const task = await shipTaskRepo.get(req.params.shipSymbol);
+        if (task === null) {
+          res.status(404).json({ error: { message: "no task for this ship yet" } });
+          return;
+        }
+        res.json({ task });
+      })
+    );
+  }
+
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    res.status(500).json({ error: { message: err.message || "internal error" } });
+    const status = err instanceof UpstreamCallError ? err.statusCode : 500;
+    res.status(status).json({ error: { message: err.message || "internal error" } });
   });
 
   return app;
 }
 
 if (require.main === module) {
-  const config: ServiceConfig = configFromEnv();
-  const pool = createPool(config.databaseUrl);
-  const port = Number(process.env.PORT ?? 3003);
-
-  migrate(pool)
+  Promise.resolve()
     .then(() => {
-      createApp(pool).listen(port, () => {
-        console.log(`automation-service listening on http://localhost:${port}`);
-      });
+      const config: ServiceConfig = configFromEnv();
+      const pool = createPool(config.databaseUrl);
+      const port = Number(process.env.PORT ?? 3003);
+      return migrate(pool).then(() =>
+        createApp(pool, systemClock, config).listen(port, () => {
+          console.log(`automation-service listening on http://localhost:${port}`);
+        })
+      );
     })
     .catch((err) => {
       console.error("automation-service failed to start:", err);

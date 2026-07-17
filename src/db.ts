@@ -19,4 +19,20 @@ export async function migrate(pool: Pool): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS event_log_occurred_at_id_idx ON event_log (occurred_at DESC, id DESC)
   `);
+
+  // One row per ship under autopilot control. Survives restarts (per story 14)
+  // even though AutopilotState's armed/paused/aborted status does not — a
+  // restart disarms, but re-arming resumes each ship from its persisted phase
+  // instead of re-running completed work.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ship_task (
+      ship_symbol TEXT PRIMARY KEY,
+      phase TEXT NOT NULL,
+      waiting_until TIMESTAMPTZ,
+      survey JSONB,
+      trade_symbol TEXT,
+      market_waypoint TEXT,
+      updated_at TIMESTAMPTZ NOT NULL
+    )
+  `);
 }
