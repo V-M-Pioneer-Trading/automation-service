@@ -40,7 +40,29 @@ export interface AgentSnapshot {
 
 export interface MarketData {
   symbol: string;
-  tradeGoods?: { symbol: string; sellPrice: number }[];
+  tradeGoods?: { symbol: string; sellPrice: number; purchasePrice: number }[];
+}
+
+export interface ContractDelivery {
+  tradeSymbol: string;
+  destinationSymbol: string;
+  unitsRequired: number;
+  unitsFulfilled: number;
+}
+
+export interface Contract {
+  id: string;
+  factionSymbol: string;
+  type: string;
+  terms: {
+    deadline: string;
+    payment: { onAccepted: number; onFulfilled: number };
+    deliver: ContractDelivery[];
+  };
+  accepted: boolean;
+  fulfilled: boolean;
+  expiration: string;
+  deadlineToAccept: string;
 }
 
 export class UpstreamCallError extends Error {
@@ -89,6 +111,22 @@ export function createGameClients(config: {
 
     getAgent: (authHeader: string) => callJson<AgentSnapshot>(`${config.agentServiceUrl}/agent`, authHeader),
 
+    getContracts: (authHeader: string) => callJson<Contract[]>(`${config.agentServiceUrl}/contracts`, authHeader),
+
+    acceptContract: (contractId: string, authHeader: string) =>
+      callJson<{ agent: AgentSnapshot; contract: Contract }>(
+        `${config.agentServiceUrl}/contracts/${contractId}/accept`,
+        authHeader,
+        { method: "POST" }
+      ),
+
+    fulfillContract: (contractId: string, authHeader: string) =>
+      callJson<{ agent: AgentSnapshot; contract: Contract }>(
+        `${config.agentServiceUrl}/contracts/${contractId}/fulfill`,
+        authHeader,
+        { method: "POST" }
+      ),
+
     getSystemWaypoints: (systemSymbol: string, authHeader: string) =>
       callJson<{ data: WaypointSummary[] }>(
         `${config.navigationServiceUrl}/systems/${systemSymbol}/waypoints`,
@@ -123,6 +161,24 @@ export function createGameClients(config: {
       }),
 
     refuel: (shipSymbol: string, authHeader: string) => fleetAction(shipSymbol, "refuel", authHeader),
+
+    purchase: (shipSymbol: string, tradeSymbol: string, units: number, authHeader: string) =>
+      fleetAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "purchase", authHeader, {
+        symbol: tradeSymbol,
+        units,
+      }),
+
+    deliverContract: (
+      contractId: string,
+      shipSymbol: string,
+      tradeSymbol: string,
+      units: number,
+      authHeader: string
+    ) =>
+      callJson<{ data: { contract: Contract } }>(`${config.fleetServiceUrl}/contracts/${contractId}/deliver`, authHeader, {
+        method: "POST",
+        body: JSON.stringify({ shipSymbol, tradeSymbol, units }),
+      }),
   };
 }
 

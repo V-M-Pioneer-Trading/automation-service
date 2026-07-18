@@ -1,6 +1,6 @@
 import { Clock } from "./clock";
 import { GameClients, ShipSnapshot } from "./gameClients";
-import { MiningPhase, ShipTask } from "./shipTaskRepo";
+import { ShipTask } from "./shipTaskRepo";
 
 export interface TickResult {
   task: ShipTask;
@@ -8,8 +8,8 @@ export interface TickResult {
   detail: Record<string, unknown>;
 }
 
-const withWait = (task: ShipTask, waitingUntil: Date): ShipTask => ({ ...task, waitingUntil });
-const withPhase = (task: ShipTask, phase: MiningPhase): ShipTask => ({ ...task, phase, waitingUntil: null });
+export const withWait = (task: ShipTask, waitingUntil: Date): ShipTask => ({ ...task, waitingUntil });
+export const withPhase = (task: ShipTask, phase: ShipTask["phase"]): ShipTask => ({ ...task, phase, waitingUntil: null });
 
 /**
  * Advances one ship's mining FSM by exactly one atomic action per call — dispatch
@@ -44,11 +44,13 @@ export async function advanceMiningTask(params: {
       return travelToMarket(task, ship, systemSymbol, clients, authHeader);
     case "SELL":
       return dispatchSell(task, ship, clients, authHeader);
+    default:
+      return null; // a contract phase reached here would be a caller bug — nothing safe to do but wait
   }
 }
 
 function resolveWait(task: ShipTask): TickResult {
-  const next: MiningPhase =
+  const next: ShipTask["phase"] =
     task.phase === "TRAVEL_TO_ASTEROID"
       ? "SURVEY"
       : task.phase === "SURVEY"
@@ -63,18 +65,20 @@ function resolveWait(task: ShipTask): TickResult {
   };
 }
 
-async function travelTo(
+/** Shared with contractTask.ts's FSM (meta#11) — travel is identical regardless of what the ship is traveling for. */
+export async function travelTo(
   task: ShipTask,
   ship: ShipSnapshot,
   destinationWaypoint: string,
   clients: GameClients,
   authHeader: string,
-  arrivedPhase: MiningPhase
+  arrivedPhase: ShipTask["phase"],
+  eventPrefix: "mining" | "contract" = "mining"
 ): Promise<TickResult> {
   if (ship.nav.waypointSymbol === destinationWaypoint && ship.nav.status !== "IN_TRANSIT") {
     return {
       task: withPhase(task, arrivedPhase),
-      event: "mining_arrived",
+      event: `${eventPrefix}_arrived`,
       detail: { shipSymbol: task.shipSymbol, waypoint: destinationWaypoint },
     };
   }
@@ -82,18 +86,18 @@ async function travelTo(
     // Resuming after a restart mid-transit: pick the wait back up from the ship's own ETA.
     return {
       task: withWait(task, new Date(ship.nav.route.arrival)),
-      event: "mining_travel_resumed",
+      event: `${eventPrefix}_travel_resumed`,
       detail: { shipSymbol: task.shipSymbol, arrival: ship.nav.route.arrival },
     };
   }
   if (ship.nav.status === "DOCKED") {
     await clients.orbit(task.shipSymbol, authHeader);
-    return { task, event: "mining_orbit", detail: { shipSymbol: task.shipSymbol } };
+    return { task, event: `${eventPrefix}_orbit`, detail: { shipSymbol: task.shipSymbol } };
   }
   const res = await clients.navigate(task.shipSymbol, destinationWaypoint, authHeader);
   return {
     task: withWait(task, new Date(res.data.nav.route.arrival)),
-    event: "mining_navigate",
+    event: `${eventPrefix}_navigate`,
     detail: { shipSymbol: task.shipSymbol, destination: destinationWaypoint, arrival: res.data.nav.route.arrival },
   };
 }

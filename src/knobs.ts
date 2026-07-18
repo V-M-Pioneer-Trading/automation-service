@@ -121,6 +121,20 @@ export const KNOB_DEFINITIONS: KnobDefinition[] = [
     max: 1440,
     description: "Minutes an already-fired anomaly (by dedupe key) is suppressed from re-firing.",
   },
+  {
+    name: "contract.taskWeight",
+    default: 1,
+    min: 0,
+    max: 10,
+    description: "Multiplier applied to every contract-task score, in the same units as mine.taskWeight.",
+  },
+  {
+    name: "contract.minProfitThreshold",
+    default: 0,
+    min: -1_000_000,
+    max: 1_000_000,
+    description: "A contract is only accepted if its deterministic expected profit exceeds this.",
+  },
 ];
 
 export interface Knob {

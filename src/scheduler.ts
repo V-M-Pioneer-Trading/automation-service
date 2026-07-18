@@ -1,20 +1,41 @@
 import { AutopilotState, AutopilotStatus } from "./autopilotState";
 import { Clock } from "./clock";
+import { ContractRepo } from "./contractRepo";
+import { discoverAndEvaluateContracts } from "./contractScheduler";
+import { advanceContractTask } from "./contractTask";
 import { EventLog } from "./eventLog";
 import { GameClients } from "./gameClients";
 import { KnobRepo } from "./knobs";
-import { advanceMiningTask } from "./miningTask";
+import { advanceMiningTask, TickResult } from "./miningTask";
 import { Planner } from "./planner";
 import { ShipTask, ShipTaskRepo } from "./shipTaskRepo";
 
+const FRESH_MINING_TASK: Pick<
+  ShipTask,
+  "taskKind" | "phase" | "waitingUntil" | "survey" | "tradeSymbol" | "marketWaypoint" | "asteroidWaypoint" | "contractId" | "destinationWaypoint" | "unitsDelivered" | "failureCount"
+> = {
+  taskKind: "mining",
+  phase: "TRAVEL_TO_ASTEROID",
+  waitingUntil: null,
+  survey: null,
+  tradeSymbol: null,
+  marketWaypoint: null,
+  asteroidWaypoint: null,
+  contractId: null,
+  destinationWaypoint: null,
+  unitsDelivered: 0,
+  failureCount: 0,
+};
+
 /**
- * Polls the configured ship's mining task on a fixed interval. Runs while armed
- * (full progression) or paused (only finishes an already-dispatched wait, never
+ * Polls the configured ship's task — mining or contract (meta#11), whichever
+ * the planner assigned — on a fixed interval. Runs while armed (full
+ * progression) or paused (only finishes an already-dispatched wait, never
  * starts a new action — that's what makes pause take effect between steps
  * instead of aborting mid-cycle). Stops entirely on disarm/abort.
  *
- * A ship with no assigned asteroidWaypoint gets one from the planner (meta#10)
- * as its own tick's one atomic action, before any FSM dispatch — so a brand new
+ * A ship with no assigned target gets one from the planner (meta#10/#11) as
+ * its own tick's one atomic action, before any FSM dispatch — so a brand new
  * task, and a task whose cycle just completed, both get a target on their very
  * next tick rather than waiting on any separate periodic process.
  */
@@ -24,6 +45,14 @@ export class MiningScheduler {
   // period; without this guard, setInterval fires again mid-tick and two ticks
   // race on the same ship_task row, double-dispatching an action.
   private ticking = false;
+  // Tracks the in-flight tick so stop() can await it, and a hard flag checked
+  // at tick() entry so a timer callback already queued when stop() runs can't
+  // still start a new tick afterward — assignTarget() (meta#11's contract
+  // discovery folded in) can now run several sequential HTTP calls, widening
+  // the window a leftover tick could otherwise still be running in when the
+  // next test's TRUNCATE (or a real re-arm) lands.
+  private inFlight: Promise<void> | null = null;
+  private stopped = false;
 
   constructor(
     private state: AutopilotState,
@@ -33,6 +62,7 @@ export class MiningScheduler {
     private clock: Clock,
     private planner: Planner,
     private knobs: KnobRepo,
+    private contracts: ContractRepo,
     private config: { shipSymbol: string; intervalMs: number }
   ) {}
 
@@ -41,18 +71,21 @@ export class MiningScheduler {
     this.timer = setInterval(() => {
       if (this.ticking) return;
       this.ticking = true;
-      this.tick()
+      this.inFlight = this.tick()
         .catch((err) => this.events.append("mining_tick_error", { message: String(err) }))
         .finally(() => {
           this.ticking = false;
+          this.inFlight = null;
         });
     }, this.config.intervalMs);
     this.timer.unref?.();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopped = true;
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
+    if (this.inFlight !== null) await this.inFlight;
   }
 
   /**
@@ -67,11 +100,12 @@ export class MiningScheduler {
   }
 
   async tick(): Promise<void> {
+    if (this.stopped) return;
     const status: AutopilotStatus = this.state.getStatus();
     if (status !== "armed" && status !== "paused") return;
 
     // Shadow mode (meta#21): run the planner's scoring/assignment cycle and log
-    // every decision, but never touch ship_task or advanceMiningTask — that's
+    // every decision, but never touch ship_task or advance*Task — that's
     // where every ship-action call to fleet-service lives. Nothing is ever
     // "assigned" in shadow, so the same cycle replays and re-logs every tick,
     // which is the point: it's a continuous preview of what live mode would do.
@@ -83,7 +117,7 @@ export class MiningScheduler {
 
     const task = await this.repo.getOrCreate(this.config.shipSymbol);
 
-    if (task.asteroidWaypoint === null) {
+    if (task.asteroidWaypoint === null && task.contractId === null) {
       if (status === "paused") return; // don't start a new assignment while paused
       await this.assignTarget(task);
       return; // assignment is this tick's one atomic action; dispatch starts next tick
@@ -97,17 +131,34 @@ export class MiningScheduler {
 
     const ship = await this.clients.getShip(this.config.shipSymbol, authHeader);
 
-    let result;
+    let result: TickResult | null;
     try {
-      result = await advanceMiningTask({
-        task,
-        ship,
-        systemSymbol: ship.nav.systemSymbol,
-        asteroidWaypoint: task.asteroidWaypoint,
-        clients: this.clients,
-        clock: this.clock,
-        authHeader,
-      });
+      result =
+        task.taskKind === "contract"
+          ? await advanceContractTask({
+              task,
+              ship,
+              contractId: task.contractId!,
+              tradeSymbol: task.tradeSymbol!,
+              procurementMarket: task.marketWaypoint!,
+              destinationWaypoint: task.destinationWaypoint!,
+              // The contract row's unitsRequired is the total this ship must
+              // deliver (fixed at assignment); task.unitsDelivered tracks
+              // progress against that same total across possibly several trips.
+              unitsRequired: (await this.contracts.get(task.contractId!))!.unitsRequired,
+              clients: this.clients,
+              clock: this.clock,
+              authHeader,
+            })
+          : await advanceMiningTask({
+              task,
+              ship,
+              systemSymbol: ship.nav.systemSymbol,
+              asteroidWaypoint: task.asteroidWaypoint!,
+              clients: this.clients,
+              clock: this.clock,
+              authHeader,
+            });
     } catch (err) {
       await this.handleTickFailure(task, err);
       return;
@@ -123,7 +174,16 @@ export class MiningScheduler {
       return;
     }
 
-    const finalTask: ShipTask = task.failureCount > 0 ? { ...result.task, failureCount: 0 } : result.task;
+    let finalTask: ShipTask = task.failureCount > 0 ? { ...result.task, failureCount: 0 } : result.task;
+
+    // A contract just fulfilled: hand the ship back to the planner (mining or
+    // the next accepted contract) on its very next tick, same pattern as
+    // mining_cycle_complete handing an exhausted asteroid field back.
+    if (result.event === "contract_fulfilled") {
+      await this.contracts.setStatus(task.contractId!, "fulfilled");
+      finalTask = { ...finalTask, ...FRESH_MINING_TASK };
+    }
+
     await this.repo.save(finalTask);
     await this.events.append(result.event, result.detail);
   }
@@ -134,10 +194,12 @@ export class MiningScheduler {
     const authHeader = `Bearer ${token}`;
 
     const ship = await this.clients.getShip(this.config.shipSymbol, authHeader);
-    const assignment = await this.planner.assignMiningTarget({
+    const acceptedContracts = await this.contracts.listAccepted();
+    const assignment = await this.planner.assignTarget({
       ship,
       systemSymbol: ship.nav.systemSymbol,
       authHeader,
+      acceptedContracts,
     });
 
     // A switch back to live (re-arm), a pause, or an abort mid-flight all mean
@@ -153,11 +215,33 @@ export class MiningScheduler {
     if (token === null) return; // disarmed between the status check above and here
     const authHeader = `Bearer ${token}`;
 
+    // Catch up on any contract SpaceTraders has on offer that this agent
+    // hasn't seen yet before scoring — otherwise a fresh, higher-scoring
+    // contract could still be mid-evaluation when this same tick locks the
+    // ship into a mining target instead (meta#11). A failure here (agent-service
+    // hiccup, no contracts endpoint configured, etc.) must not block mining —
+    // contracts are additive on top of mining, never a hard dependency of it.
+    try {
+      await discoverAndEvaluateContracts({
+        repo: this.contracts,
+        events: this.events,
+        clients: this.clients,
+        knobs: this.knobs,
+        planner: this.planner,
+        shipSymbol: this.config.shipSymbol,
+        authHeader,
+      });
+    } catch (err) {
+      await this.events.append("contract_discovery_error", { message: String(err) });
+    }
+
     const ship = await this.clients.getShip(this.config.shipSymbol, authHeader);
-    const assignment = await this.planner.assignMiningTarget({
+    const acceptedContracts = await this.contracts.listAccepted();
+    const assignment = await this.planner.assignTarget({
       ship,
       systemSymbol: ship.nav.systemSymbol,
       authHeader,
+      acceptedContracts,
     });
 
     // "Don't start anything new while paused" applies here too, not just at the
@@ -175,11 +259,32 @@ export class MiningScheduler {
     }
 
     await this.events.append("planner_assignment", assignment.detail);
-    if (assignment.asteroidWaypoint === null) {
+
+    if (assignment.kind === "none") {
       await this.events.append("planner_no_viable_target", { shipSymbol: this.config.shipSymbol });
       return;
     }
-    await this.repo.save({ ...task, asteroidWaypoint: assignment.asteroidWaypoint, failureCount: 0 });
+
+    if (assignment.kind === "mine") {
+      await this.repo.save({ ...task, ...FRESH_MINING_TASK, asteroidWaypoint: assignment.asteroidWaypoint });
+      return;
+    }
+
+    await this.contracts.setStatus(assignment.contractId, "assigned");
+    await this.repo.save({
+      ...task,
+      taskKind: "contract",
+      phase: "CONTRACT_TRAVEL_TO_MARKET",
+      waitingUntil: null,
+      survey: null,
+      tradeSymbol: assignment.tradeSymbol,
+      marketWaypoint: assignment.procurementMarket,
+      asteroidWaypoint: null,
+      contractId: assignment.contractId,
+      destinationWaypoint: assignment.destinationWaypoint,
+      unitsDelivered: 0,
+      failureCount: 0,
+    });
   }
 
   /**
@@ -202,11 +307,11 @@ export class MiningScheduler {
     // same discard invariant as the success path above, just for the error path.
     if (!this.isStillLive()) return;
 
-    // A trade good already sits in the cargo hold uncommitted to any sale (it was
-    // extracted but the market/sell leg is what's failing) — abandoning the
-    // target here would strand that cargo with no code path back to selling it.
-    // Keep retrying the same target indefinitely rather than reassigning away
-    // from it while cargo is at stake.
+    // A trade good already sits in the cargo hold uncommitted (extracted but not
+    // sold, or purchased but not delivered) — abandoning the target here would
+    // strand that cargo with no code path back to selling/delivering it. Keep
+    // retrying the same target indefinitely rather than reassigning away from
+    // it while cargo is at stake.
     const cargoAtStake = task.tradeSymbol !== null;
 
     if (failureCount < retryLimit || cargoAtStake) {
@@ -216,17 +321,14 @@ export class MiningScheduler {
     await this.events.append("mining_task_failed", {
       shipSymbol: this.config.shipSymbol,
       asteroidWaypoint: task.asteroidWaypoint,
+      contractId: task.contractId,
       failureCount,
     });
-    await this.repo.save({
-      ...task,
-      phase: "TRAVEL_TO_ASTEROID",
-      waitingUntil: null,
-      survey: null,
-      tradeSymbol: null,
-      marketWaypoint: null,
-      asteroidWaypoint: null,
-      failureCount: 0,
-    });
+    // Release an abandoned contract back to the pool rather than leaving it
+    // permanently "assigned" to a ship that's given up on it.
+    if (task.taskKind === "contract" && task.contractId !== null) {
+      await this.contracts.setStatus(task.contractId, "accepted");
+    }
+    await this.repo.save({ ...task, ...FRESH_MINING_TASK });
   }
 }

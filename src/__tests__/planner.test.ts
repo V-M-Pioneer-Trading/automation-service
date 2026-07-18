@@ -86,6 +86,10 @@ describe("automation-service planner (meta#10)", () => {
         respondJson(res, 200, makeShip());
         return;
       }
+      if (req.url === "/contracts" && req.method === "GET") {
+        respondJson(res, 200, []); // no contracts in this suite — mining-only fixtures
+        return;
+      }
       respondJson(res, 404, { error: "not found" });
     });
 

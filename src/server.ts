@@ -5,6 +5,7 @@ import { AnomalyConfig, AnomalyScheduler } from "./anomalyScheduler";
 import { AutopilotMode, AutopilotState, InvalidTransitionError } from "./autopilotState";
 import { Clock, systemClock } from "./clock";
 import { ServiceConfig, configFromEnv } from "./config";
+import { ContractRepo } from "./contractRepo";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients, UpstreamCallError } from "./gameClients";
@@ -88,12 +89,14 @@ export function createApp(
   const knobs = new KnobRepo(pool);
   const metricsRepo = new MetricsRepo(pool, clock);
   const anomalyRepo = new AnomalyRepo(pool, clock);
+  const contractRepo = new ContractRepo(pool, clock);
 
   const gameClients = mining !== undefined ? createGameClients(mining) : null;
+  const planner = gameClients !== null ? new Planner(gameClients, knobs) : null;
 
   const scheduler =
-    mining !== undefined && gameClients !== null
-      ? new MiningScheduler(state, shipTaskRepo, events, gameClients, clock, new Planner(gameClients, knobs), knobs, {
+    mining !== undefined && gameClients !== null && planner !== null
+      ? new MiningScheduler(state, shipTaskRepo, events, gameClients, clock, planner, knobs, contractRepo, {
           shipSymbol: mining.miningShipSymbol,
           intervalMs: mining.schedulerIntervalMs,
         })
@@ -159,7 +162,10 @@ export function createApp(
       try {
         const from = state.getStatus();
         state[action]();
-        if (action === "abort") scheduler?.stop();
+        // Awaited so the abort response only returns once any in-flight tick
+        // (assignTarget can now run several sequential HTTP calls for meta#11's
+        // contract discovery) has actually finished, not just been told to stop.
+        if (action === "abort") await scheduler?.stop();
         await events.append(eventType, { from });
         res.json({ status: state.getStatus(), mode: state.getMode() });
       } catch (err) {
@@ -270,9 +276,9 @@ export function createApp(
   // short-lived apps in one process need an explicit way to stop these
   // background timers, or a leaked scheduler from an earlier test keeps
   // ticking against (and polluting) a later test's freshly-truncated tables.
-  // Deliberately does NOT stop the mining scheduler — that one IS tied to
-  // arm/abort (see the "abort" transition above), so a test that configures
-  // mining should call POST /autopilot/abort for that, same as production.
+  // Deliberately does NOT stop the mining/contract schedulers — those ARE tied
+  // to arm/abort (see the "abort" transition above), so a test that configures
+  // mining should call POST /autopilot/abort for those, same as production.
   app.locals.stopBackgroundSchedulers = async () => {
     await Promise.all([metricsScheduler?.stop(), anomalyScheduler?.stop()]);
   };

@@ -47,6 +47,15 @@ export async function migrate(pool: Pool): Promise<void> {
   await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS asteroid_waypoint TEXT`);
   await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS failure_count INTEGER NOT NULL DEFAULT 0`);
 
+  // Contract loop (meta#11): a ship's task can be either 'mining' (the existing
+  // phases above) or 'contract' (phases in contractTask.ts), sharing the same
+  // row/columns rather than a parallel task table — the planner picks whichever
+  // wins the credits-per-hour scoring, and both kinds resume identically on restart.
+  await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS task_kind TEXT NOT NULL DEFAULT 'mining'`);
+  await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS contract_id TEXT`);
+  await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS destination_waypoint TEXT`);
+  await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS units_delivered INTEGER NOT NULL DEFAULT 0`);
+
   // Planner knobs (meta#10): value + default + min/max, schema-validated on write.
   // Seeded from KNOB_DEFINITIONS below; existing rows are left alone so an operator's
   // tuning survives a redeploy.
@@ -106,5 +115,25 @@ export async function migrate(pool: Pool): Promise<void> {
   `);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS anomaly_detected_at_idx ON anomaly (detected_at DESC)
+  `);
+
+  // Contract loop (meta#11): one row per contract this agent has ever seen,
+  // recording the deterministic evaluation decision and its inputs so a
+  // contract is never re-evaluated (or re-accepted) once decided.
+  // v1 simplification: tracks only the contract's first deliverable — see
+  // README for contracts with more than one deliverable.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS contract (
+      contract_id TEXT PRIMARY KEY,
+      trade_symbol TEXT NOT NULL,
+      destination_waypoint TEXT NOT NULL,
+      units_required INTEGER NOT NULL,
+      total_payment DOUBLE PRECISION NOT NULL,
+      status TEXT NOT NULL,
+      expected_profit DOUBLE PRECISION NOT NULL,
+      cycle_hours DOUBLE PRECISION NOT NULL,
+      procurement_market TEXT,
+      evaluated_at TIMESTAMPTZ NOT NULL
+    )
   `);
 }

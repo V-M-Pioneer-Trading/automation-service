@@ -144,6 +144,88 @@ unknown name, `400` for a value outside `[min, max]`.
 | `credit.reserveFloor` | `0` | The planner never assigns work that would drop credits below this. |
 | `mine.failureRetryLimit` | `3` | Consecutive tick failures on one target before reassigning away from it. |
 
+## Contract loop (meta#11)
+
+A ship that needs a target is offered contracts alongside asteroid fields —
+whichever scores higher in the same expected-credits/hour units wins. A
+second FSM (`advanceContractTask`, mirroring the mining FSM's one-atomic-
+action-per-tick discipline) carries an accepted contract through
+`CONTRACT_TRAVEL_TO_MARKET → CONTRACT_PURCHASE → CONTRACT_TRAVEL_TO_DESTINATION
+→ CONTRACT_DELIVER → CONTRACT_FULFILL`, reusing the mining FSM's travel/dock
+helpers since traveling for a contract behaves identically to traveling to
+mine. Both FSMs share one `ship_task` row (`task_kind` distinguishes them) —
+a ship works one target at a time, whichever kind it is.
+
+**Discovery and evaluation**: right before every scoring decision, the
+scheduler calls `discoverAndEvaluateContracts` synchronously — fetches
+contracts not yet seen, evaluates each deterministically
+(`Planner.evaluateContract`: cheapest in-system market selling the
+deliverable good, fuel-aware route cost from the ship's position through that
+market to the delivery destination, `expectedProfit = totalPayment -
+procurementCost - travelCost`), and accepts or declines immediately based on
+`contract.minProfitThreshold`. This is a plain function, not a background
+scheduler — an earlier draft used one, and it raced the mining scheduler's
+own assignment: a fresh, higher-scoring contract could still be mid-
+evaluation when the ship got locked into mining instead. Calling it inline
+guarantees discovery is always caught up before a decision is made. A
+discovery failure (upstream hiccup) is caught and logged
+(`contract_discovery_error`) rather than blocking mining — contracts are
+additive on top of mining, never a hard dependency of it.
+
+**Scoring**: an accepted contract's score is `(expectedProfit × taskWeight) /
+cycleHours`, using the values frozen at evaluation time. The planner never
+lets a contract win assignment if `currentCredits - (totalPayment -
+expectedProfit)` would drop below `credit.reserveFloor` — the same
+protection mining candidates get via their fuel-cost check, using
+`totalPayment - expectedProfit` (procurement + travel cost combined) as a
+conservative upper bound on what accepting would spend.
+
+Every assignment decision — mining candidates, the best accepted contract's
+score, and which one won — is logged as `planner_assignment`, same event
+type mining-only decisions already used (the "none"/"mine" branches flatten
+the mining detail rather than nesting it, so existing consumers reading
+`detail.candidates` keep working unchanged when there are no contracts in
+play).
+
+**Failure and abandonment**: a contract task that fails out
+(`mine.failureRetryLimit` consecutive errors, same knob as mining) releases
+the contract back to `accepted` status rather than leaving it permanently
+`assigned` to a ship that's given up on it, then resets the ship to a fresh
+planner assignment — same pattern as mining's failure-driven reassignment.
+Cargo already purchased toward a contract is treated the same as mining's
+"cargo at stake" rule: the ship keeps retrying rather than abandoning a
+target while cargo it can't easily dispose of sits in the hold.
+
+**v1 simplifications**:
+
+- Only the contract's **first** deliverable is evaluated/worked — multi-good
+  contracts are not yet supported.
+- No standalone background scheduler for contract discovery — see above.
+  With one ship that can only work one target at a time, there's no benefit
+  to ahead-of-time discovery; revisit once multiple ships mean contracts
+  should be pursued ahead of any one ship actually needing work.
+- `discoverAndEvaluateContracts` runs on every assignment tick with no cheap
+  pre-check or cooldown — acceptable given how infrequently a ship actually
+  needs a fresh assignment (once per idle-ship tick, not every scheduler
+  tick), but would need one if that assumption stops holding.
+- Purchase quantity math (`dispatchPurchase`) treats the ship's entire cargo
+  hold as belonging to the contract's trade good — correct for a
+  contract-dedicated ship with an empty hold at assignment time (mining
+  always sells out before handing a ship back to the planner), but would
+  undercount if a ship ever carried an unrelated good into a contract task.
+- The reserve-floor check for contracts uses `totalPayment - expectedProfit`
+  as a combined procurement+travel cost estimate rather than the
+  procurement cost alone, since `ContractRecord` doesn't persist them
+  separately — conservative (may decline a contract mining's equivalent
+  check would allow), not permissive.
+
+### New knobs
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `contract.taskWeight` | `1` | Multiplier applied to every contract-task score, same role as `mine.taskWeight`. |
+| `contract.minProfitThreshold` | `0` | Minimum `expectedProfit` for a contract to be accepted. |
+
 ## Shadow mode (meta#21)
 
 Arming with `mode: "shadow"` runs the planner's full scoring/assignment cycle
