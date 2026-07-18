@@ -29,11 +29,30 @@ export class EventLog {
       "SELECT id, occurred_at, type, detail FROM event_log ORDER BY occurred_at DESC, id DESC LIMIT $1",
       [limit]
     );
-    return rows.map((row) => ({
-      id: String(row.id),
-      occurredAt: row.occurred_at.toISOString(),
-      type: row.type,
-      detail: row.detail,
-    }));
+    return rows.map(rowToEntry);
   }
+
+  /** Events at or after `since`, newest first, optionally restricted to `types`. Used by the meta#15 anomaly checks and digest. */
+  async listSince(since: Date, limit: number, types?: string[]): Promise<EventLogEntry[]> {
+    const { rows } =
+      types === undefined
+        ? await this.pool.query(
+            "SELECT id, occurred_at, type, detail FROM event_log WHERE occurred_at >= $1 ORDER BY occurred_at DESC, id DESC LIMIT $2",
+            [since, limit]
+          )
+        : await this.pool.query(
+            "SELECT id, occurred_at, type, detail FROM event_log WHERE occurred_at >= $1 AND type = ANY($2) ORDER BY occurred_at DESC, id DESC LIMIT $3",
+            [since, types, limit]
+          );
+    return rows.map(rowToEntry);
+  }
+}
+
+function rowToEntry(row: { id: string | number; occurred_at: Date; type: string; detail: Record<string, unknown> }): EventLogEntry {
+  return {
+    id: String(row.id),
+    occurredAt: row.occurred_at.toISOString(),
+    type: row.type,
+    detail: row.detail,
+  };
 }

@@ -1,11 +1,12 @@
 # automation-service
 
-Autopilot lifecycle, mining loop, planner, shadow mode, metrics rollups, and
-append-only event log for the SpaceTraders fleet
+Autopilot lifecycle, mining loop, planner, shadow mode, metrics rollups,
+anomaly detection, and append-only event log for the SpaceTraders fleet
 ([meta#8](https://github.com/V-M-Pioneer-Trading/meta/issues/8),
 [meta#9](https://github.com/V-M-Pioneer-Trading/meta/issues/9),
 [meta#10](https://github.com/V-M-Pioneer-Trading/meta/issues/10),
 [meta#14](https://github.com/V-M-Pioneer-Trading/meta/issues/14),
+[meta#15](https://github.com/V-M-Pioneer-Trading/meta/issues/15),
 [meta#21](https://github.com/V-M-Pioneer-Trading/meta/issues/21)).
 
 ## What it does
@@ -195,6 +196,52 @@ event-log entries together in one bounded response (default 10 rollups / 20
 events, capped at 200 / 100) — shaped to fit an AI context window, which is
 what the future AI supervisor (meta#19) and MCP server (meta#20) will read.
 
+## Anomaly detection (meta#15)
+
+Independent of autopilot arm/pause/abort, once `ANOMALY_WEBHOOK_URL` is
+configured — a background scheduler runs six deterministic health checks on a
+fixed interval (`ANOMALY_INTERVAL_MS`), every threshold a bounded, AI-tunable
+knob:
+
+| Check | Fires when | Knob(s) |
+|---|---|---|
+| `ship_idle` | A mining ship's task hasn't changed phase in over N minutes, while armed and live | `anomaly.shipIdleMinutes` |
+| `profit_drop` | The latest metrics rollup's credits/hour drops below a fraction of the trailing 6h average | `anomaly.profitDropFraction` |
+| `consecutive_failures` | A ship's consecutive tick-failure count reaches a limit (regardless of arm state — a broken ship stays broken until investigated) | `anomaly.consecutiveFailureLimit` |
+| `error_rate` | The fraction of `mining_*` events that are errors, in a trailing window, exceeds a threshold | `anomaly.errorRateThreshold`, `anomaly.errorRateWindowMinutes` |
+| `credits_flat` | Agent credits show no net increase across a trailing window | `anomaly.creditsFlatWindowHours` |
+| `market_stale` | A market priced in the last 24h (i.e. "in active use") hasn't been repriced in over N minutes | `anomaly.marketStalenessMinutes` |
+
+Each anomaly is **persisted before** its webhook delivery is attempted —
+`POST`ed as `{ id, type, dedupeKey, detectedAt, detail }` with up to 3 retries
+and exponential backoff (`WebhookDelivery`). Repeat firings of the same
+underlying condition (by `dedupeKey`) are suppressed for
+`anomaly.dedupeCooldownMinutes` rather than paging the webhook every tick a
+problem stays open. `GET /anomalies/digest?windowMinutes=&anomalyLimit=&eventLimit=`
+returns anomalies plus notable lifecycle/failure events (not every routine
+mining tick) for a requested window — the source for an hourly pull review.
+
+**v1 simplifications**:
+
+- `consecutive_failures` and `credits_flat` are **not** gated on the autopilot
+  being currently armed/live, unlike `ship_idle` — a ship that failed
+  repeatedly before an operator paused to investigate, or a credits trend from
+  before a disarm, is still worth surfacing. This is deliberate, not an
+  oversight.
+- Within one tick, multiple newly-detected anomalies are persisted and
+  delivered **sequentially**, not in parallel — if several checks trip at once
+  against a slow/down webhook, later anomalies in that tick wait out the
+  earlier ones' full retry/backoff budget before being persisted. Acceptable
+  for the expected cadence (rarely more than one distinct condition trips in
+  the same tick); revisit if that assumption stops holding.
+- `market_stale`'s "in active use" window is a fixed 24h lookback, not itself
+  a knob.
+- The credits-flat check's only data source is a snapshot of agent credits
+  logged each tick while armed and live — an anomaly-only deployment with no
+  `MINING_SHIP_SYMBOL` configured never gets these snapshots, so
+  `credits_flat` (and `ship_idle`/`consecutive_failures`, which need a ship
+  task) stay permanently inert in that configuration.
+
 ## Configuration
 
 | Env var | Meaning |
@@ -206,6 +253,8 @@ what the future AI supervisor (meta#19) and MCP server (meta#20) will read.
 | `FLEET_SERVICE_URL` | e.g. `http://fleet-service:3001/api/fleet` (required) |
 | `MINING_SHIP_SYMBOL` | Ship symbol to fly (required) |
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
+| `ANOMALY_WEBHOOK_URL` | Webhook URL for anomaly delivery — anomaly detection is disabled entirely if unset |
+| `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
 | `METRICS_ROLLUP_INTERVAL_MS` | Metrics rollup cadence (default `60000`) |
 
 The asteroid field is no longer configured — the planner (below) chooses it

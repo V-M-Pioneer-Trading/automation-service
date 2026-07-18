@@ -168,19 +168,21 @@ async function findBestMarket(
   tradeSymbol: string,
   clients: GameClients,
   authHeader: string
-): Promise<string | null> {
+): Promise<{ waypoint: string | null; checked: string[] }> {
   const waypoints = await clients.getSystemWaypoints(systemSymbol, authHeader);
   const marketplaces = waypoints.filter((w) => w.traits.some((t) => t.symbol === "MARKETPLACE"));
 
   let best: { waypoint: string; price: number } | null = null;
+  const checked: string[] = [];
   for (const w of marketplaces) {
     const market = await clients.getMarket(w.symbol, authHeader);
+    checked.push(w.symbol);
     const good = market.tradeGoods?.find((g) => g.symbol === tradeSymbol);
     if (good !== undefined && (best === null || good.sellPrice > best.price)) {
       best = { waypoint: w.symbol, price: good.sellPrice };
     }
   }
-  return best?.waypoint ?? null;
+  return { waypoint: best?.waypoint ?? null, checked };
 }
 
 async function travelToMarket(
@@ -191,7 +193,7 @@ async function travelToMarket(
   authHeader: string
 ): Promise<TickResult> {
   if (task.marketWaypoint === null) {
-    const market = await findBestMarket(systemSymbol, task.tradeSymbol ?? "", clients, authHeader);
+    const { waypoint: market, checked } = await findBestMarket(systemSymbol, task.tradeSymbol ?? "", clients, authHeader);
     if (market === null) {
       return {
         task,
@@ -202,7 +204,9 @@ async function travelToMarket(
     return {
       task: { ...task, marketWaypoint: market },
       event: "mining_market_selected",
-      detail: { shipSymbol: task.shipSymbol, market, tradeSymbol: task.tradeSymbol },
+      // marketsChecked feeds the meta#15 market-intel-staleness anomaly check —
+      // every marketplace priced this cycle, not just the one selected.
+      detail: { shipSymbol: task.shipSymbol, market, tradeSymbol: task.tradeSymbol, marketsChecked: checked },
     };
   }
   return travelTo(task, ship, task.marketWaypoint, clients, authHeader, "SELL");

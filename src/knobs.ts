@@ -65,6 +65,62 @@ export const KNOB_DEFINITIONS: KnobDefinition[] = [
     max: 20,
     description: "Consecutive tick failures on one target before the planner reassigns it away.",
   },
+  {
+    name: "anomaly.shipIdleMinutes",
+    default: 10,
+    min: 1,
+    max: 1440,
+    description: "Minutes a ship's task can go without a phase change (while armed and live) before an idle anomaly fires.",
+  },
+  {
+    name: "anomaly.profitDropFraction",
+    default: 0.5,
+    min: 0,
+    max: 1,
+    description: "Fleet profit/hour anomaly fires when the latest rollup drops below this fraction of the trailing 6h average.",
+  },
+  {
+    name: "anomaly.consecutiveFailureLimit",
+    default: 3,
+    min: 1,
+    max: 20,
+    description: "Consecutive tick failures on one ship that raise an anomaly (independent of the planner's own reassignment knob).",
+  },
+  {
+    name: "anomaly.errorRateThreshold",
+    default: 0.1,
+    min: 0,
+    max: 1,
+    description: "Fraction of mining_* events that must be errors within the error-rate window before an anomaly fires.",
+  },
+  {
+    name: "anomaly.errorRateWindowMinutes",
+    default: 5,
+    min: 1,
+    max: 1440,
+    description: "Trailing window over which the SpaceTraders error rate is computed.",
+  },
+  {
+    name: "anomaly.creditsFlatWindowHours",
+    default: 2,
+    min: 0.25,
+    max: 48,
+    description: "Hours over which agent credits must show no net increase before a credits-flat anomaly fires.",
+  },
+  {
+    name: "anomaly.marketStalenessMinutes",
+    default: 30,
+    min: 5,
+    max: 1440,
+    description: "Minutes since a market in active use was last priced before its intel is flagged stale.",
+  },
+  {
+    name: "anomaly.dedupeCooldownMinutes",
+    default: 15,
+    min: 1,
+    max: 1440,
+    description: "Minutes an already-fired anomaly (by dedupe key) is suppressed from re-firing.",
+  },
 ];
 
 export interface Knob {

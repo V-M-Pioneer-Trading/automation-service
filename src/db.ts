@@ -20,6 +20,11 @@ export async function migrate(pool: Pool): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS event_log_occurred_at_id_idx ON event_log (occurred_at DESC, id DESC)
   `);
+  // Anomaly detection (meta#15) filters by exact event type on every tick,
+  // indefinitely — agent_credits_snapshot, mining_market_selected, etc.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS event_log_type_occurred_at_idx ON event_log (type, occurred_at)
+  `);
 
   // One row per ship under autopilot control. Survives restarts (per story 14)
   // even though AutopilotState's armed/paused/aborted status does not — a
@@ -79,5 +84,27 @@ export async function migrate(pool: Pool): Promise<void> {
   `);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS metrics_rollup_window_end_idx ON metrics_rollup (window_end DESC)
+  `);
+
+  // Anomaly detection (meta#15): one row per fired anomaly, persisted before
+  // webhook delivery is attempted so a delivery failure never loses the record.
+  // dedupe_key groups repeat firings of the same underlying condition so a
+  // sustained problem doesn't spam the webhook every tick.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS anomaly (
+      id BIGSERIAL PRIMARY KEY,
+      type TEXT NOT NULL,
+      dedupe_key TEXT NOT NULL,
+      detected_at TIMESTAMPTZ NOT NULL,
+      detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+      delivered_at TIMESTAMPTZ,
+      delivery_attempts INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS anomaly_dedupe_key_detected_at_idx ON anomaly (dedupe_key, detected_at DESC)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS anomaly_detected_at_idx ON anomaly (detected_at DESC)
   `);
 }

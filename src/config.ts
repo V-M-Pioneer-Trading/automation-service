@@ -13,6 +13,10 @@ export interface ServiceConfig {
   schedulerIntervalMs: number;
   // How often a metrics rollup (meta#14) is computed and persisted.
   metricsRollupIntervalMs: number;
+  // Anomaly detection (meta#15) is only enabled once a webhook URL is
+  // configured — null means the checks don't run at all.
+  anomalyWebhookUrl: string | null;
+  anomalyIntervalMs: number;
 }
 
 const requireEnv = (name: string): string => {
@@ -31,4 +35,6 @@ export const configFromEnv = (): ServiceConfig => ({
   miningShipSymbol: requireEnv("MINING_SHIP_SYMBOL"),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 5000),
   metricsRollupIntervalMs: Number(process.env.METRICS_ROLLUP_INTERVAL_MS ?? 60_000),
+  anomalyWebhookUrl: process.env.ANOMALY_WEBHOOK_URL ?? null,
+  anomalyIntervalMs: Number(process.env.ANOMALY_INTERVAL_MS ?? 60_000),
 });

@@ -15,6 +15,8 @@ export interface ShipTask {
   asteroidWaypoint: string | null;
   /** Consecutive tick failures against the current asteroidWaypoint; resets on any successful tick. */
   failureCount: number;
+  /** Last time this task's row changed — drives the meta#15 ship-idle anomaly check. */
+  updatedAt: Date;
 }
 
 export class ShipTaskRepo {
@@ -35,7 +37,7 @@ export class ShipTaskRepo {
 
   async get(shipSymbol: string): Promise<ShipTask | null> {
     const { rows } = await this.pool.query(
-      `SELECT ship_symbol, phase, waiting_until, survey, trade_symbol, market_waypoint, asteroid_waypoint, failure_count
+      `SELECT ship_symbol, phase, waiting_until, survey, trade_symbol, market_waypoint, asteroid_waypoint, failure_count, updated_at
        FROM ship_task WHERE ship_symbol = $1`,
       [shipSymbol]
     );
@@ -50,6 +52,7 @@ export class ShipTaskRepo {
       marketWaypoint: row.market_waypoint,
       asteroidWaypoint: row.asteroid_waypoint,
       failureCount: row.failure_count,
+      updatedAt: row.updated_at,
     };
   }
 

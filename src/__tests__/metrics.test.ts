@@ -33,7 +33,11 @@ describe("automation-service metrics rollups (meta#14)", () => {
   });
 
   let gateways: ReturnType<typeof createApp>[] = [];
-  afterEach(() => {
+  afterEach(async () => {
+    // Otherwise a leaked MetricsScheduler keeps ticking against (and
+    // polluting) the next test's freshly-truncated tables — see meta#15's
+    // stopBackgroundSchedulers, added after this exact leak broke anomaly.test.ts.
+    await Promise.all(gateways.map((g) => g.locals.stopBackgroundSchedulers?.()));
     gateways = [];
   });
 
