@@ -149,6 +149,7 @@ describe("automation-service planner (meta#10)", () => {
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
       schedulerIntervalMs: 15,
+      replanIntervalMs: 300_000,
     });
     gateways.push(gateway);
     return gateway;

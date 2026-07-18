@@ -130,6 +130,7 @@ describe("automation-service shadow mode (meta#21)", () => {
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
       schedulerIntervalMs: 15,
+      replanIntervalMs: 300_000,
     });
     gateways.push(gateway);
     return gateway;

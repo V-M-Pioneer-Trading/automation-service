@@ -160,6 +160,15 @@ export const KNOB_DEFINITIONS: KnobDefinition[] = [
       "Hours since last refresh at which a market's scouting score equals scout.valuePerRefresh / cycleHours. " +
       "Score grows linearly past this threshold.",
   },
+  {
+    name: "replan.debounceSeconds",
+    default: 30,
+    min: 1,
+    max: 600,
+    description:
+      "Minimum seconds between two fleet replans triggered by a knob change or anomaly. " +
+      "Multiple triggers within this window coalesce into a single replan.",
+  },
 ];
 
 export interface Knob {

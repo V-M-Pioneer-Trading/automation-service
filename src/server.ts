@@ -59,6 +59,7 @@ export interface MiningConfig {
   fleetServiceUrl: string;
   miningShipSymbol: string;
   schedulerIntervalMs: number;
+  replanIntervalMs: number;
 }
 
 export interface MetricsConfig {
@@ -101,6 +102,7 @@ export function createApp(
       ? new MiningScheduler(state, shipTaskRepo, events, gameClients, clock, planner, knobs, contractRepo, marketIntelRepo, {
           shipSymbol: mining.miningShipSymbol,
           intervalMs: mining.schedulerIntervalMs,
+          replanIntervalMs: mining.replanIntervalMs,
         })
       : null;
 
@@ -125,7 +127,8 @@ export function createApp(
           knobs,
           shipTaskRepo,
           gameClients,
-          { shipSymbol: mining?.miningShipSymbol ?? null, intervalMs: anomaly.intervalMs }
+          { shipSymbol: mining?.miningShipSymbol ?? null, intervalMs: anomaly.intervalMs },
+          () => scheduler?.requestReplan("anomaly")
         )
       : null;
   anomalyScheduler?.start();
@@ -207,6 +210,7 @@ export function createApp(
       }
       try {
         const knob = await knobs.set(req.params.name, value);
+        scheduler?.requestReplan("knob_change");
         res.json({ knob });
       } catch (err) {
         if (err instanceof KnobNotFoundError) {
@@ -221,6 +225,16 @@ export function createApp(
       }
     })
   );
+
+  if (scheduler !== null) {
+    app.post(
+      "/planner/replan",
+      asyncHandler(async (_req, res) => {
+        scheduler.requestReplan("manual");
+        res.json({ requested: true });
+      })
+    );
+  }
 
   if (metricsScheduler !== null) {
     app.get(

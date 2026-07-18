@@ -11,6 +11,9 @@ export interface ServiceConfig {
   // How often the scheduler checks whether a ship's current wait has elapsed.
   // Real deploys want seconds; tests want this near-instant.
   schedulerIntervalMs: number;
+  // Fleet-wide replan (meta#13) fallback cadence — a replan also runs sooner
+  // on a knob change or anomaly, debounced via the replan.debounceSeconds knob.
+  replanIntervalMs: number;
   // How often a metrics rollup (meta#14) is computed and persisted.
   metricsRollupIntervalMs: number;
   // Anomaly detection (meta#15) is only enabled once a webhook URL is
@@ -34,6 +37,7 @@ export const configFromEnv = (): ServiceConfig => ({
   fleetServiceUrl: requireEnv("FLEET_SERVICE_URL"),
   miningShipSymbol: requireEnv("MINING_SHIP_SYMBOL"),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 5000),
+  replanIntervalMs: Number(process.env.REPLAN_INTERVAL_MS ?? 300_000),
   metricsRollupIntervalMs: Number(process.env.METRICS_ROLLUP_INTERVAL_MS ?? 60_000),
   anomalyWebhookUrl: process.env.ANOMALY_WEBHOOK_URL ?? null,
   anomalyIntervalMs: Number(process.env.ANOMALY_INTERVAL_MS ?? 60_000),

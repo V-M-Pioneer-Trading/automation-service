@@ -46,7 +46,11 @@ export class AnomalyScheduler {
     private knobs: KnobRepo,
     private shipTaskRepo: ShipTaskRepo | null,
     private gameClients: GameClients | null,
-    private config: { shipSymbol: string | null; intervalMs: number }
+    private config: { shipSymbol: string | null; intervalMs: number },
+    // Fleet replan (meta#13): a newly-recorded (non-suppressed) anomaly is one
+    // of the trigger sources for a replan. Optional so anomaly-only deployments
+    // (no mining scheduler configured) don't need a no-op callback wired in.
+    private onAnomalyRecorded?: () => void
   ) {}
 
   start(): void {
@@ -106,6 +110,7 @@ export class AnomalyScheduler {
       if (this.stopped) return;
 
       const anomaly = await this.repo.record(candidate);
+      this.onAnomalyRecorded?.();
       if (this.stopped) return; // don't attempt delivery for a stop that landed mid-persist
       const delivered = await this.webhook.deliver(anomaly);
       if (delivered) {

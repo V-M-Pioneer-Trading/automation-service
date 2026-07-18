@@ -1,13 +1,14 @@
 # automation-service
 
 Autopilot lifecycle, mining loop, planner, contract loop, market scouting,
-shadow mode, metrics rollups, anomaly detection, and append-only event log
-for the SpaceTraders fleet
+fleet replan, shadow mode, metrics rollups, anomaly detection, and
+append-only event log for the SpaceTraders fleet
 ([meta#8](https://github.com/V-M-Pioneer-Trading/meta/issues/8),
 [meta#9](https://github.com/V-M-Pioneer-Trading/meta/issues/9),
 [meta#10](https://github.com/V-M-Pioneer-Trading/meta/issues/10),
 [meta#11](https://github.com/V-M-Pioneer-Trading/meta/issues/11),
 [meta#12](https://github.com/V-M-Pioneer-Trading/meta/issues/12),
+[meta#13](https://github.com/V-M-Pioneer-Trading/meta/issues/13),
 [meta#14](https://github.com/V-M-Pioneer-Trading/meta/issues/14),
 [meta#15](https://github.com/V-M-Pioneer-Trading/meta/issues/15),
 [meta#21](https://github.com/V-M-Pioneer-Trading/meta/issues/21)).
@@ -298,6 +299,70 @@ completion" pattern as mining (`mining_cycle_complete`) and contracts
 | `scout.valuePerRefresh` | `0` | Flat credit value of refreshing one market's intel; **set above 0 to enable scouting**. |
 | `scout.stalenessThresholdHours` | `0.5` | Hours at which a market's scouting score equals `scout.valuePerRefresh / cycleHours`. |
 
+## Fleet replan (meta#13)
+
+Every idle-or-completing ship's target is re-scored against the planner's
+current knobs/state whenever something changes that could make a different
+choice — not just the moment a ship becomes idle. Three trigger sources call
+`MiningScheduler.requestReplan(reason)`:
+
+- **Knob change** — any successful `PUT /planner/knobs/:name`
+- **Anomaly** — any newly-recorded (non-deduped) anomaly from the meta#15 checks
+- **Manual** — `POST /planner/replan`
+
+plus a **periodic fallback** that fires on `REPLAN_INTERVAL_MS` (default 5
+minutes) regardless of whether anything else triggered one, so a replan still
+happens even if no operator or anomaly does for a while.
+
+**Debounce**: all four sources share one clock. A requested replan (knob/
+anomaly/manual) only runs once `replan.debounceSeconds` (knob, default 30)
+has elapsed since the last replan of *any* kind — multiple triggers inside
+that window coalesce into the one replan that runs once it clears. The very
+first-ever request is never held back waiting on a run that hasn't happened
+yet. The periodic fallback is anchored to arm time (`schedulerStartedAt`) so
+a fresh arm doesn't read as "infinitely overdue" and fire immediately.
+
+**Scope**: a replan re-scores every ship matching meta#10's idle predicate
+(`asteroidWaypoint === null && contractId === null` — a brand new task, or one
+whose cycle just completed) via `ShipTaskRepo.listIdle()`. A ship mid-task
+never matches that predicate, so **running work is never preempted** — abort
+remains the only interrupt. Every replan run (whether or not it reassigned
+anything) is logged as a `replan_executed` event with `{ reason,
+shipsConsidered }`.
+
+**v1 simplifications**:
+
+- Only ever one ship is actually in `ship_task` today (the single configured
+  `MINING_SHIP_SYMBOL`), so `listIdle()`'s fleet-wide query returns at most
+  one row in practice — the mechanism is written to scale to N ships (each
+  `assignTarget` call is now keyed off `task.shipSymbol`, not
+  `this.config.shipSymbol`) without further changes once multi-ship dispatch
+  lands, but there's nothing to demonstrate fleet-wide fan-out with yet.
+- If a replan considers a ship and finds no viable target
+  (`planner_no_viable_target`), that still counts as that ship's one atomic
+  action for the tick — the normal per-tick idle-dispatch path is skipped for
+  that ship this tick so it isn't asked twice in a row, duplicating the real
+  `discoverAndEvaluateContracts` upstream calls a plain re-ask would trigger.
+- A replan's `assignTarget` calls for each idle ship still run sequentially
+  inside the same tick, same as the rest of this codebase's single-ship
+  dispatch; a pause landing mid-loop across several idle ships doesn't stop
+  ships already past their token check from completing their (real, upstream)
+  contract-discovery call before the result is discarded — the same accepted
+  risk `assignTarget` already carries for a single ship (meta#11), just
+  potentially repeated once per idle ship in a future multi-ship fleet.
+
+### New knobs
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `replan.debounceSeconds` | `30` | Minimum seconds between two replans triggered by a knob change or anomaly; multiple triggers inside the window coalesce into one. |
+
+### New endpoint
+
+`POST /planner/replan` — requests a replan (subject to the debounce above).
+Responds `{ requested: true }` immediately; the actual replan runs on a
+subsequent scheduler tick once due.
+
 ## Shadow mode (meta#21)
 
 Arming with `mode: "shadow"` runs the planner's full scoring/assignment cycle
@@ -407,6 +472,7 @@ mining tick) for a requested window — the source for an hourly pull review.
 | `FLEET_SERVICE_URL` | e.g. `http://fleet-service:3001/api/fleet` (required) |
 | `MINING_SHIP_SYMBOL` | Ship symbol to fly (required) |
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
+| `REPLAN_INTERVAL_MS` | Periodic fleet-replan fallback cadence (default `300000`) |
 | `ANOMALY_WEBHOOK_URL` | Webhook URL for anomaly delivery — anomaly detection is disabled entirely if unset |
 | `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
 | `METRICS_ROLLUP_INTERVAL_MS` | Metrics rollup cadence (default `60000`) |

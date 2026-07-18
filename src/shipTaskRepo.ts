@@ -34,6 +34,38 @@ export interface ShipTask {
   updatedAt: Date;
 }
 
+function rowToTask(row: {
+  ship_symbol: string;
+  task_kind: TaskKind;
+  phase: MiningPhase | ContractPhase | ScoutPhase;
+  waiting_until: Date | null;
+  survey: SurveyData | null;
+  trade_symbol: string | null;
+  market_waypoint: string | null;
+  asteroid_waypoint: string | null;
+  failure_count: number;
+  contract_id: string | null;
+  destination_waypoint: string | null;
+  units_delivered: number;
+  updated_at: Date;
+}): ShipTask {
+  return {
+    shipSymbol: row.ship_symbol,
+    taskKind: row.task_kind,
+    phase: row.phase,
+    waitingUntil: row.waiting_until,
+    survey: row.survey,
+    tradeSymbol: row.trade_symbol,
+    marketWaypoint: row.market_waypoint,
+    asteroidWaypoint: row.asteroid_waypoint,
+    failureCount: row.failure_count,
+    contractId: row.contract_id,
+    destinationWaypoint: row.destination_waypoint,
+    unitsDelivered: row.units_delivered,
+    updatedAt: row.updated_at,
+  };
+}
+
 export class ShipTaskRepo {
   constructor(private pool: Pool, private clock: Clock) {}
 
@@ -58,22 +90,22 @@ export class ShipTaskRepo {
       [shipSymbol]
     );
     if (rows.length === 0) return null;
-    const row = rows[0];
-    return {
-      shipSymbol: row.ship_symbol,
-      taskKind: row.task_kind,
-      phase: row.phase,
-      waitingUntil: row.waiting_until,
-      survey: row.survey,
-      tradeSymbol: row.trade_symbol,
-      marketWaypoint: row.market_waypoint,
-      asteroidWaypoint: row.asteroid_waypoint,
-      failureCount: row.failure_count,
-      contractId: row.contract_id,
-      destinationWaypoint: row.destination_waypoint,
-      unitsDelivered: row.units_delivered,
-      updatedAt: row.updated_at,
-    };
+    return rowToTask(rows[0]);
+  }
+
+  /**
+   * Every ship with no assigned target (meta#10's "needs assignment" predicate —
+   * a brand new task, or the moment a cycle completes) — the candidate set a
+   * fleet-wide replan (meta#13) reassigns. A ship mid-task never matches this,
+   * so a replan can never preempt work already in flight.
+   */
+  async listIdle(): Promise<ShipTask[]> {
+    const { rows } = await this.pool.query(
+      `SELECT ship_symbol, task_kind, phase, waiting_until, survey, trade_symbol, market_waypoint, asteroid_waypoint,
+              failure_count, contract_id, destination_waypoint, units_delivered, updated_at
+       FROM ship_task WHERE asteroid_waypoint IS NULL AND contract_id IS NULL`
+    );
+    return rows.map(rowToTask);
   }
 
   async save(task: ShipTask): Promise<void> {

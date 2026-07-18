@@ -55,6 +55,16 @@ export class MiningScheduler {
   // next test's TRUNCATE (or a real re-arm) lands.
   private inFlight: Promise<void> | null = null;
   private stopped = false;
+  // Fleet-wide replan (meta#13) state: lastReplanAt gates every trigger source
+  // (knob change, anomaly, manual, periodic) behind one shared debounce/interval
+  // clock, so "two triggers within the debounce window" coalesce into one run
+  // regardless of which sources fired them.
+  private lastReplanAt: Date | null = null;
+  // Anchors the periodic fallback so a fresh arm doesn't read as "infinitely
+  // overdue" and fire a replan on its very first live tick.
+  private schedulerStartedAt: Date | null = null;
+  private replanRequested = false;
+  private replanReason: string | null = null;
 
   constructor(
     private state: AutopilotState,
@@ -66,11 +76,24 @@ export class MiningScheduler {
     private knobs: KnobRepo,
     private contracts: ContractRepo,
     private marketIntel: MarketIntelRepo,
-    private config: { shipSymbol: string; intervalMs: number }
+    private config: { shipSymbol: string; intervalMs: number; replanIntervalMs: number }
   ) {}
+
+  /**
+   * Requests a fleet replan (meta#13): a knob change, a newly-recorded anomaly,
+   * or the manual /planner/replan endpoint all call this. The request is only
+   * acted on once replan.debounceSeconds has elapsed since the last replan (of
+   * any kind) — a burst of triggers inside that window coalesces into the one
+   * replan that runs once the debounce clears.
+   */
+  requestReplan(reason: string): void {
+    this.replanRequested = true;
+    this.replanReason = reason;
+  }
 
   start(): void {
     if (this.timer !== null) return;
+    this.schedulerStartedAt = this.clock.now();
     this.timer = setInterval(() => {
       if (this.ticking) return;
       this.ticking = true;
@@ -106,6 +129,21 @@ export class MiningScheduler {
     if (this.stopped) return;
     const status: AutopilotStatus = this.state.getStatus();
     if (status !== "armed" && status !== "paused") return;
+
+    // Fleet replan (meta#13): only meaningful in live mode — shadow never
+    // assigns anything, so there's nothing for a replan to preempt or refresh.
+    // Runs before the per-ship dispatch below. If the replan considered this
+    // tick's configured ship, that's this tick's one atomic action for it —
+    // even a "no viable target" outcome leaves the ship idle, and re-running
+    // the normal dispatch below for the same ship in the same tick would
+    // double-fire discoverAndEvaluateContracts's real upstream calls. A replan
+    // that didn't touch this ship (it wasn't idle) must NOT block the ship's
+    // normal dispatch this tick — only skip when it actually overlaps.
+    let replannedShips: Set<string> | null = null;
+    if (status === "armed" && this.state.getMode() === "live") {
+      replannedShips = await this.maybeReplan();
+    }
+    if (replannedShips?.has(this.config.shipSymbol)) return;
 
     // Shadow mode (meta#21): run the planner's scoring/assignment cycle and log
     // every decision, but never touch ship_task or advance*Task — that's
@@ -207,6 +245,57 @@ export class MiningScheduler {
     await this.events.append(result.event, result.detail);
   }
 
+  /**
+   * Gates every replan trigger behind one shared debounce/interval clock.
+   * A requested replan (knob change, anomaly, manual) only runs once
+   * replan.debounceSeconds has elapsed since the last replan of any kind; the
+   * periodic fallback runs on replanIntervalMs regardless of whether anything
+   * was explicitly requested, so a replan still happens even if no operator or
+   * anomaly triggers one for a while.
+   */
+  private async maybeReplan(): Promise<Set<string> | null> {
+    const now = this.clock.now();
+    const debounceMs = (await this.knobs.get("replan.debounceSeconds")) * 1000;
+
+    // Debounce gate for requested replans (knob change / anomaly / manual):
+    // Infinity until the very first replan ever runs, so an early request
+    // isn't held back waiting on a run that hasn't happened yet.
+    const elapsedSinceLastReplan = this.lastReplanAt === null ? Infinity : now.getTime() - this.lastReplanAt.getTime();
+    const requestReady = this.replanRequested && elapsedSinceLastReplan >= debounceMs;
+
+    // Periodic fallback: due replanIntervalMs after the last replan of any
+    // kind, or after arm if none has run yet — never immediately at arm time.
+    const baseline = this.lastReplanAt ?? this.schedulerStartedAt;
+    const elapsedSinceBaseline = baseline === null ? Infinity : now.getTime() - baseline.getTime();
+    const intervalReady = elapsedSinceBaseline >= this.config.replanIntervalMs;
+
+    if (!requestReady && !intervalReady) return null;
+
+    const reason = requestReady ? this.replanReason ?? "requested" : "interval";
+    this.replanRequested = false;
+    this.replanReason = null;
+    this.lastReplanAt = now;
+
+    return await this.runReplan(reason);
+  }
+
+  /**
+   * Re-scores every ship with no assigned target (meta#10's idle predicate) —
+   * a brand new task, or one whose cycle just completed. A ship mid-task never
+   * matches that predicate, so it's never touched by a replan: running work is
+   * never preempted, only idle/completing ships are (re)assigned. Returns the
+   * set of ships considered, so the caller can avoid double-dispatching one of
+   * them again as this same tick's "normal" per-ship action.
+   */
+  private async runReplan(reason: string): Promise<Set<string>> {
+    const idleTasks = await this.repo.listIdle();
+    for (const idleTask of idleTasks) {
+      await this.assignTarget(idleTask);
+    }
+    await this.events.append("replan_executed", { reason, shipsConsidered: idleTasks.length });
+    return new Set(idleTasks.map((t) => t.shipSymbol));
+  }
+
   private async runShadowCycle(): Promise<void> {
     const token = this.state.getToken();
     if (token === null) return; // disarmed between the status check above and here
@@ -252,7 +341,7 @@ export class MiningScheduler {
         clients: this.clients,
         knobs: this.knobs,
         planner: this.planner,
-        shipSymbol: this.config.shipSymbol,
+        shipSymbol: task.shipSymbol,
         authHeader,
       });
     } catch (err) {
@@ -260,7 +349,7 @@ export class MiningScheduler {
     }
 
     const [ship, acceptedContracts, marketIntel] = await Promise.all([
-      this.clients.getShip(this.config.shipSymbol, authHeader),
+      this.clients.getShip(task.shipSymbol, authHeader),
       this.contracts.listAccepted(),
       this.marketIntel.getAll(),
     ]);
@@ -280,7 +369,7 @@ export class MiningScheduler {
     const statusAfterAssignment = this.state.getStatus();
     if (statusAfterAssignment !== "armed" || this.state.getMode() !== "live") {
       await this.events.append("planner_discarded_after_abort_or_pause", {
-        shipSymbol: this.config.shipSymbol,
+        shipSymbol: task.shipSymbol,
         status: statusAfterAssignment,
         mode: this.state.getMode(),
       });
@@ -290,7 +379,7 @@ export class MiningScheduler {
     await this.events.append("planner_assignment", assignment.detail);
 
     if (assignment.kind === "none") {
-      await this.events.append("planner_no_viable_target", { shipSymbol: this.config.shipSymbol });
+      await this.events.append("planner_no_viable_target", { shipSymbol: task.shipSymbol });
       return;
     }
 

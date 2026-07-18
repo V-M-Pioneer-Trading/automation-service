@@ -103,6 +103,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
           navigationServiceUrl: agentUrl,
           miningShipSymbol: "MINING-1",
           schedulerIntervalMs: 100_000, // effectively never ticks — these tests drive state directly
+          replanIntervalMs: 100_000,
         }
       : undefined;
     const gateway = createApp(pool, clock, mining, undefined, {
