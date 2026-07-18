@@ -20,6 +20,10 @@ export interface ServiceConfig {
   // configured — null means the checks don't run at all.
   anomalyWebhookUrl: string | null;
   anomalyIntervalMs: number;
+  // Matches the sibling services' convention (fleet-service, agent-service):
+  // the browser-facing UI (command-interface, default port 3000) is the only
+  // cross-origin caller this API needs to allow.
+  corsAllowedOrigin: string;
 }
 
 const requireEnv = (name: string): string => {
@@ -41,4 +45,5 @@ export const configFromEnv = (): ServiceConfig => ({
   metricsRollupIntervalMs: Number(process.env.METRICS_ROLLUP_INTERVAL_MS ?? 60_000),
   anomalyWebhookUrl: process.env.ANOMALY_WEBHOOK_URL ?? null,
   anomalyIntervalMs: Number(process.env.ANOMALY_INTERVAL_MS ?? 60_000),
+  corsAllowedOrigin: process.env.CORS_ALLOWED_ORIGIN ?? "http://localhost:3000",
 });

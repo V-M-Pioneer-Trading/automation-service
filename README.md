@@ -476,6 +476,7 @@ mining tick) for a requested window — the source for an hourly pull review.
 | `ANOMALY_WEBHOOK_URL` | Webhook URL for anomaly delivery — anomaly detection is disabled entirely if unset |
 | `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
 | `METRICS_ROLLUP_INTERVAL_MS` | Metrics rollup cadence (default `60000`) |
+| `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`, matching command-interface's dev port) — same convention as agent-service/fleet-service |
 
 The asteroid field is no longer configured — the planner (below) chooses it
 dynamically. Tune its scoring via the knobs API instead of env vars.

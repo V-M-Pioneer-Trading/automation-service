@@ -1,3 +1,4 @@
+import cors from "cors";
 import express from "express";
 import { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
@@ -80,9 +81,17 @@ export function createApp(
   clock: Clock = systemClock,
   mining?: MiningConfig,
   metrics?: MetricsConfig,
-  anomaly?: AnomalyConfig
+  anomaly?: AnomalyConfig,
+  corsAllowedOrigin: string = "http://localhost:3000"
 ) {
   const app = express();
+  app.use(
+    cors({
+      origin: corsAllowedOrigin,
+      methods: ["GET", "POST", "PUT", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization"],
+    })
+  );
   app.use(express.json());
 
   const state = new AutopilotState();
@@ -313,12 +322,16 @@ if (require.main === module) {
           ? { webhookUrl: config.anomalyWebhookUrl, intervalMs: config.anomalyIntervalMs }
           : undefined;
       return migrate(pool).then(() =>
-        createApp(pool, systemClock, config, { rollupIntervalMs: config.metricsRollupIntervalMs }, anomalyConfig).listen(
-          port,
-          () => {
-            console.log(`automation-service listening on http://localhost:${port}`);
-          }
-        )
+        createApp(
+          pool,
+          systemClock,
+          config,
+          { rollupIntervalMs: config.metricsRollupIntervalMs },
+          anomalyConfig,
+          config.corsAllowedOrigin
+        ).listen(port, () => {
+          console.log(`automation-service listening on http://localhost:${port}`);
+        })
       );
     })
     .catch((err) => {
