@@ -1,10 +1,11 @@
 # automation-service
 
-Autopilot lifecycle, mining loop, planner, shadow mode, and append-only event
-log for the SpaceTraders fleet
+Autopilot lifecycle, mining loop, planner, shadow mode, metrics rollups, and
+append-only event log for the SpaceTraders fleet
 ([meta#8](https://github.com/V-M-Pioneer-Trading/meta/issues/8),
 [meta#9](https://github.com/V-M-Pioneer-Trading/meta/issues/9),
 [meta#10](https://github.com/V-M-Pioneer-Trading/meta/issues/10),
+[meta#14](https://github.com/V-M-Pioneer-Trading/meta/issues/14),
 [meta#21](https://github.com/V-M-Pioneer-Trading/meta/issues/21)).
 
 ## What it does
@@ -163,6 +164,37 @@ logging it as something the (now-shadow) autopilot did; the ship's
 `ship_task` phase resumes from wherever it was before the switch the next
 time the operator re-arms live.
 
+## Metrics rollups (meta#14)
+
+Independent of autopilot arm/pause/abort — metrics, including the error
+rate, are meaningful whether or not the fleet is currently armed — a
+background scheduler computes and persists one rollup per tick
+(`METRICS_ROLLUP_INTERVAL_MS`, default one minute in production), each
+covering the window since the previous rollup ended. Resuming from the last
+persisted rollup's `window_end` after a restart means no gap and no
+double-counted window, same as `ship_task`'s restart-resumability.
+
+Each rollup has:
+
+- `creditsPerHour` — total `mining_sell` transaction revenue in the window,
+  divided by the window's duration in hours. v1 simplification: revenue
+  only, not netted against fuel or other costs.
+- `extractionUnits` — total units extracted (`mining_extract`) in the window.
+- `errorRate` — the fraction of all `mining_*` events in the window that were
+  a `mining_tick_error` or `mining_task_failed`.
+
+**v1 simplifications**: the "resume from the last persisted rollup" restart
+logic assumes exactly one running instance — there's no distributed lock, so
+two live instances (two replicas, or an old process not yet drained during a
+restart) would each bootstrap from the same `window_end` and double-count
+that window's activity. `metrics_rollup` also has no retention/pruning yet;
+it grows one row per tick indefinitely.
+
+`GET /metrics/context?rollupLimit=&eventLimit=` returns rollups and recent
+event-log entries together in one bounded response (default 10 rollups / 20
+events, capped at 200 / 100) — shaped to fit an AI context window, which is
+what the future AI supervisor (meta#19) and MCP server (meta#20) will read.
+
 ## Configuration
 
 | Env var | Meaning |
@@ -174,6 +206,7 @@ time the operator re-arms live.
 | `FLEET_SERVICE_URL` | e.g. `http://fleet-service:3001/api/fleet` (required) |
 | `MINING_SHIP_SYMBOL` | Ship symbol to fly (required) |
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
+| `METRICS_ROLLUP_INTERVAL_MS` | Metrics rollup cadence (default `60000`) |
 
 The asteroid field is no longer configured — the planner (below) chooses it
 dynamically. Tune its scoring via the knobs API instead of env vars.

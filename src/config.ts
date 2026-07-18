@@ -11,6 +11,8 @@ export interface ServiceConfig {
   // How often the scheduler checks whether a ship's current wait has elapsed.
   // Real deploys want seconds; tests want this near-instant.
   schedulerIntervalMs: number;
+  // How often a metrics rollup (meta#14) is computed and persisted.
+  metricsRollupIntervalMs: number;
 }
 
 const requireEnv = (name: string): string => {
@@ -28,4 +30,5 @@ export const configFromEnv = (): ServiceConfig => ({
   fleetServiceUrl: requireEnv("FLEET_SERVICE_URL"),
   miningShipSymbol: requireEnv("MINING_SHIP_SYMBOL"),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 5000),
+  metricsRollupIntervalMs: Number(process.env.METRICS_ROLLUP_INTERVAL_MS ?? 60_000),
 });

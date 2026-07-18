@@ -7,16 +7,27 @@ import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients, UpstreamCallError } from "./gameClients";
 import { KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
+import { MetricsRepo } from "./metrics";
+import { MetricsScheduler } from "./metricsScheduler";
 import { Planner } from "./planner";
 import { MiningScheduler } from "./scheduler";
 import { ShipTaskRepo } from "./shipTaskRepo";
 
 const MAX_EVENTS_LIMIT = 1000;
+const MAX_ROLLUPS_LIMIT = 200;
+const DEFAULT_CONTEXT_ROLLUP_LIMIT = 10;
+const DEFAULT_CONTEXT_EVENT_LIMIT = 20;
+const MAX_CONTEXT_EVENT_LIMIT = 100;
 
 /** Express 4 does not forward async-handler rejections to error middleware on its own. */
 type AsyncHandler = (req: express.Request, res: express.Response) => Promise<void>;
 const asyncHandler = (fn: AsyncHandler) => (req: express.Request, res: express.Response, next: express.NextFunction) =>
   fn(req, res).catch(next);
+
+const clampLimit = (raw: unknown, fallback: number, max: number): number => {
+  const parsed = typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
+};
 
 export interface MiningConfig {
   navigationServiceUrl: string;
@@ -26,12 +37,18 @@ export interface MiningConfig {
   schedulerIntervalMs: number;
 }
 
+export interface MetricsConfig {
+  rollupIntervalMs: number;
+}
+
 /**
  * mining: optional so ticket-8's lifecycle-only tests (and any deployment that
  * hasn't configured a mining target yet) keep working with autopilot arm/pause/
- * abort but no ship-driving scheduler at all.
+ * abort but no ship-driving scheduler at all. metrics: optional for the same
+ * reason — tests that don't care about rollups shouldn't get a background
+ * timer they then have to account for.
  */
-export function createApp(pool: Pool, clock: Clock = systemClock, mining?: MiningConfig) {
+export function createApp(pool: Pool, clock: Clock = systemClock, mining?: MiningConfig, metrics?: MetricsConfig) {
   const app = express();
   app.use(express.json());
 
@@ -39,6 +56,7 @@ export function createApp(pool: Pool, clock: Clock = systemClock, mining?: Minin
   const events = new EventLog(pool, clock);
   const shipTaskRepo = new ShipTaskRepo(pool, clock);
   const knobs = new KnobRepo(pool);
+  const metricsRepo = new MetricsRepo(pool, clock);
 
   const scheduler = (() => {
     if (mining === undefined) return null;
@@ -48,6 +66,12 @@ export function createApp(pool: Pool, clock: Clock = systemClock, mining?: Minin
       intervalMs: mining.schedulerIntervalMs,
     });
   })();
+
+  // Runs independent of autopilot arm/pause/abort — metrics (including the
+  // error rate) are meaningful whether or not the fleet is currently armed.
+  const metricsScheduler =
+    metrics !== undefined ? new MetricsScheduler(metricsRepo, clock, metrics.rollupIntervalMs) : null;
+  metricsScheduler?.start();
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
@@ -101,9 +125,7 @@ export function createApp(pool: Pool, clock: Clock = systemClock, mining?: Minin
   app.get(
     "/autopilot/events",
     asyncHandler(async (req, res) => {
-      const raw = req.query.limit;
-      const parsed = typeof raw === "string" ? Number(raw) : NaN;
-      const limit = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, MAX_EVENTS_LIMIT) : 100;
+      const limit = clampLimit(req.query.limit, 100, MAX_EVENTS_LIMIT);
       res.json({ events: await events.list(limit) });
     })
   );
@@ -140,6 +162,21 @@ export function createApp(pool: Pool, clock: Clock = systemClock, mining?: Minin
     })
   );
 
+  if (metricsScheduler !== null) {
+    app.get(
+      "/metrics/context",
+      asyncHandler(async (req, res) => {
+        const rollupLimit = clampLimit(req.query.rollupLimit, DEFAULT_CONTEXT_ROLLUP_LIMIT, MAX_ROLLUPS_LIMIT);
+        const eventLimit = clampLimit(req.query.eventLimit, DEFAULT_CONTEXT_EVENT_LIMIT, MAX_CONTEXT_EVENT_LIMIT);
+        const [rollups, recentEvents] = await Promise.all([
+          metricsRepo.list(rollupLimit),
+          events.list(eventLimit),
+        ]);
+        res.json({ rollups, events: recentEvents });
+      })
+    );
+  }
+
   if (scheduler !== null) {
     app.get(
       "/autopilot/ships/:shipSymbol",
@@ -169,7 +206,7 @@ if (require.main === module) {
       const pool = createPool(config.databaseUrl);
       const port = Number(process.env.PORT ?? 3003);
       return migrate(pool).then(() =>
-        createApp(pool, systemClock, config).listen(port, () => {
+        createApp(pool, systemClock, config, { rollupIntervalMs: config.metricsRollupIntervalMs }).listen(port, () => {
           console.log(`automation-service listening on http://localhost:${port}`);
         })
       );

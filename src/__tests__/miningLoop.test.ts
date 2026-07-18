@@ -128,11 +128,11 @@ describe("automation-service mining loop", () => {
         const expiration = new Date(clock.now().getTime() + 500).toISOString();
         ship.cargo = { units: 1, capacity: 1, inventory: [{ symbol: "IRON_ORE", units: 1 }] };
         respondJson(res, 200, {
-          data: { extraction: { yield: { symbol: "IRON_ORE" } }, cooldown: { expiration } },
+          data: { extraction: { yield: { symbol: "IRON_ORE", units: 1 } }, cooldown: { expiration } },
         });
       } else if (req.url === "/ships/MINING-1/sell") {
         ship.cargo = { units: 0, capacity: 1, inventory: [] };
-        respondJson(res, 200, { data: { agent: {} } });
+        respondJson(res, 200, { data: { agent: {}, transaction: { totalPrice: 50 } } });
       } else if (req.url === "/ships/MINING-1/refuel") {
         ship.fuel.current = ship.fuel.capacity;
         respondJson(res, 200, { data: { agent: {} } });

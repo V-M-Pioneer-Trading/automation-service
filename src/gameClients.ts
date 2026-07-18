@@ -112,15 +112,15 @@ export function createGameClients(config: {
       ),
 
     extractWithSurvey: (shipSymbol: string, survey: SurveyData, authHeader: string) =>
-      fleetAction<{ data: { extraction: { yield: { symbol: string } }; cooldown: { expiration: string } } }>(
-        shipSymbol,
-        "extract/survey",
-        authHeader,
-        survey
-      ),
+      fleetAction<{
+        data: { extraction: { yield: { symbol: string; units: number } }; cooldown: { expiration: string } };
+      }>(shipSymbol, "extract/survey", authHeader, survey),
 
     sell: (shipSymbol: string, tradeSymbol: string, units: number, authHeader: string) =>
-      fleetAction(shipSymbol, "sell", authHeader, { symbol: tradeSymbol, units }),
+      fleetAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "sell", authHeader, {
+        symbol: tradeSymbol,
+        units,
+      }),
 
     refuel: (shipSymbol: string, authHeader: string) => fleetAction(shipSymbol, "refuel", authHeader),
   };

@@ -62,4 +62,22 @@ export async function migrate(pool: Pool): Promise<void> {
       [def.name, def.default, def.min, def.max]
     );
   }
+
+  // Metrics rollups (meta#14): each row summarizes activity over one
+  // [window_start, window_end) slice of event_log, computed and persisted on
+  // a schedule rather than aggregated on every read.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS metrics_rollup (
+      id BIGSERIAL PRIMARY KEY,
+      window_start TIMESTAMPTZ NOT NULL,
+      window_end TIMESTAMPTZ NOT NULL,
+      computed_at TIMESTAMPTZ NOT NULL,
+      credits_per_hour DOUBLE PRECISION NOT NULL,
+      extraction_units DOUBLE PRECISION NOT NULL,
+      error_rate DOUBLE PRECISION NOT NULL
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS metrics_rollup_window_end_idx ON metrics_rollup (window_end DESC)
+  `);
 }

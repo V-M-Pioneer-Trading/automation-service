@@ -158,7 +158,8 @@ async function dispatchExtract(
   return {
     task: withWait({ ...task, tradeSymbol: res.data.extraction.yield.symbol }, new Date(res.data.cooldown.expiration)),
     event: "mining_extract",
-    detail: { shipSymbol: task.shipSymbol, tradeSymbol: res.data.extraction.yield.symbol },
+    // units feeds the meta#14 extraction-yield rollup.
+    detail: { shipSymbol: task.shipSymbol, tradeSymbol: res.data.extraction.yield.symbol, units: res.data.extraction.yield.units },
   };
 }
 
@@ -219,11 +220,12 @@ async function dispatchSell(
   }
   const item = ship.cargo.inventory[0];
   if (item !== undefined) {
-    await clients.sell(task.shipSymbol, item.symbol, item.units, authHeader);
+    const res = await clients.sell(task.shipSymbol, item.symbol, item.units, authHeader);
     return {
       task,
       event: "mining_sell",
-      detail: { shipSymbol: task.shipSymbol, tradeSymbol: item.symbol, units: item.units },
+      // totalPrice feeds the meta#14 credits-per-hour rollup.
+      detail: { shipSymbol: task.shipSymbol, tradeSymbol: item.symbol, units: item.units, totalPrice: res.data.transaction.totalPrice },
     };
   }
   if (ship.fuel.current < ship.fuel.capacity) {
