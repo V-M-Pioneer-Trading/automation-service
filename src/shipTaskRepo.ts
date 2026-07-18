@@ -9,12 +9,13 @@ export type ContractPhase =
   | "CONTRACT_TRAVEL_TO_DESTINATION"
   | "CONTRACT_DELIVER"
   | "CONTRACT_FULFILL";
-export type TaskKind = "mining" | "contract";
+export type ScoutPhase = "SCOUT_TRAVEL" | "SCOUT_REFRESH";
+export type TaskKind = "mining" | "contract" | "scout";
 
 export interface ShipTask {
   shipSymbol: string;
   taskKind: TaskKind;
-  phase: MiningPhase | ContractPhase;
+  phase: MiningPhase | ContractPhase | ScoutPhase;
   waitingUntil: Date | null;
   survey: SurveyData | null;
   /** Mining: the extracted good. Contract: the deliverable good. */

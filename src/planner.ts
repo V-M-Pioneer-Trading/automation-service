@@ -1,6 +1,7 @@
 import { Contract, GameClients, ShipSnapshot } from "./gameClients";
 import { KnobRepo } from "./knobs";
 import { ContractRecord } from "./contractRepo";
+import { MarketIntel } from "./marketIntelRepo";
 import { fuelAwareRoute, RouteWaypoint } from "./routeCost";
 
 export interface PlannerCandidate {
@@ -48,6 +49,7 @@ export type TargetAssignment =
       procurementMarket: string;
       detail: Record<string, unknown>;
     }
+  | { kind: "scout"; scoutWaypoint: string; detail: Record<string, unknown> }
   | { kind: "none"; detail: Record<string, unknown> };
 
 /**
@@ -156,42 +158,126 @@ export class Planner {
     systemSymbol: string;
     authHeader: string;
     acceptedContracts: ContractRecord[];
+    /** Market intel snapshot from MarketIntelRepo — drives scout staleness scoring (meta#12). */
+    marketIntel: MarketIntel[];
+    /** Decision time — needed to compute market staleness (meta#12). */
+    now: Date;
   }): Promise<TargetAssignment> {
-    const { ship, systemSymbol, authHeader, acceptedContracts } = params;
-    const [miningResult, taskWeight, reserveFloor] = await Promise.all([
-      this.assignMiningTarget({ ship, systemSymbol, authHeader }),
-      this.knobs.get("contract.taskWeight"),
-      this.knobs.get("credit.reserveFloor"),
-    ]);
+    const { ship, systemSymbol, authHeader, acceptedContracts, marketIntel, now } = params;
 
+    // v1 simplification: getSystemWaypoints is called twice — once inside
+    // assignMiningTarget and once here for scout scoring. Both calls run in
+    // parallel so there's no latency penalty; the redundant HTTP round-trip is
+    // documented for a future refactor.
+    const [miningResult, rawWaypoints, contractTaskWeight, reserveFloor, scoutTaskWeight, scoutValuePerRefresh, scoutThresholdHours, speed, fixedOverheadHours, fuelCreditsPerUnitDistance] =
+      await Promise.all([
+        this.assignMiningTarget({ ship, systemSymbol, authHeader }),
+        this.clients.getSystemWaypoints(systemSymbol, authHeader),
+        this.knobs.get("contract.taskWeight"),
+        this.knobs.get("credit.reserveFloor"),
+        this.knobs.get("scout.taskWeight"),
+        this.knobs.get("scout.valuePerRefresh"),
+        this.knobs.get("scout.stalenessThresholdHours"),
+        this.knobs.get("travel.speedUnitsPerHour"),
+        this.knobs.get("cycle.fixedOverheadHours"),
+        this.knobs.get("fuel.creditsPerUnitDistance"),
+      ]);
+
+    // --- Contract scoring ---
     // Same reserve-floor protection mining candidates get via breachesReserveFloor:
     // totalPayment - expectedProfit is procurementCost + travelCost combined (the
     // ContractRecord doesn't break those out separately), so this is a conservative
     // upper bound on what accepting would actually spend before payment lands.
-    let best: { record: ContractRecord; score: number } | null = null;
+    let bestContract: { record: ContractRecord; score: number } | null = null;
     for (const record of acceptedContracts) {
       const estimatedCost = record.totalPayment - record.expectedProfit;
       if (miningResult.currentCredits - estimatedCost < reserveFloor) continue;
-      const score = record.cycleHours > 0 ? (record.expectedProfit * taskWeight) / record.cycleHours : 0;
-      if (best === null || score > best.score) best = { record, score };
+      const score = record.cycleHours > 0 ? (record.expectedProfit * contractTaskWeight) / record.cycleHours : 0;
+      if (bestContract === null || score > bestContract.score) bestContract = { record, score };
     }
 
-    const miningScore = miningResult.chosenScore;
-    const contractWins = best !== null && (miningResult.asteroidWaypoint === null || best.score > (miningScore ?? -Infinity));
+    // --- Scout scoring (meta#12) ---
+    // Score = (valuePerRefresh * stalenessFactor * taskWeight) / cycleHours,
+    // in the same credits/hour units as mining and contracts. stalenessFactor
+    // grows linearly from 0 (just refreshed) upward; a market that's been
+    // un-seen for exactly stalenessThreshold hours scores equivalently to a
+    // mine.expectedCreditsPerCycle-worth of mining. Markets never seen before
+    // are treated as 10× the threshold stale (very high priority but finite).
+    const routeWaypoints: RouteWaypoint[] = rawWaypoints.map((w) => ({
+      symbol: w.symbol,
+      x: w.x,
+      y: w.y,
+      hasFuelStation: w.traits.some((t) => t.symbol === "MARKETPLACE"),
+    }));
+    const marketplaces = rawWaypoints.filter((w) => w.traits.some((t) => t.symbol === "MARKETPLACE"));
+    const nowMs = now.getTime();
 
-    if (contractWins && best !== null && best.record.procurementMarket !== null) {
+    let bestScout: { waypoint: string; score: number } | null = null;
+    if (scoutValuePerRefresh > 0 && scoutThresholdHours > 0) {
+      for (const marketplace of marketplaces) {
+        const intel = marketIntel.find((m) => m.waypoint === marketplace.symbol);
+        const elapsedHours =
+          intel !== undefined
+            ? (nowMs - intel.lastRefreshedAt.getTime()) / 3_600_000
+            : scoutThresholdHours * 10; // never-seen = 10× stale
+        const stalenessFactor = elapsedHours / scoutThresholdHours;
+        if (stalenessFactor <= 0) continue;
+
+        const route = fuelAwareRoute(routeWaypoints, ship.nav.waypointSymbol, marketplace.symbol, ship.fuel.current);
+        if (route === null) continue;
+        if (miningResult.currentCredits - route.distance * fuelCreditsPerUnitDistance < reserveFloor) continue;
+
+        const cycleHours = route.distance / speed + fixedOverheadHours;
+        const score = cycleHours > 0 ? (scoutValuePerRefresh * stalenessFactor * scoutTaskWeight) / cycleHours : 0;
+        if (bestScout === null || score > bestScout.score) bestScout = { waypoint: marketplace.symbol, score };
+      }
+    }
+
+    // --- Pick the highest-scoring task kind ---
+    const miningScore = miningResult.chosenScore;
+    const scores = {
+      contract: bestContract?.score ?? -Infinity,
+      scout: bestScout?.score ?? -Infinity,
+      mine: miningScore ?? -Infinity,
+    };
+
+    const contractWins =
+      bestContract !== null &&
+      scores.contract > scores.mine &&
+      scores.contract > scores.scout;
+    const scoutWins =
+      bestScout !== null &&
+      scores.scout > scores.mine &&
+      scores.scout >= scores.contract; // tie-break: scout before contract (no monetary risk)
+
+    if (contractWins && bestContract !== null && bestContract.record.procurementMarket !== null) {
       return {
         kind: "contract",
-        contractId: best.record.contractId,
-        tradeSymbol: best.record.tradeSymbol,
-        destinationWaypoint: best.record.destinationWaypoint,
-        unitsRequired: best.record.unitsRequired,
-        procurementMarket: best.record.procurementMarket,
+        contractId: bestContract.record.contractId,
+        tradeSymbol: bestContract.record.tradeSymbol,
+        destinationWaypoint: bestContract.record.destinationWaypoint,
+        unitsRequired: bestContract.record.unitsRequired,
+        procurementMarket: bestContract.record.procurementMarket,
         detail: {
-          contractId: best.record.contractId,
-          contractScore: best.score,
+          contractId: bestContract.record.contractId,
+          contractScore: bestContract.score,
           miningScore,
-          taskWeight,
+          scoutScore: bestScout?.score ?? null,
+          taskWeight: contractTaskWeight,
+          miningDetail: miningResult.detail,
+        },
+      };
+    }
+
+    if (scoutWins && bestScout !== null) {
+      return {
+        kind: "scout",
+        scoutWaypoint: bestScout.waypoint,
+        detail: {
+          scoutWaypoint: bestScout.waypoint,
+          scoutScore: bestScout.score,
+          miningScore,
+          contractScore: bestContract?.score ?? null,
           miningDetail: miningResult.detail,
         },
       };
@@ -203,10 +289,14 @@ export class Planner {
 
     // Flattened (not nested under miningDetail) so existing consumers of a
     // pure-mining planner_assignment event — e.g. reading detail.candidates —
-    // keep working unchanged when there are no contracts in the picture.
+    // keep working unchanged when there are no contracts or scouts in the picture.
     return {
       kind: "none",
-      detail: { ...miningResult.detail, contractsConsidered: acceptedContracts.length },
+      detail: {
+        ...miningResult.detail,
+        contractsConsidered: acceptedContracts.length,
+        marketsConsidered: marketplaces.length,
+      },
     };
   }
 

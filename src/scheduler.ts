@@ -6,8 +6,10 @@ import { advanceContractTask } from "./contractTask";
 import { EventLog } from "./eventLog";
 import { GameClients } from "./gameClients";
 import { KnobRepo } from "./knobs";
+import { MarketIntelRepo } from "./marketIntelRepo";
 import { advanceMiningTask, TickResult } from "./miningTask";
 import { Planner } from "./planner";
+import { advanceScoutTask } from "./scoutTask";
 import { ShipTask, ShipTaskRepo } from "./shipTaskRepo";
 
 const FRESH_MINING_TASK: Pick<
@@ -63,6 +65,7 @@ export class MiningScheduler {
     private planner: Planner,
     private knobs: KnobRepo,
     private contracts: ContractRepo,
+    private marketIntel: MarketIntelRepo,
     private config: { shipSymbol: string; intervalMs: number }
   ) {}
 
@@ -150,15 +153,24 @@ export class MiningScheduler {
               clock: this.clock,
               authHeader,
             })
-          : await advanceMiningTask({
-              task,
-              ship,
-              systemSymbol: ship.nav.systemSymbol,
-              asteroidWaypoint: task.asteroidWaypoint!,
-              clients: this.clients,
-              clock: this.clock,
-              authHeader,
-            });
+          : task.taskKind === "scout"
+            ? await advanceScoutTask({
+                task,
+                ship,
+                scoutWaypoint: task.asteroidWaypoint!, // reused: the planner's assigned target
+                clients: this.clients,
+                clock: this.clock,
+                authHeader,
+              })
+            : await advanceMiningTask({
+                task,
+                ship,
+                systemSymbol: ship.nav.systemSymbol,
+                asteroidWaypoint: task.asteroidWaypoint!,
+                clients: this.clients,
+                clock: this.clock,
+                authHeader,
+              });
     } catch (err) {
       await this.handleTickFailure(task, err);
       return;
@@ -184,6 +196,13 @@ export class MiningScheduler {
       finalTask = { ...finalTask, ...FRESH_MINING_TASK };
     }
 
+    // A scout just refreshed a market: record the fresh timestamp and hand
+    // the ship back to the planner for its next assignment.
+    if (result.event === "scout_market_refresh") {
+      await this.marketIntel.record(task.asteroidWaypoint!);
+      finalTask = { ...finalTask, ...FRESH_MINING_TASK };
+    }
+
     await this.repo.save(finalTask);
     await this.events.append(result.event, result.detail);
   }
@@ -193,13 +212,18 @@ export class MiningScheduler {
     if (token === null) return; // disarmed between the status check above and here
     const authHeader = `Bearer ${token}`;
 
-    const ship = await this.clients.getShip(this.config.shipSymbol, authHeader);
-    const acceptedContracts = await this.contracts.listAccepted();
+    const [ship, acceptedContracts, marketIntel] = await Promise.all([
+      this.clients.getShip(this.config.shipSymbol, authHeader),
+      this.contracts.listAccepted(),
+      this.marketIntel.getAll(),
+    ]);
     const assignment = await this.planner.assignTarget({
       ship,
       systemSymbol: ship.nav.systemSymbol,
       authHeader,
       acceptedContracts,
+      marketIntel,
+      now: this.clock.now(),
     });
 
     // A switch back to live (re-arm), a pause, or an abort mid-flight all mean
@@ -235,13 +259,18 @@ export class MiningScheduler {
       await this.events.append("contract_discovery_error", { message: String(err) });
     }
 
-    const ship = await this.clients.getShip(this.config.shipSymbol, authHeader);
-    const acceptedContracts = await this.contracts.listAccepted();
+    const [ship, acceptedContracts, marketIntel] = await Promise.all([
+      this.clients.getShip(this.config.shipSymbol, authHeader),
+      this.contracts.listAccepted(),
+      this.marketIntel.getAll(),
+    ]);
     const assignment = await this.planner.assignTarget({
       ship,
       systemSymbol: ship.nav.systemSymbol,
       authHeader,
       acceptedContracts,
+      marketIntel,
+      now: this.clock.now(),
     });
 
     // "Don't start anything new while paused" applies here too, not just at the
@@ -267,6 +296,24 @@ export class MiningScheduler {
 
     if (assignment.kind === "mine") {
       await this.repo.save({ ...task, ...FRESH_MINING_TASK, asteroidWaypoint: assignment.asteroidWaypoint });
+      return;
+    }
+
+    if (assignment.kind === "scout") {
+      await this.repo.save({
+        ...task,
+        taskKind: "scout",
+        phase: "SCOUT_TRAVEL",
+        waitingUntil: null,
+        survey: null,
+        tradeSymbol: null,
+        marketWaypoint: null,
+        asteroidWaypoint: assignment.scoutWaypoint,
+        contractId: null,
+        destinationWaypoint: null,
+        unitsDelivered: 0,
+        failureCount: 0,
+      });
       return;
     }
 

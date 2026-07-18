@@ -117,6 +117,17 @@ export async function migrate(pool: Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS anomaly_detected_at_idx ON anomaly (detected_at DESC)
   `);
 
+  // Market scouting (meta#12): one row per marketplace, tracking the last time
+  // this automation-service called getMarket while a ship was docked there.
+  // Freshness decays over time; the planner scores scouting tasks higher as
+  // staleness grows to ensure price data stays current (see README).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS market_intel (
+      waypoint TEXT PRIMARY KEY,
+      last_refreshed_at TIMESTAMPTZ NOT NULL
+    )
+  `);
+
   // Contract loop (meta#11): one row per contract this agent has ever seen,
   // recording the deterministic evaluation decision and its inputs so a
   // contract is never re-evaluated (or re-accepted) once decided.

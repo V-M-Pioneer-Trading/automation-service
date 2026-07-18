@@ -1,10 +1,13 @@
 # automation-service
 
-Autopilot lifecycle, mining loop, planner, shadow mode, metrics rollups,
-anomaly detection, and append-only event log for the SpaceTraders fleet
+Autopilot lifecycle, mining loop, planner, contract loop, market scouting,
+shadow mode, metrics rollups, anomaly detection, and append-only event log
+for the SpaceTraders fleet
 ([meta#8](https://github.com/V-M-Pioneer-Trading/meta/issues/8),
 [meta#9](https://github.com/V-M-Pioneer-Trading/meta/issues/9),
 [meta#10](https://github.com/V-M-Pioneer-Trading/meta/issues/10),
+[meta#11](https://github.com/V-M-Pioneer-Trading/meta/issues/11),
+[meta#12](https://github.com/V-M-Pioneer-Trading/meta/issues/12),
 [meta#14](https://github.com/V-M-Pioneer-Trading/meta/issues/14),
 [meta#15](https://github.com/V-M-Pioneer-Trading/meta/issues/15),
 [meta#21](https://github.com/V-M-Pioneer-Trading/meta/issues/21)).
@@ -225,6 +228,75 @@ target while cargo it can't easily dispose of sits in the hold.
 |---|---|---|
 | `contract.taskWeight` | `1` | Multiplier applied to every contract-task score, same role as `mine.taskWeight`. |
 | `contract.minProfitThreshold` | `0` | Minimum `expectedProfit` for a contract to be accepted. |
+
+## Market scouting loop (meta#12)
+
+Market price data ages — procurement and sell prices change on SpaceTraders'
+clock. The scouting loop keeps the planner's economic decisions grounded in
+current data by scoring "visit this market and refresh its intel" as a
+first-class task kind that competes with mining and contracts in the same
+credits/hour units.
+
+**Intel tracking**: `market_intel` (one row per marketplace, `last_refreshed_at`)
+records when automation-service last called `getMarket` while a ship was docked
+at that market. This is the "cache" the planner's scoring reads from. The table
+is the authoritative freshness record for automation-service; what the upstream
+navigation-service holds in its own cache is separate and not directly
+observable here.
+
+**Scoring**: the planner scores each marketplace's scouting urgency as:
+
+```
+score = (scout.valuePerRefresh × stalenessFactor × scout.taskWeight) / cycleHours
+```
+
+where `stalenessFactor = elapsedHours / scout.stalenessThresholdHours` grows
+linearly as the market ages. At exactly one threshold's worth of staleness the
+scouting score equals `scout.valuePerRefresh / cycleHours` — calibrated to
+be directly comparable to a mining assignment (`mine.expectedCreditsPerCycle /
+cycleHours`) when `scout.valuePerRefresh ≈ mine.expectedCreditsPerCycle`. A
+market refreshed the moment it's needed scores 0 (don't bother); a market not
+seen in 2× the threshold scores 2×. Markets never seen before are treated as
+10× stale — very high priority for a first-pass scout, then normal decay
+takes over.
+
+**Default: opt-in** (`scout.valuePerRefresh = 0`). Scouting only competes
+for assignments when an operator explicitly sets `scout.valuePerRefresh > 0`
+via `PUT /planner/knobs/scout.valuePerRefresh`. This keeps the default
+behavior purely mining-and-contracts — scouting doesn't win any assignment
+until it's valued.
+
+**FSM**: `advanceScoutTask` runs two phases — `SCOUT_TRAVEL` (travel to the
+market, reusing the mining FSM's `travelTo` helper) → `SCOUT_REFRESH` (dock,
+call `getMarket` to pull live data, emit `scout_market_refresh`). The scheduler
+records the fresh timestamp in `market_intel` on `scout_market_refresh`, then
+resets the ship to a fresh planner assignment — same "hand back to planner on
+completion" pattern as mining (`mining_cycle_complete`) and contracts
+(`contract_fulfilled`).
+
+**v1 simplifications**:
+
+- `getSystemWaypoints` is called twice per assignment cycle — once inside
+  `assignMiningTarget` and once in `assignTarget` for scout scoring — because
+  both run in the same `Promise.all` and sharing the result would require
+  refactoring `assignMiningTarget`'s return type. Both calls run in parallel
+  so there's no latency penalty; the redundant HTTP round-trip is the cost.
+- No per-market refresh cooldown after scouting — after a `scout_market_refresh`
+  the market's `last_refreshed_at` is recorded, stalenessFactor resets to 0,
+  and score drops to 0, so the planner naturally won't re-scout it until it
+  ages again. No explicit cooldown knob needed.
+- Scouting doesn't track *which* price changed or by how much — it just
+  records that data was refreshed. Downstream decisions (contract evaluation,
+  mining market selection) re-read from the navigation service each time they
+  run anyway, so they always get current data when it matters.
+
+### New knobs
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `scout.taskWeight` | `1` | Multiplier applied to every scouting-task score. |
+| `scout.valuePerRefresh` | `0` | Flat credit value of refreshing one market's intel; **set above 0 to enable scouting**. |
+| `scout.stalenessThresholdHours` | `0.5` | Hours at which a market's scouting score equals `scout.valuePerRefresh / cycleHours`. |
 
 ## Shadow mode (meta#21)
 

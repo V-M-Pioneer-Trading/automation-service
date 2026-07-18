@@ -135,6 +135,31 @@ export const KNOB_DEFINITIONS: KnobDefinition[] = [
     max: 1_000_000,
     description: "A contract is only accepted if its deterministic expected profit exceeds this.",
   },
+  {
+    name: "scout.taskWeight",
+    default: 1,
+    min: 0,
+    max: 10,
+    description: "Multiplier applied to every scouting-task score, in the same units as mine.taskWeight.",
+  },
+  {
+    name: "scout.valuePerRefresh",
+    default: 0,
+    min: 0,
+    max: 1_000_000,
+    description:
+      "Flat credit value attributed to refreshing one market's intel. " +
+      "Defaults to 0 (scouting disabled) — set above zero to have the planner compete scouting against mining.",
+  },
+  {
+    name: "scout.stalenessThresholdHours",
+    default: 0.5,
+    min: 0.1,
+    max: 168,
+    description:
+      "Hours since last refresh at which a market's scouting score equals scout.valuePerRefresh / cycleHours. " +
+      "Score grows linearly past this threshold.",
+  },
 ];
 
 export interface Knob {

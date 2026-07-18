@@ -73,7 +73,7 @@ export async function travelTo(
   clients: GameClients,
   authHeader: string,
   arrivedPhase: ShipTask["phase"],
-  eventPrefix: "mining" | "contract" = "mining"
+  eventPrefix: "mining" | "contract" | "scout" = "mining"
 ): Promise<TickResult> {
   if (ship.nav.waypointSymbol === destinationWaypoint && ship.nav.status !== "IN_TRANSIT") {
     return {

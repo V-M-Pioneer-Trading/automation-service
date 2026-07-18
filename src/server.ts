@@ -7,6 +7,7 @@ import { Clock, systemClock } from "./clock";
 import { ServiceConfig, configFromEnv } from "./config";
 import { ContractRepo } from "./contractRepo";
 import { createPool, migrate } from "./db";
+import { MarketIntelRepo } from "./marketIntelRepo";
 import { EventLog } from "./eventLog";
 import { createGameClients, UpstreamCallError } from "./gameClients";
 import { KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
@@ -93,10 +94,11 @@ export function createApp(
 
   const gameClients = mining !== undefined ? createGameClients(mining) : null;
   const planner = gameClients !== null ? new Planner(gameClients, knobs) : null;
+  const marketIntelRepo = new MarketIntelRepo(pool, clock);
 
   const scheduler =
     mining !== undefined && gameClients !== null && planner !== null
-      ? new MiningScheduler(state, shipTaskRepo, events, gameClients, clock, planner, knobs, contractRepo, {
+      ? new MiningScheduler(state, shipTaskRepo, events, gameClients, clock, planner, knobs, contractRepo, marketIntelRepo, {
           shipSymbol: mining.miningShipSymbol,
           intervalMs: mining.schedulerIntervalMs,
         })
