@@ -13,6 +13,7 @@ append-only event log for the SpaceTraders fleet
 [meta#15](https://github.com/V-M-Pioneer-Trading/meta/issues/15),
 [meta#18](https://github.com/V-M-Pioneer-Trading/meta/issues/18),
 [meta#19](https://github.com/V-M-Pioneer-Trading/meta/issues/19),
+[meta#20](https://github.com/V-M-Pioneer-Trading/meta/issues/20),
 [meta#21](https://github.com/V-M-Pioneer-Trading/meta/issues/21)).
 
 ## What it does
@@ -421,7 +422,10 @@ it grows one row per tick indefinitely.
 `GET /metrics/context?rollupLimit=&eventLimit=` returns rollups and recent
 event-log entries together in one bounded response (default 10 rollups / 20
 events, capped at 200 / 100) — shaped to fit an AI context window, which is
-what the future AI supervisor (meta#19) and MCP server (meta#20) will read.
+what the AI supervisor ([ai-service](https://github.com/V-M-Pioneer-Trading/ai-service),
+meta#19) and the [spacetraders-mcp-server](https://github.com/V-M-Pioneer-Trading/spacetraders-mcp-server)
+(meta#20) both read, for an autonomous and an interactive-operator consumer
+of the same context respectively.
 
 ## Anomaly detection (meta#15)
 
