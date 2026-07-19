@@ -12,6 +12,7 @@ append-only event log for the SpaceTraders fleet
 [meta#14](https://github.com/V-M-Pioneer-Trading/meta/issues/14),
 [meta#15](https://github.com/V-M-Pioneer-Trading/meta/issues/15),
 [meta#18](https://github.com/V-M-Pioneer-Trading/meta/issues/18),
+[meta#19](https://github.com/V-M-Pioneer-Trading/meta/issues/19),
 [meta#21](https://github.com/V-M-Pioneer-Trading/meta/issues/21)).
 
 ## What it does
@@ -446,6 +447,19 @@ underlying condition (by `dedupeKey`) are suppressed for
 problem stays open. `GET /anomalies/digest?windowMinutes=&anomalyLimit=&eventLimit=`
 returns anomalies plus notable lifecycle/failure events (not every routine
 mining tick) for a requested window — the source for an hourly pull review.
+
+## External events (meta#19)
+
+`POST /events { type, detail }` lets an external supervisor
+([ai-service](https://github.com/V-M-Pioneer-Trading/ai-service)) append its
+own audit-trail entries — `type` must start with `ai_` (`400` otherwise), so
+an unauthenticated external caller can log its own decisions but can never
+spoof a lifecycle/planner event type (`armed`, `knob_changed`, etc.) the rest
+of this service treats as authoritative. `ai_intervention` and
+`ai_no_action` are both included in `NOTABLE_EVENT_TYPES`, so they show up in
+`GET /anomalies/digest` alongside everything else notable — both for an
+operator's hourly review and so ai-service's own next run sees its prior
+actions in the digest it reads for context.
 
 **v1 simplifications**:
 

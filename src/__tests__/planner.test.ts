@@ -199,6 +199,28 @@ describe("automation-service planner (meta#10)", () => {
     });
   });
 
+  it("POST /events accepts an ai_-namespaced event and rejects anything outside that namespace", async () => {
+    const gateway = app();
+
+    const okRes = await request(gateway)
+      .post("/events")
+      .send({ type: "ai_intervention", detail: { anomalyId: "42", rationale: "raised the failure limit" } });
+    expect(okRes.status).toBe(201);
+
+    const spoofRes = await request(gateway)
+      .post("/events")
+      .send({ type: "armed", detail: {} });
+    expect(spoofRes.status).toBe(400);
+
+    const missingPrefixRes = await request(gateway).post("/events").send({ type: "intervention" });
+    expect(missingPrefixRes.status).toBe(400);
+
+    const eventsRes = await request(gateway).get("/autopilot/events?limit=50");
+    const aiEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "ai_intervention");
+    expect(aiEvents).toHaveLength(1);
+    expect(aiEvents[0].detail).toMatchObject({ anomalyId: "42", rationale: "raised the failure limit" });
+  });
+
   it("assigns the reachable, highest-scoring asteroid field and logs the scoring inputs for replay", async () => {
     const gateway = app();
     await request(gateway).post("/autopilot/arm").send({ token: "test-token" });

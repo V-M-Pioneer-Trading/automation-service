@@ -42,6 +42,12 @@ const NOTABLE_EVENT_TYPES = [
   "mining_no_market_found",
   "mining_discarded_after_abort",
   "planner_discarded_after_abort_or_pause",
+  // meta#19's ai-service supervisor logs these via POST /events — included
+  // here so both the digest (an operator's hourly review) and the
+  // supervisor's own next run (which reads this same digest for context)
+  // see prior AI actions, not just command-interface's unfiltered Event Feed.
+  "ai_intervention",
+  "ai_no_action",
 ];
 
 /** Express 4 does not forward async-handler rejections to error middleware on its own. */
@@ -199,6 +205,29 @@ export function createApp(
     asyncHandler(async (req, res) => {
       const limit = clampLimit(req.query.limit, 100, MAX_EVENTS_LIMIT);
       res.json({ events: await events.list(limit) });
+    })
+  );
+
+  // For an external supervisor (meta#19's ai-service) to log its own rationale
+  // into the same audit trail everything else here uses. `type` is restricted
+  // to the "ai_" namespace so an external caller can log its own decisions but
+  // can never spoof a lifecycle/planner event type (e.g. "armed", "knob_changed")
+  // that the rest of this service treats as authoritative.
+  app.post(
+    "/events",
+    asyncHandler(async (req, res) => {
+      const type = req.body?.type;
+      const detail = req.body?.detail;
+      if (typeof type !== "string" || !type.startsWith("ai_")) {
+        res.status(400).json({ error: { message: 'type must be a string starting with "ai_"' } });
+        return;
+      }
+      if (detail !== undefined && (typeof detail !== "object" || detail === null || Array.isArray(detail))) {
+        res.status(400).json({ error: { message: "detail must be an object" } });
+        return;
+      }
+      await events.append(type, detail ?? {});
+      res.status(201).json({ ok: true });
     })
   );
 
