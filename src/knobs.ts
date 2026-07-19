@@ -207,18 +207,32 @@ export class KnobRepo {
     return Number(rows[0].value);
   }
 
-  async set(name: string, value: number): Promise<Knob> {
-    const { rows } = await this.pool.query(
-      "SELECT name, value, default_value, min_value, max_value FROM knob WHERE name = $1",
-      [name]
-    );
-    if (rows.length === 0) throw new KnobNotFoundError(name);
-    const knob = rowToKnob(rows[0]);
-    if (value < knob.min || value > knob.max) {
-      throw new KnobOutOfRangeError(name, value, knob.min, knob.max);
+  // Reads and writes on the same row within one client-held transaction (with a
+  // row lock), so the previousValue returned is always the value actually
+  // overwritten — a plain pool.query() get() followed by a separate set() call
+  // could interleave with a concurrent writer and report a stale previousValue.
+  async set(name: string, value: number): Promise<{ knob: Knob; previousValue: number }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        "SELECT name, value, default_value, min_value, max_value FROM knob WHERE name = $1 FOR UPDATE",
+        [name]
+      );
+      if (rows.length === 0) throw new KnobNotFoundError(name);
+      const knob = rowToKnob(rows[0]);
+      if (value < knob.min || value > knob.max) {
+        throw new KnobOutOfRangeError(name, value, knob.min, knob.max);
+      }
+      await client.query("UPDATE knob SET value = $2 WHERE name = $1", [name, value]);
+      await client.query("COMMIT");
+      return { knob: { ...knob, value }, previousValue: knob.value };
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
-    await this.pool.query("UPDATE knob SET value = $2 WHERE name = $1", [name, value]);
-    return { ...knob, value };
   }
 }
 

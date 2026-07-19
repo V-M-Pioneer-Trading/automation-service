@@ -11,6 +11,7 @@ append-only event log for the SpaceTraders fleet
 [meta#13](https://github.com/V-M-Pioneer-Trading/meta/issues/13),
 [meta#14](https://github.com/V-M-Pioneer-Trading/meta/issues/14),
 [meta#15](https://github.com/V-M-Pioneer-Trading/meta/issues/15),
+[meta#18](https://github.com/V-M-Pioneer-Trading/meta/issues/18),
 [meta#21](https://github.com/V-M-Pioneer-Trading/meta/issues/21)).
 
 ## What it does
@@ -136,7 +137,13 @@ indefinitely rather than stranding that cargo.
 
 `GET /planner/knobs` lists every knob (`name`, `value`, `default`, `min`,
 `max`). `PUT /planner/knobs/:name { value }` updates one — `404` for an
-unknown name, `400` for a value outside `[min, max]`.
+unknown name, `400` for a value outside `[min, max]`. A successful write is
+logged as a `knob_changed` event (`{name, previousValue, newValue}`) and
+triggers a fleet replan ([meta#13](https://github.com/V-M-Pioneer-Trading/meta/issues/13))
+— read and write happen inside one transaction (`SELECT ... FOR UPDATE`) so
+`previousValue` is always the value actually overwritten, never stale under
+concurrent writes to the same knob. [meta#18](https://github.com/V-M-Pioneer-Trading/meta/issues/18)
+adds a UI editor for these on top of this same endpoint.
 
 | Knob | Default | Meaning |
 |---|---|---|

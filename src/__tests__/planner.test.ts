@@ -186,6 +186,17 @@ describe("automation-service planner (meta#10)", () => {
     const persistedRes = await request(gateway).get("/planner/knobs");
     const persisted = persistedRes.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
     expect(persisted.value).toBe(1000); // the rejected write never took effect
+
+    // The one successful write above is visible in the event feed with both
+    // values — the rejected out-of-range and unknown-name writes are not.
+    const eventsRes = await request(gateway).get("/autopilot/events?limit=50");
+    const knobEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "knob_changed");
+    expect(knobEvents).toHaveLength(1);
+    expect(knobEvents[0].detail).toMatchObject({
+      name: "credit.reserveFloor",
+      previousValue: 0,
+      newValue: 1000,
+    });
   });
 
   it("assigns the reachable, highest-scoring asteroid field and logs the scoring inputs for replay", async () => {

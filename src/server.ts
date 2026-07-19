@@ -218,7 +218,14 @@ export function createApp(
         return;
       }
       try {
-        const knob = await knobs.set(req.params.name, value);
+        // set() reads and writes within one transaction so previousValue is
+        // never stale under concurrent writes to the same knob.
+        const { knob, previousValue } = await knobs.set(req.params.name, value);
+        await events.append("knob_changed", {
+          name: req.params.name,
+          previousValue,
+          newValue: knob.value,
+        });
         scheduler?.requestReplan("knob_change");
         res.json({ knob });
       } catch (err) {
