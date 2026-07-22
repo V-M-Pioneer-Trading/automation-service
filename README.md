@@ -18,7 +18,7 @@ append-only event log for the SpaceTraders fleet
 
 ## What it does
 
-- **Arm**: `POST /autopilot/arm { token, mode? }` holds the SpaceTraders
+- **Arm**: `POST /api/automation/v1/autopilot/arm { token, mode? }` holds the SpaceTraders
   account token **in memory only** — nothing token-shaped is ever written to
   Postgres or echoed back. A restart always disarms; there is no
   auto-resume. Arming is allowed from any status (including re-arming after
@@ -26,17 +26,17 @@ append-only event log for the SpaceTraders fleet
   `mode` is `"live"` (default) or `"shadow"` — see below. Switching between
   them always goes through an explicit re-arm; there's no other way to
   change it.
-- **Pause**: `POST /autopilot/pause` — only valid while armed. The scheduler
+- **Pause**: `POST /api/automation/v1/autopilot/pause` — only valid while armed. The scheduler
   keeps polling so an already-dispatched wait (a transit or a cooldown) gets
   to finish and its result gets recorded, but no *new* action is dispatched
   afterward — the ship idles at whatever phase that wait resolved into.
-- **Abort**: `POST /autopilot/abort` — valid while armed or paused, clears
+- **Abort**: `POST /api/automation/v1/autopilot/abort` — valid while armed or paused, clears
   the held token and stops the scheduler immediately (no further dispatch,
   not even finishing an in-flight wait).
-- **Status**: `GET /autopilot/status` — current lifecycle state and mode
+- **Status**: `GET /api/automation/v1/autopilot/status` — current lifecycle state and mode
   (`mode` is `null` whenever no token is held, i.e. disarmed or aborted).
 - **Event log**: every transition and every mining action is appended to
-  Postgres (`GET /autopilot/events?limit=`, newest first) and survives
+  Postgres (`GET /api/automation/v1/autopilot/events?limit=`, newest first) and survives
   restarts even though the lifecycle state itself does not.
 
 Invalid transitions (e.g. pausing while disarmed) return `409` naming the
@@ -56,7 +56,7 @@ agent-service, and fleet-service — this service never calls SpaceTraders
 directly. Per-ship progress persists to Postgres (`ship_task`), so a restart
 + re-arm resumes from the last completed phase instead of starting over.
 
-`GET /autopilot/ships/:shipSymbol` returns the ship's current phase, wait
+`GET /api/automation/v1/autopilot/ships/:shipSymbol` returns the ship's current phase, wait
 state, and in-progress survey/market data.
 
 **Deliberate tracer-bullet simplifications** (this ticket proves the FSM
@@ -119,7 +119,7 @@ made (`planner_no_viable_target`) and the ship idles until conditions change.
 Every assignment decision — every candidate considered, its distance,
 reachability, score, and reserve-floor check, plus the knob values used — is
 logged as a `planner_assignment` event, so any decision can be replayed from
-`GET /autopilot/events`.
+`GET /api/automation/v1/autopilot/events`.
 
 **v1 simplification**: `expectedCreditsPerCycle` is a flat knob-configured
 estimate, not yet derived from real per-good extraction yield and market
@@ -137,8 +137,8 @@ indefinitely rather than stranding that cargo.
 
 ### Knobs
 
-`GET /planner/knobs` lists every knob (`name`, `value`, `default`, `min`,
-`max`). `PUT /planner/knobs/:name { value }` updates one — `404` for an
+`GET /api/automation/v1/planner/knobs` lists every knob (`name`, `value`, `default`, `min`,
+`max`). `PUT /api/automation/v1/planner/knobs/:name { value }` updates one — `404` for an
 unknown name, `400` for a value outside `[min, max]`. A successful write is
 logged as a `knob_changed` event (`{name, previousValue, newValue}`) and
 triggers a fleet replan ([meta#13](https://github.com/V-M-Pioneer-Trading/meta/issues/13))
@@ -272,7 +272,7 @@ takes over.
 
 **Default: opt-in** (`scout.valuePerRefresh = 0`). Scouting only competes
 for assignments when an operator explicitly sets `scout.valuePerRefresh > 0`
-via `PUT /planner/knobs/scout.valuePerRefresh`. This keeps the default
+via `PUT /api/automation/v1/planner/knobs/scout.valuePerRefresh`. This keeps the default
 behavior purely mining-and-contracts — scouting doesn't win any assignment
 until it's valued.
 
@@ -315,9 +315,9 @@ current knobs/state whenever something changes that could make a different
 choice — not just the moment a ship becomes idle. Three trigger sources call
 `MiningScheduler.requestReplan(reason)`:
 
-- **Knob change** — any successful `PUT /planner/knobs/:name`
+- **Knob change** — any successful `PUT /api/automation/v1/planner/knobs/:name`
 - **Anomaly** — any newly-recorded (non-deduped) anomaly from the meta#15 checks
-- **Manual** — `POST /planner/replan`
+- **Manual** — `POST /api/automation/v1/planner/replan`
 
 plus a **periodic fallback** that fires on `REPLAN_INTERVAL_MS` (default 5
 minutes) regardless of whether anything else triggered one, so a replan still
@@ -368,7 +368,7 @@ shipsConsidered }`.
 
 ### New endpoint
 
-`POST /planner/replan` — requests a replan (subject to the debounce above).
+`POST /api/automation/v1/planner/replan` — requests a replan (subject to the debounce above).
 Responds `{ requested: true }` immediately; the actual replan runs on a
 subsequent scheduler tick once due.
 
@@ -419,7 +419,7 @@ restart) would each bootstrap from the same `window_end` and double-count
 that window's activity. `metrics_rollup` also has no retention/pruning yet;
 it grows one row per tick indefinitely.
 
-`GET /metrics/context?rollupLimit=&eventLimit=` returns rollups and recent
+`GET /api/automation/v1/metrics/context?rollupLimit=&eventLimit=` returns rollups and recent
 event-log entries together in one bounded response (default 10 rollups / 20
 events, capped at 200 / 100) — shaped to fit an AI context window, which is
 what the AI supervisor ([ai-service](https://github.com/V-M-Pioneer-Trading/ai-service),
@@ -448,20 +448,20 @@ Each anomaly is **persisted before** its webhook delivery is attempted —
 and exponential backoff (`WebhookDelivery`). Repeat firings of the same
 underlying condition (by `dedupeKey`) are suppressed for
 `anomaly.dedupeCooldownMinutes` rather than paging the webhook every tick a
-problem stays open. `GET /anomalies/digest?windowMinutes=&anomalyLimit=&eventLimit=`
+problem stays open. `GET /api/automation/v1/anomalies/digest?windowMinutes=&anomalyLimit=&eventLimit=`
 returns anomalies plus notable lifecycle/failure events (not every routine
 mining tick) for a requested window — the source for an hourly pull review.
 
 ## External events (meta#19)
 
-`POST /events { type, detail }` lets an external supervisor
+`POST /api/automation/v1/events { type, detail }` lets an external supervisor
 ([ai-service](https://github.com/V-M-Pioneer-Trading/ai-service)) append its
 own audit-trail entries — `type` must start with `ai_` (`400` otherwise), so
 an unauthenticated external caller can log its own decisions but can never
 spoof a lifecycle/planner event type (`armed`, `knob_changed`, etc.) the rest
 of this service treats as authoritative. `ai_intervention` and
 `ai_no_action` are both included in `NOTABLE_EVENT_TYPES`, so they show up in
-`GET /anomalies/digest` alongside everything else notable — both for an
+`GET /api/automation/v1/anomalies/digest` alongside everything else notable — both for an
 operator's hourly review and so ai-service's own next run sees its prior
 actions in the digest it reads for context.
 

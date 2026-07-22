@@ -133,7 +133,7 @@ describe("automation-service planner (meta#10)", () => {
   let gateways: ReturnType<typeof createApp>[] = [];
 
   afterEach(async () => {
-    await Promise.all(gateways.map((g) => request(g).post("/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => agent.server.close(() => r())),
@@ -158,7 +158,7 @@ describe("automation-service planner (meta#10)", () => {
   const waitForAssignment = async (gateway: ReturnType<typeof createApp>, timeoutMs = 2000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const res = await request(gateway).get("/autopilot/ships/MINING-1");
+      const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.asteroidWaypoint !== null) return res.body.task;
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -168,28 +168,28 @@ describe("automation-service planner (meta#10)", () => {
   it("knob table: reads defaults, accepts an in-range write, rejects out-of-range and unknown names", async () => {
     const gateway = app();
 
-    const listRes = await request(gateway).get("/planner/knobs");
+    const listRes = await request(gateway).get("/api/automation/v1/planner/knobs");
     expect(listRes.status).toBe(200);
     const reserveFloor = listRes.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
     expect(reserveFloor).toMatchObject({ value: 0, default: 0, min: 0 });
 
-    const okRes = await request(gateway).put("/planner/knobs/credit.reserveFloor").send({ value: 1000 });
+    const okRes = await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").send({ value: 1000 });
     expect(okRes.status).toBe(200);
     expect(okRes.body.knob.value).toBe(1000);
 
-    const rangeRes = await request(gateway).put("/planner/knobs/credit.reserveFloor").send({ value: -5 });
+    const rangeRes = await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").send({ value: -5 });
     expect(rangeRes.status).toBe(400);
 
-    const unknownRes = await request(gateway).put("/planner/knobs/does.not.exist").send({ value: 1 });
+    const unknownRes = await request(gateway).put("/api/automation/v1/planner/knobs/does.not.exist").send({ value: 1 });
     expect(unknownRes.status).toBe(404);
 
-    const persistedRes = await request(gateway).get("/planner/knobs");
+    const persistedRes = await request(gateway).get("/api/automation/v1/planner/knobs");
     const persisted = persistedRes.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
     expect(persisted.value).toBe(1000); // the rejected write never took effect
 
     // The one successful write above is visible in the event feed with both
     // values — the rejected out-of-range and unknown-name writes are not.
-    const eventsRes = await request(gateway).get("/autopilot/events?limit=50");
+    const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
     const knobEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "knob_changed");
     expect(knobEvents).toHaveLength(1);
     expect(knobEvents[0].detail).toMatchObject({
@@ -203,19 +203,19 @@ describe("automation-service planner (meta#10)", () => {
     const gateway = app();
 
     const okRes = await request(gateway)
-      .post("/events")
+      .post("/api/automation/v1/events")
       .send({ type: "ai_intervention", detail: { anomalyId: "42", rationale: "raised the failure limit" } });
     expect(okRes.status).toBe(201);
 
     const spoofRes = await request(gateway)
-      .post("/events")
+      .post("/api/automation/v1/events")
       .send({ type: "armed", detail: {} });
     expect(spoofRes.status).toBe(400);
 
-    const missingPrefixRes = await request(gateway).post("/events").send({ type: "intervention" });
+    const missingPrefixRes = await request(gateway).post("/api/automation/v1/events").send({ type: "intervention" });
     expect(missingPrefixRes.status).toBe(400);
 
-    const eventsRes = await request(gateway).get("/autopilot/events?limit=50");
+    const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
     const aiEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "ai_intervention");
     expect(aiEvents).toHaveLength(1);
     expect(aiEvents[0].detail).toMatchObject({ anomalyId: "42", rationale: "raised the failure limit" });
@@ -223,12 +223,12 @@ describe("automation-service planner (meta#10)", () => {
 
   it("assigns the reachable, highest-scoring asteroid field and logs the scoring inputs for replay", async () => {
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
 
     const task = await waitForAssignment(gateway);
     expect(task.asteroidWaypoint).toBe("X1-TEST-BELT-NEAR");
 
-    const eventsRes = await request(gateway).get("/autopilot/events?limit=50");
+    const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
     const assignmentEvent = eventsRes.body.events.find((e: { type: string }) => e.type === "planner_assignment");
     expect(assignmentEvent).toBeDefined();
     expect(assignmentEvent.detail.chosen).toBe("X1-TEST-BELT-NEAR");
@@ -251,18 +251,18 @@ describe("automation-service planner (meta#10)", () => {
     const gateway = app();
 
     // Set the floor above what the agent can afford after any candidate's estimated fuel cost.
-    await request(gateway).put("/planner/knobs/credit.reserveFloor").send({ value: 99_999 });
+    await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").send({ value: 99_999 });
     credits = 100_000; // fuel cost > 1 credit for any reachable field, so every candidate would breach the floor
 
-    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
 
     // Give the scheduler a few ticks to run and confirm it never assigns.
     await new Promise((r) => setTimeout(r, 200));
 
-    const task = await request(gateway).get("/autopilot/ships/MINING-1").then((r) => r.body.task);
+    const task = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
     expect(task.asteroidWaypoint).toBeNull();
 
-    const eventsRes = await request(gateway).get("/autopilot/events?limit=50");
+    const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
     const eventTypes = eventsRes.body.events.map((e: { type: string }) => e.type);
     expect(eventTypes).toContain("planner_no_viable_target");
 
@@ -279,14 +279,14 @@ describe("automation-service planner (meta#10)", () => {
     fleetShouldFail = true;
 
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
 
     await waitForAssignment(gateway); // first assignment happens immediately
 
     const deadline = Date.now() + 3000;
     let failedEventSeen = false;
     while (Date.now() < deadline && !failedEventSeen) {
-      const eventsRes = await request(gateway).get("/autopilot/events?limit=100");
+      const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
       failedEventSeen = eventsRes.body.events.some((e: { type: string }) => e.type === "mining_task_failed");
       if (!failedEventSeen) await new Promise((r) => setTimeout(r, 20));
     }
@@ -297,7 +297,7 @@ describe("automation-service planner (meta#10)", () => {
     const secondAssignmentDeadline = Date.now() + 2000;
     let assignmentCount = 0;
     while (Date.now() < secondAssignmentDeadline && assignmentCount < 2) {
-      const eventsRes = await request(gateway).get("/autopilot/events?limit=100");
+      const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
       assignmentCount = eventsRes.body.events.filter((e: { type: string }) => e.type === "planner_assignment").length;
       if (assignmentCount < 2) await new Promise((r) => setTimeout(r, 20));
     }

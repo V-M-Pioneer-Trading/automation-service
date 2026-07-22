@@ -33,7 +33,7 @@ describe("automation-service autopilot lifecycle", () => {
   const app = (clock?: Clock) => createApp(pool, clock);
 
   it("starts disarmed", async () => {
-    const res = await request(app()).get("/autopilot/status");
+    const res = await request(app()).get("/api/automation/v1/autopilot/status");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "disarmed", mode: null });
   });
@@ -42,14 +42,14 @@ describe("automation-service autopilot lifecycle", () => {
     const clock = new FakeClock(new Date("2026-07-17T10:00:00Z"));
     const gateway = app(clock);
 
-    const armRes = await request(gateway).post("/autopilot/arm").send({ token: "secret-st-token" });
+    const armRes = await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "secret-st-token" });
     expect(armRes.status).toBe(200);
     expect(armRes.body).toEqual({ status: "armed", mode: "live" });
 
-    const statusRes = await request(gateway).get("/autopilot/status");
+    const statusRes = await request(gateway).get("/api/automation/v1/autopilot/status");
     expect(statusRes.body).toEqual({ status: "armed", mode: "live" });
 
-    const eventsRes = await request(gateway).get("/autopilot/events");
+    const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events");
     expect(eventsRes.body.events).toHaveLength(1);
     expect(eventsRes.body.events[0]).toMatchObject({ type: "armed", detail: { from: "disarmed" } });
     expect(eventsRes.body.events[0].occurredAt).toBe("2026-07-17T10:00:00.000Z");
@@ -59,76 +59,76 @@ describe("automation-service autopilot lifecycle", () => {
   });
 
   it("rejects arming without a token", async () => {
-    const res = await request(app()).post("/autopilot/arm").send({});
+    const res = await request(app()).post("/api/automation/v1/autopilot/arm").send({});
     expect(res.status).toBe(400);
-    const statusRes = await request(app()).get("/autopilot/status");
+    const statusRes = await request(app()).get("/api/automation/v1/autopilot/status");
     expect(statusRes.body.status).toBe("disarmed");
   });
 
   it("pauses from armed and logs it", async () => {
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
-    const res = await request(gateway).post("/autopilot/pause");
+    const res = await request(gateway).post("/api/automation/v1/autopilot/pause");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "paused", mode: "live" });
 
-    const eventsRes = await request(gateway).get("/autopilot/events");
+    const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events");
     expect(eventsRes.body.events[0]).toMatchObject({ type: "paused", detail: { from: "armed" } });
   });
 
   it("rejects pausing when not armed", async () => {
-    const res = await request(app()).post("/autopilot/pause");
+    const res = await request(app()).post("/api/automation/v1/autopilot/pause");
     expect(res.status).toBe(409);
     expect(res.body.error.message).toMatch(/disarmed/);
   });
 
   it("aborts from armed or paused, clearing the held token, and logs it", async () => {
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
-    const res = await request(gateway).post("/autopilot/abort");
+    const res = await request(gateway).post("/api/automation/v1/autopilot/abort");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "aborted", mode: null });
 
-    const eventsRes = await request(gateway).get("/autopilot/events");
+    const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events");
     expect(eventsRes.body.events[0]).toMatchObject({ type: "aborted", detail: { from: "armed" } });
   });
 
   it("aborts from paused too", async () => {
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "t" });
-    await request(gateway).post("/autopilot/pause");
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/pause");
 
-    const res = await request(gateway).post("/autopilot/abort");
+    const res = await request(gateway).post("/api/automation/v1/autopilot/abort");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "aborted", mode: null });
   });
 
   it("rejects aborting when disarmed", async () => {
-    const res = await request(app()).post("/autopilot/abort");
+    const res = await request(app()).post("/api/automation/v1/autopilot/abort");
     expect(res.status).toBe(409);
   });
 
   it("allows re-arming from paused or aborted", async () => {
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "t" });
-    await request(gateway).post("/autopilot/abort");
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/abort");
 
-    const res = await request(gateway).post("/autopilot/arm").send({ token: "t2" });
+    const res = await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t2" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "armed", mode: "live" });
   });
 
   it("a fresh app instance (simulated restart) always starts disarmed even though prior events persisted", async () => {
     const firstRun = app();
-    await request(firstRun).post("/autopilot/arm").send({ token: "t" });
+    await request(firstRun).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
     const restarted = app();
-    const statusRes = await request(restarted).get("/autopilot/status");
+    const statusRes = await request(restarted).get("/api/automation/v1/autopilot/status");
     expect(statusRes.body.status).toBe("disarmed");
 
-    const eventsRes = await request(restarted).get("/autopilot/events");
+    const eventsRes = await request(restarted).get("/api/automation/v1/autopilot/events");
     expect(eventsRes.body.events).toHaveLength(1); // event log survived the "restart"
   });
 
@@ -136,13 +136,13 @@ describe("automation-service autopilot lifecycle", () => {
     const clock = new FakeClock(new Date("2026-07-17T10:00:00Z"));
     const gateway = app(clock);
 
-    await request(gateway).post("/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
     clock.advance(1000);
-    await request(gateway).post("/autopilot/pause");
+    await request(gateway).post("/api/automation/v1/autopilot/pause");
     clock.advance(1000);
-    await request(gateway).post("/autopilot/abort");
+    await request(gateway).post("/api/automation/v1/autopilot/abort");
 
-    const res = await request(gateway).get("/autopilot/events?limit=2");
+    const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=2");
     expect(res.body.events).toHaveLength(2);
     expect(res.body.events[0].type).toBe("aborted");
     expect(res.body.events[1].type).toBe("paused");
@@ -150,10 +150,10 @@ describe("automation-service autopilot lifecycle", () => {
 
   it("does not error on an oversized or malformed limit", async () => {
     const gateway = app();
-    const huge = await request(gateway).get("/autopilot/events?limit=999999999");
+    const huge = await request(gateway).get("/api/automation/v1/autopilot/events?limit=999999999");
     expect(huge.status).toBe(200);
 
-    const repeated = await request(gateway).get("/autopilot/events?limit=1&limit=2");
+    const repeated = await request(gateway).get("/api/automation/v1/autopilot/events?limit=1&limit=2");
     expect(repeated.status).toBe(200); // array value falls back to the default, not a crash
   });
 });
@@ -169,13 +169,13 @@ describe("automation-service error mapping", () => {
   const failingApp = () => createApp(new FailingPool() as unknown as Pool);
 
   it("returns 500 instead of hanging when the event log write fails during arm", async () => {
-    const res = await request(failingApp()).post("/autopilot/arm").send({ token: "t" });
+    const res = await request(failingApp()).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
     expect(res.status).toBe(500);
     expect(res.body.error.message).toBeDefined();
   });
 
   it("returns 500 instead of hanging when the event log read fails", async () => {
-    const res = await request(failingApp()).get("/autopilot/events");
+    const res = await request(failingApp()).get("/api/automation/v1/autopilot/events");
     expect(res.status).toBe(500);
     expect(res.body.error.message).toBeDefined();
   });

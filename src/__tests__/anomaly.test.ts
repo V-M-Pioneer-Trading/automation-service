@@ -87,7 +87,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     // still-ticking interval can fire once more and write into what's about to
     // become the next test's freshly-truncated tables.
     await Promise.all(gateways.map((g) => g.locals.stopBackgroundSchedulers?.()));
-    await Promise.all(gateways.map((g) => request(g).post("/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => webhook.server.close(() => r())),
@@ -117,7 +117,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
   const waitForAnomaly = async (gateway: ReturnType<typeof createApp>, type: string, timeoutMs = 2000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const res = await request(gateway).get("/anomalies/digest?windowMinutes=10080");
+      const res = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
       const found = res.body.anomalies.find((a: { type: string }) => a.type === type);
       if (found !== undefined) return found;
       await new Promise((r) => setTimeout(r, 10));
@@ -127,7 +127,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
   const expectNoAnomaly = async (gateway: ReturnType<typeof createApp>, type: string, settleMs = 100) => {
     await new Promise((r) => setTimeout(r, settleMs));
-    const res = await request(gateway).get("/anomalies/digest?windowMinutes=10080");
+    const res = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
     expect(res.body.anomalies.some((a: { type: string }) => a.type === type)).toBe(false);
   };
 
@@ -137,7 +137,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
       ["MINING-1", clock.now()]
     );
     const gateway = app({ withMining: true });
-    await request(gateway).post("/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
     await expectNoAnomaly(gateway, "ship_idle"); // not idle yet (default threshold is 10 minutes)
 
@@ -247,7 +247,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
   it("fires credits_flat when agent credits show no net increase across the window", async () => {
     const gateway = app({ withMining: true });
-    await request(gateway).post("/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
     // First snapshot at window start.
     await new Promise((r) => setTimeout(r, 30));
@@ -259,7 +259,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
   it("does not fire credits_flat when credits have grown", async () => {
     const gateway = app({ withMining: true });
-    await request(gateway).post("/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
     await new Promise((r) => setTimeout(r, 30));
     clock.advance(2 * 60 * 60 * 1000 + 60_000);
@@ -280,7 +280,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     const gateway = app();
     const anomaly = await waitForAnomaly(gateway, "market_stale");
     expect(anomaly.detail.market).toBe("X1-TEST-STALE");
-    const digest = await request(gateway).get("/anomalies/digest?windowMinutes=10080");
+    const digest = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
     expect(digest.body.anomalies.some((a: { detail: { market?: string } }) => a.detail.market === "X1-TEST-FRESH")).toBe(false);
   }, 10_000);
 
@@ -299,7 +299,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     const attemptsAfterFailure = webhook.calls.length;
     expect(attemptsAfterFailure).toBeGreaterThanOrEqual(3); // default maxAttempts
 
-    const digestBefore = await request(gateway).get("/anomalies/digest?windowMinutes=10080");
+    const digestBefore = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
     expect(digestBefore.body.anomalies[0].deliveredAt).toBeNull();
 
     // Once the webhook recovers, it should stay quiet — the dedupe cooldown
@@ -318,7 +318,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     await waitForAnomaly(gateway, "consecutive_failures");
     await new Promise((r) => setTimeout(r, 100)); // several more ticks, condition still true
 
-    const digest = await request(gateway).get("/anomalies/digest?windowMinutes=10080");
+    const digest = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
     const matching = digest.body.anomalies.filter((a: { type: string }) => a.type === "consecutive_failures");
     expect(matching).toHaveLength(1); // only fired once despite the condition persisting across ticks
   }, 10_000);
@@ -333,7 +333,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     ]);
 
     const gateway = app();
-    const res = await request(gateway).get("/anomalies/digest?windowMinutes=60");
+    const res = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=60");
     expect(res.status).toBe(200);
     const eventTypes = res.body.events.map((e: { type: string }) => e.type);
     expect(eventTypes).toContain("armed");
@@ -344,7 +344,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
   it("has no /anomalies/digest route when anomaly detection isn't configured", async () => {
     const gateway = createApp(pool, clock);
-    const res = await request(gateway).get("/anomalies/digest");
+    const res = await request(gateway).get("/api/automation/v1/anomalies/digest");
     expect(res.status).toBe(404);
   });
 });
