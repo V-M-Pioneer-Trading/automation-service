@@ -168,7 +168,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
       const res = await request(gateway).get("/autopilot/events?limit=100");
       const found = res.body.events.find((e: { type: string }) => e.type === type);
       if (found !== undefined) return found;
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     throw new Error(`timed out waiting for event ${type}`);
   };
@@ -178,7 +178,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.phase === phase) return res.body.task;
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     throw new Error(`timed out waiting for phase ${phase}`);
   };
@@ -269,7 +269,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
         miningTask = res.body.task;
         break;
       }
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     expect(miningTask).not.toBeNull();
     expect(miningTask!.asteroidWaypoint).toBe("X1-TEST-BELT");

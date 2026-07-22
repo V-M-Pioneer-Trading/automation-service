@@ -160,7 +160,7 @@ describe("automation-service planner (meta#10)", () => {
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.asteroidWaypoint !== null) return res.body.task;
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     throw new Error("timed out waiting for a planner assignment");
   };

@@ -145,7 +145,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.asteroidWaypoint !== null) return res.body.task;
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     throw new Error("timed out waiting for a planner assignment");
   };
@@ -165,7 +165,7 @@ describe("automation-service fleet replan (meta#13)", () => {
       const res = await request(gateway).get("/autopilot/events?limit=1000");
       const replans = res.body.events.filter((e: { type: string }) => e.type === "replan_executed");
       if (replans.length >= count) return replans;
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     throw new Error(`timed out waiting for ${count} replan_executed events`);
   };

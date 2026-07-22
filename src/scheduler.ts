@@ -477,17 +477,20 @@ export class MiningScheduler {
       await this.repo.save({ ...task, failureCount });
       return;
     }
-    await this.events.append("mining_task_failed", {
-      shipSymbol: this.config.shipSymbol,
-      asteroidWaypoint: task.asteroidWaypoint,
-      contractId: task.contractId,
-      failureCount,
-    });
     // Release an abandoned contract back to the pool rather than leaving it
     // permanently "assigned" to a ship that's given up on it.
     if (task.taskKind === "contract" && task.contractId !== null) {
       await this.contracts.setStatus(task.contractId, "accepted");
     }
     await this.repo.save({ ...task, ...FRESH_MINING_TASK });
+    // Logged only after both writes commit — same save-then-log order as the
+    // success path in tick() — so anything reacting to this event (metrics,
+    // an external consumer) can trust the reassignment is already visible.
+    await this.events.append("mining_task_failed", {
+      shipSymbol: this.config.shipSymbol,
+      asteroidWaypoint: task.asteroidWaypoint,
+      contractId: task.contractId,
+      failureCount,
+    });
   }
 }

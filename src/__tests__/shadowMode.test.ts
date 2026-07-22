@@ -158,7 +158,7 @@ describe("automation-service shadow mode (meta#21)", () => {
     while (Date.now() < deadline && shadowEvents < 2) {
       const eventsRes = await request(gateway).get("/autopilot/events?limit=100");
       shadowEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "planner_shadow_assignment").length;
-      if (shadowEvents < 2) await new Promise((r) => setTimeout(r, 15));
+      if (shadowEvents < 2) await new Promise((r) => setTimeout(r, 5));
     }
     expect(shadowEvents).toBeGreaterThanOrEqual(2); // the cycle replays every tick, not just once
 
@@ -186,7 +186,7 @@ describe("automation-service shadow mode (meta#21)", () => {
 
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline && fleet.calls.length === 0) {
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     // Live mode really does dispatch a ship-action call — specifically the
     // orbit dispatch toward the newly (live-)assigned target, not just any

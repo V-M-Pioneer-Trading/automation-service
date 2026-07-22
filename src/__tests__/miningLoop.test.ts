@@ -203,7 +203,7 @@ describe("automation-service mining loop", () => {
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.phase === phase) return res.body.task;
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     throw new Error(`timed out waiting for phase ${phase}`);
   };
@@ -213,7 +213,7 @@ describe("automation-service mining loop", () => {
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.waitingUntil !== null) return res.body.task;
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     throw new Error("timed out waiting for a wait to be set");
   };
