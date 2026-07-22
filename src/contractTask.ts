@@ -107,6 +107,17 @@ async function dispatchDeliver(
   }
   const held = ship.cargo.inventory.find((i) => i.symbol === tradeSymbol)?.units ?? 0;
   const units = Math.min(held, unitsRequired - task.unitsDelivered);
+  if (units <= 0) {
+    // Cargo hold has none of the contract good (sold off-target, or a
+    // different good was extracted) — dispatching deliver with 0 units would
+    // either error or no-op forever. Send the ship back to buy the right good
+    // instead of burning failure budget on a call that can never progress.
+    return {
+      task: withPhase(task, "CONTRACT_TRAVEL_TO_MARKET"),
+      event: "contract_deliver_skipped",
+      detail: { shipSymbol: task.shipSymbol, contractId, tradeSymbol, reason: "cargo hold has none of the contract good" },
+    };
+  }
   await clients.deliverContract(contractId, task.shipSymbol, tradeSymbol, units, authHeader);
 
   const unitsDelivered = task.unitsDelivered + units;

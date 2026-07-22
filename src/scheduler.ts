@@ -1,8 +1,10 @@
+import { Pool } from "pg";
 import { AutopilotState, AutopilotStatus } from "./autopilotState";
 import { Clock } from "./clock";
 import { ContractRepo } from "./contractRepo";
 import { discoverAndEvaluateContracts } from "./contractScheduler";
 import { advanceContractTask } from "./contractTask";
+import { withTransaction } from "./db";
 import { EventLog } from "./eventLog";
 import { GameClients } from "./gameClients";
 import { KnobRepo } from "./knobs";
@@ -76,6 +78,7 @@ export class MiningScheduler {
     private knobs: KnobRepo,
     private contracts: ContractRepo,
     private marketIntel: MarketIntelRepo,
+    private pool: Pool,
     private config: { shipSymbol: string; intervalMs: number; replanIntervalMs: number }
   ) {}
 
@@ -174,6 +177,16 @@ export class MiningScheduler {
 
     let result: TickResult | null;
     try {
+      let contractRecord = null;
+      if (task.taskKind === "contract") {
+        // The contract row's unitsRequired is the total this ship must
+        // deliver (fixed at assignment); task.unitsDelivered tracks
+        // progress against that same total across possibly several trips.
+        contractRecord = await this.contracts.get(task.contractId!);
+        if (contractRecord === null) {
+          throw new Error(`contract ${task.contractId} not found for ship ${task.shipSymbol}`);
+        }
+      }
       result =
         task.taskKind === "contract"
           ? await advanceContractTask({
@@ -183,10 +196,7 @@ export class MiningScheduler {
               tradeSymbol: task.tradeSymbol!,
               procurementMarket: task.marketWaypoint!,
               destinationWaypoint: task.destinationWaypoint!,
-              // The contract row's unitsRequired is the total this ship must
-              // deliver (fixed at assignment); task.unitsDelivered tracks
-              // progress against that same total across possibly several trips.
-              unitsRequired: (await this.contracts.get(task.contractId!))!.unitsRequired,
+              unitsRequired: contractRecord!.unitsRequired,
               clients: this.clients,
               clock: this.clock,
               authHeader,
@@ -406,20 +416,25 @@ export class MiningScheduler {
       return;
     }
 
-    await this.contracts.setStatus(assignment.contractId, "assigned");
-    await this.repo.save({
-      ...task,
-      taskKind: "contract",
-      phase: "CONTRACT_TRAVEL_TO_MARKET",
-      waitingUntil: null,
-      survey: null,
-      tradeSymbol: assignment.tradeSymbol,
-      marketWaypoint: assignment.procurementMarket,
-      asteroidWaypoint: null,
-      contractId: assignment.contractId,
-      destinationWaypoint: assignment.destinationWaypoint,
-      unitsDelivered: 0,
-      failureCount: 0,
+    // Both writes must land together (meta#30) — a crash between them would
+    // otherwise leave the contract "assigned" with no ship_task pointing at it,
+    // and contracts in "assigned" state are never re-offered to the planner.
+    await withTransaction(this.pool, async (client) => {
+      await new ContractRepo(client, this.clock).setStatus(assignment.contractId, "assigned");
+      await new ShipTaskRepo(client, this.clock).save({
+        ...task,
+        taskKind: "contract",
+        phase: "CONTRACT_TRAVEL_TO_MARKET",
+        waitingUntil: null,
+        survey: null,
+        tradeSymbol: assignment.tradeSymbol,
+        marketWaypoint: assignment.procurementMarket,
+        asteroidWaypoint: null,
+        contractId: assignment.contractId,
+        destinationWaypoint: assignment.destinationWaypoint,
+        unitsDelivered: 0,
+        failureCount: 0,
+      });
     });
   }
 
@@ -448,7 +463,15 @@ export class MiningScheduler {
     // strand that cargo with no code path back to selling/delivering it. Keep
     // retrying the same target indefinitely rather than reassigning away from
     // it while cargo is at stake.
-    const cargoAtStake = task.tradeSymbol !== null;
+    //
+    // For contract tasks, tradeSymbol is set at assignment time (the good the
+    // contract requires), not after a purchase — so it can't be used as the
+    // cargo signal there (meta#27). Cargo is only actually at stake once a
+    // purchase has been dispatched, i.e. CONTRACT_TRAVEL_TO_DESTINATION or later.
+    const cargoAtStake =
+      task.taskKind === "contract"
+        ? task.phase === "CONTRACT_TRAVEL_TO_DESTINATION" || task.phase === "CONTRACT_DELIVER" || task.phase === "CONTRACT_FULFILL"
+        : task.tradeSymbol !== null;
 
     if (failureCount < retryLimit || cargoAtStake) {
       await this.repo.save({ ...task, failureCount });

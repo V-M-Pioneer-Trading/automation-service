@@ -1,8 +1,29 @@
-import { Pool } from "pg";
+import { Pool, PoolClient } from "pg";
 import { KNOB_DEFINITIONS } from "./knobs";
 
 export function createPool(databaseUrl: string): Pool {
   return new Pool({ connectionString: databaseUrl });
+}
+
+/**
+ * Runs fn against a single checked-out client inside a BEGIN/COMMIT block,
+ * rolling back on any error. Callers pass the client into repo methods (which
+ * accept Pool | PoolClient) so multiple writes across different repos land in
+ * one transaction instead of as separate autocommitted statements (meta#30).
+ */
+export async function withTransaction<T>(pool: Pool, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /** Idempotent so it can run on every boot; no separate migration runner for one table yet. */

@@ -68,6 +68,45 @@ const respondJson = (res: http.ServerResponse, status: number, data: unknown) =>
   res.end(JSON.stringify(data));
 };
 
+/**
+ * Wraps a real Pool so exactly one query matching `shouldFail` rejects
+ * (both direct pool.query calls and queries run on a connect()ed client, so
+ * it also intercepts inside withTransaction's BEGIN/COMMIT block) — simulates
+ * the transient DB failure meta#28/#30 guard against, without needing to
+ * actually break Postgres.
+ */
+function makeFlakyPool(pool: Pool, shouldFail: (sql: string) => boolean): Pool {
+  let failed = false;
+  const flakyQuery = (originalQuery: (...args: any[]) => any) => {
+    return (...args: any[]) => {
+      const sql = args[0];
+      if (!failed && typeof sql === "string" && shouldFail(sql)) {
+        failed = true;
+        return Promise.reject(new Error("simulated transient DB failure"));
+      }
+      return originalQuery(...args);
+    };
+  };
+
+  return new Proxy(pool, {
+    get(target: any, prop, receiver) {
+      if (prop === "query") return flakyQuery(target.query.bind(target));
+      if (prop === "connect") {
+        return async (...args: any[]) => {
+          const client = await target.connect(...args);
+          return new Proxy(client, {
+            get(ctarget: any, cprop, creceiver) {
+              if (cprop === "query") return flakyQuery(ctarget.query.bind(ctarget));
+              return Reflect.get(ctarget, cprop, creceiver);
+            },
+          });
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as unknown as Pool;
+}
+
 describe("automation-service contract loop (meta#11)", () => {
   let pool: Pool;
   let clock: FakeClock;
@@ -75,6 +114,7 @@ describe("automation-service contract loop (meta#11)", () => {
   let contracts: ReturnType<typeof makeContract>[];
   let purchasePrice = 5;
   let includeAsteroidField = false;
+  let failPurchase = false;
 
   let agent: ReturnType<typeof startStubServer>;
   let fleet: ReturnType<typeof startStubServer>;
@@ -98,6 +138,7 @@ describe("automation-service contract loop (meta#11)", () => {
     contracts = [makeContract()];
     purchasePrice = 5;
     includeAsteroidField = false;
+    failPurchase = false;
 
     agent = startStubServer((req, body, res) => {
       const parsed = body.length > 0 ? JSON.parse(body) : undefined;
@@ -140,6 +181,10 @@ describe("automation-service contract loop (meta#11)", () => {
         ship.nav.route = { arrival: new Date(clock.now().getTime() + 1000).toISOString() };
         respondJson(res, 200, { data: { nav: ship.nav } });
       } else if (req.url === "/ships/MINING-1/purchase") {
+        if (failPurchase) {
+          respondJson(res, 500, { error: "simulated purchase failure" });
+          return;
+        }
         const existing = ship.cargo.inventory.find((i) => i.symbol === parsed.symbol);
         if (existing) existing.units += parsed.units;
         else ship.cargo.inventory.push({ symbol: parsed.symbol, units: parsed.units });
@@ -327,5 +372,149 @@ describe("automation-service contract loop (meta#11)", () => {
     await new Promise((r) => setTimeout(r, 60));
     const rePurchased = fleet.calls.slice(callsBeforeRestart).some((c) => c.url === "/ships/MINING-1/purchase");
     expect(rePurchased).toBe(false); // never re-buys what an earlier run already procured
+  }, 20_000);
+
+  it("meta#27: a contract task failing before any purchase reassigns instead of retrying forever", async () => {
+    // Shrink the retry budget to 1 so a single failure is enough to trigger
+    // reassignment within the test timeout, and fail every purchase attempt
+    // from the start — the ship starts docked at the procurement market, so
+    // assignment resolves straight to CONTRACT_PURCHASE within a tick or two,
+    // too narrow a window to reliably set these up afterward.
+    const gateway = app();
+    await request(gateway).put("/planner/knobs/mine.failureRetryLimit").send({ value: 1 });
+    failPurchase = true;
+
+    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+
+    // Pre-fix, cargoAtStake was always true for a contract task (tradeSymbol is
+    // set at assignment time, not after a purchase), so this never fires and
+    // the test times out retrying CONTRACT_PURCHASE forever.
+    await waitForEvent(gateway, "mining_task_failed");
+
+    const finalTask = await request(gateway).get("/autopilot/ships/MINING-1").then((r) => r.body.task);
+    expect(finalTask.taskKind).toBe("mining"); // reassigned away, not stuck retrying forever
+    expect(finalTask.contractId).toBeNull();
+
+    const { rows } = await pool.query("SELECT status FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
+    expect(rows[0].status).toBe("accepted"); // released back to the pool, not left "assigned"
+  }, 20_000);
+
+  it("meta#29: an empty cargo hold at delivery time redirects to re-procure instead of delivering 0 units", async () => {
+    const gateway = app();
+    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+
+    await waitForEvent(gateway, "contract_purchase");
+    expect(ship.cargo.inventory.find((i) => i.symbol === "IRON_ORE")?.units).toBe(2);
+
+    await waitForTaskPhase(gateway, "CONTRACT_TRAVEL_TO_DESTINATION");
+    // Simulate the contract good vanishing from cargo before delivery (an
+    // accidental sell, or a different good was extracted) — by the time the
+    // ship reaches CONTRACT_DELIVER, it's holding none of what the contract wants.
+    ship.cargo.inventory = [];
+    ship.cargo.units = 0;
+
+    await waitForWaiting(gateway);
+    clock.advance(2000);
+    await waitForTaskPhase(gateway, "CONTRACT_DELIVER");
+
+    // Pre-fix, this dispatches deliver with units: 0 — an API error or a
+    // silent no-op, neither of which makes progress.
+    const skipped = await waitForEvent(gateway, "contract_deliver_skipped");
+    expect(skipped.detail.reason).toBe("cargo hold has none of the contract good");
+
+    const task = await request(gateway).get("/autopilot/ships/MINING-1").then((r) => r.body.task);
+    expect(task.phase).toBe("CONTRACT_TRAVEL_TO_MARKET"); // sent back to re-procure, not stuck on 0-unit delivers
+
+    expect(fleet.calls.some((c) => c.url?.match(/^\/contracts\/[\w-]+\/deliver$/))).toBe(false); // deliver never actually dispatched
+  }, 20_000);
+
+  it("meta#30: a crash between marking a contract assigned and saving ship_task rolls back instead of orphaning it", async () => {
+    const flakyPool = makeFlakyPool(pool, (sql) => sql.includes("UPDATE ship_task"));
+    const gateway = createApp(flakyPool, clock, {
+      agentServiceUrl: agentUrl,
+      fleetServiceUrl: fleetUrl,
+      navigationServiceUrl: navUrl,
+      miningShipSymbol: "MINING-1",
+      schedulerIntervalMs: 15,
+      replanIntervalMs: 300_000,
+    });
+    gateways.push(gateway);
+
+    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+
+    // First assignment attempt hits the simulated failure between the two
+    // writes and rolls back — logged, not left half-applied.
+    await waitForEvent(gateway, "mining_tick_error");
+
+    // Pre-fix, the first write (contract -> "assigned") had already committed
+    // on its own before the second write failed — contracts.listAccepted()
+    // only returns status "accepted", so an "assigned"-but-orphaned contract
+    // is invisible to the planner forever and this next line times out.
+    await waitForTaskPhase(gateway, "CONTRACT_PURCHASE");
+
+    const { rows } = await pool.query("SELECT status FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
+    expect(rows[0].status).toBe("assigned");
+  }, 20_000);
+
+  it("meta#31: a missing contract row surfaces a descriptive error instead of a bare null-deref", async () => {
+    const gateway = app();
+    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+
+    await waitForTaskPhase(gateway, "CONTRACT_PURCHASE"); // contract assigned, row exists
+
+    // Simulate a missing contract row (manual deletion, migration error) while
+    // ship_task still points at it.
+    await pool.query("DELETE FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
+
+    const failure = await waitForEvent(gateway, "mining_tick_error");
+    expect(String(failure.detail.message)).toContain("CONTRACT-1");
+    expect(String(failure.detail.message)).toContain("not found");
+
+    // The gateway must still be responsive — an escaped null-deref would have
+    // thrown the same either way (both are caught by tick()'s outer catch), so
+    // this mainly guards that the error path stays this descriptive.
+    const status = await request(gateway).get("/autopilot/status");
+    expect(status.status).toBe(200);
+  }, 20_000);
+
+  it("meta#28: a DB write failure after a successful accept is reconciled on a later tick instead of orphaning the contract", async () => {
+    const flakyPool = makeFlakyPool(pool, (sql) => sql.includes("INSERT INTO contract"));
+    const gateway = createApp(flakyPool, clock, {
+      agentServiceUrl: agentUrl,
+      fleetServiceUrl: fleetUrl,
+      navigationServiceUrl: navUrl,
+      miningShipSymbol: "MINING-1",
+      schedulerIntervalMs: 15,
+      replanIntervalMs: 300_000,
+    });
+    gateways.push(gateway);
+
+    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+
+    // First tick: acceptContract succeeds upstream (contract.accepted flips to
+    // true in the fixture) but the following repo.record insert is the
+    // simulated failure — logged, not crashed, and not yet locally recorded.
+    await waitForEvent(gateway, "contract_discovery_error");
+    expect(agent.calls.filter((c) => c.url === "/contracts/CONTRACT-1/accept")).toHaveLength(1);
+
+    // A later tick reconciles it: sees accepted:true upstream with no local
+    // row, re-evaluates for a real procurement market, and records it directly
+    // — without calling acceptContract again (unseen filtering already
+    // excludes accepted:true contracts, so a naive re-accept-and-catch-409
+    // approach would never even fire).
+    await waitForEvent(gateway, "contract_reconciled");
+    expect(agent.calls.filter((c) => c.url === "/contracts/CONTRACT-1/accept")).toHaveLength(1); // still never re-accepted
+
+    const { rows } = await pool.query("SELECT status, procurement_market FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
+    expect(rows).toHaveLength(1);
+    // "accepted" (just reconciled) or already "assigned" (the scheduler's next
+    // tick can win the race and assign it before this query runs) — either way
+    // it's no longer the missing row the bug left behind.
+    expect(["accepted", "assigned"]).toContain(rows[0].status);
+    expect(rows[0].procurement_market).not.toBeNull();
+
+    // Now assignable, same as any other accepted contract — proves the full
+    // recovery end to end regardless of which status was observed above.
+    await waitForTaskPhase(gateway, "CONTRACT_PURCHASE");
   }, 20_000);
 });

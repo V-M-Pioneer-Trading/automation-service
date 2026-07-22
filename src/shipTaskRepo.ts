@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { Pool, PoolClient } from "pg";
 import { Clock } from "./clock";
 import { SurveyData } from "./gameClients";
 
@@ -67,7 +67,10 @@ function rowToTask(row: {
 }
 
 export class ShipTaskRepo {
-  constructor(private pool: Pool, private clock: Clock) {}
+  // Pool | PoolClient (not just Pool) so callers can pass a transaction's
+  // checked-out client (see db.ts's withTransaction) to make this write part
+  // of a larger atomic transaction (meta#30).
+  constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
   async getOrCreate(shipSymbol: string): Promise<ShipTask> {
     const existing = await this.get(shipSymbol);

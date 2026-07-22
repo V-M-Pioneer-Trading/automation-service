@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { Pool, PoolClient } from "pg";
 import { Clock } from "./clock";
 
 export type ContractStatus = "declined" | "accepted" | "assigned" | "fulfilled";
@@ -23,7 +23,10 @@ export interface ContractRecord {
  * decided — discovery only has to diff against `SELECT contract_id` on every tick.
  */
 export class ContractRepo {
-  constructor(private pool: Pool, private clock: Clock) {}
+  // Pool | PoolClient (not just Pool) so callers can pass a transaction's
+  // checked-out client (see db.ts's withTransaction) to make this write part
+  // of a larger atomic transaction (meta#30).
+  constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
   async knownIds(): Promise<Set<string>> {
     const { rows } = await this.pool.query("SELECT contract_id FROM contract");

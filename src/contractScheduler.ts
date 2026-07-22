@@ -33,13 +33,45 @@ export async function discoverAndEvaluateContracts(params: {
   const { repo, events, clients, knobs, planner, shipSymbol, authHeader } = params;
 
   const [contracts, known] = await Promise.all([clients.getContracts(authHeader), repo.knownIds()]);
+
+  // Contracts SpaceTraders already shows as accepted but this agent has no
+  // local row for (meta#28): a prior run's acceptContract call succeeded but
+  // the following repo.record write then failed (transient DB error, restart
+  // mid-call) — accept and record are not atomic. Re-evaluated (to get a real
+  // procurementMarket/cycleHours so it's assignable) and recorded directly as
+  // accepted, without calling acceptContract again — SpaceTraders already made
+  // that decision, and it's excluded from `unseen` below precisely because it
+  // reports accepted:true, so it would otherwise never be retried at all.
+  const orphanedAccepted = contracts.filter((c) => c.accepted && !c.fulfilled && !known.has(c.id));
   const unseen = contracts.filter((c) => !known.has(c.id) && !c.accepted && !c.fulfilled);
-  if (unseen.length === 0) return;
+  if (orphanedAccepted.length === 0 && unseen.length === 0) return;
 
   const [ship, minProfitThreshold] = await Promise.all([
     clients.getShip(shipSymbol, authHeader),
     knobs.get("contract.minProfitThreshold"),
   ]);
+
+  await Promise.all(
+    orphanedAccepted.map(async (contract) => {
+      const deliverable = contract.terms.deliver[0];
+      if (deliverable === undefined) return; // nothing to reconcile without a deliverable to track
+      const evaluation = await planner.evaluateContract({ contract, ship, systemSymbol: ship.nav.systemSymbol, authHeader });
+      await repo.record({
+        contractId: contract.id,
+        tradeSymbol: deliverable.tradeSymbol,
+        destinationWaypoint: deliverable.destinationSymbol,
+        unitsRequired: deliverable.unitsRequired - deliverable.unitsFulfilled,
+        totalPayment: contract.terms.payment.onAccepted + contract.terms.payment.onFulfilled,
+        status: "accepted",
+        expectedProfit: evaluation.expectedProfit,
+        cycleHours: evaluation.cycleHours,
+        procurementMarket: evaluation.procurementMarket,
+      });
+      await events.append("contract_reconciled", { contractId: contract.id, ...evaluation.detail });
+    })
+  );
+
+  if (unseen.length === 0) return;
 
   // Each contract's evaluate/accept/record/log is independent of every other
   // unseen contract — now on the critical ship-dispatch path (called from

@@ -114,7 +114,7 @@ export function createApp(
 
   const scheduler =
     mining !== undefined && gameClients !== null && planner !== null
-      ? new MiningScheduler(state, shipTaskRepo, events, gameClients, clock, planner, knobs, contractRepo, marketIntelRepo, {
+      ? new MiningScheduler(state, shipTaskRepo, events, gameClients, clock, planner, knobs, contractRepo, marketIntelRepo, pool, {
           shipSymbol: mining.miningShipSymbol,
           intervalMs: mining.schedulerIntervalMs,
           replanIntervalMs: mining.replanIntervalMs,
