@@ -60,7 +60,7 @@ describe("automation-service metrics rollups (meta#14)", () => {
 
   it("has no /metrics/context route when metrics isn't configured", async () => {
     const gateway = createApp(pool, clock);
-    const res = await request(gateway).get("/metrics/context");
+    const res = await request(gateway).get("/api/automation/v1/metrics/context");
     expect(res.status).toBe(404);
   });
 
@@ -81,7 +81,7 @@ describe("automation-service metrics rollups (meta#14)", () => {
     const deadline = Date.now() + 2000;
     let rollups: { creditsPerHour: number; extractionUnits: number; errorRate: number }[] = [];
     while (Date.now() < deadline && rollups.length < 2) {
-      const res = await request(gateway).get("/metrics/context");
+      const res = await request(gateway).get("/api/automation/v1/metrics/context");
       rollups = res.body.rollups;
       if (rollups.length < 2) await new Promise((r) => setTimeout(r, 10));
     }
@@ -104,7 +104,7 @@ describe("automation-service metrics rollups (meta#14)", () => {
     const deadline = Date.now() + 2000;
     let body: { rollups: unknown[]; events: unknown[] } = { rollups: [], events: [] };
     while (Date.now() < deadline && body.rollups.length < 2) {
-      const res = await request(gateway).get("/metrics/context");
+      const res = await request(gateway).get("/api/automation/v1/metrics/context");
       body = res.body;
       if (body.rollups.length < 2) await new Promise((r) => setTimeout(r, 10));
     }
@@ -122,20 +122,20 @@ describe("automation-service metrics rollups (meta#14)", () => {
     const deadline1 = Date.now() + 2000;
     let firstRollupCount = 0;
     while (Date.now() < deadline1 && firstRollupCount < 2) {
-      const res = await request(firstRun).get("/metrics/context");
+      const res = await request(firstRun).get("/api/automation/v1/metrics/context");
       firstRollupCount = res.body.rollups.length;
       if (firstRollupCount < 2) await new Promise((r) => setTimeout(r, 10));
     }
     expect(firstRollupCount).toBeGreaterThanOrEqual(2);
 
-    const rollupsBeforeRestart = (await request(firstRun).get("/metrics/context")).body.rollups;
+    const rollupsBeforeRestart = (await request(firstRun).get("/api/automation/v1/metrics/context")).body.rollups;
     const latestWindowEnd = rollupsBeforeRestart[0].windowEnd;
 
     // Simulated restart: a fresh app instance, same DB, same (unadvanced) clock.
     const restarted = app();
     await new Promise((r) => setTimeout(r, 60)); // give it a few ticks; no time has elapsed, so nothing new should compute
 
-    const rollupsAfterRestart = (await request(restarted).get("/metrics/context")).body.rollups;
+    const rollupsAfterRestart = (await request(restarted).get("/api/automation/v1/metrics/context")).body.rollups;
     // Same rollup count and same latest window_end as before the restart — no
     // new window opened until time actually elapses, and nothing was double-counted.
     expect(rollupsAfterRestart).toHaveLength(rollupsBeforeRestart.length);

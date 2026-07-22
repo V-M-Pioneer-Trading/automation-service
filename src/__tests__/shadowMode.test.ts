@@ -114,7 +114,7 @@ describe("automation-service shadow mode (meta#21)", () => {
   let gateways: ReturnType<typeof createApp>[] = [];
 
   afterEach(async () => {
-    await Promise.all(gateways.map((g) => request(g).post("/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => agent.server.close(() => r())),
@@ -138,36 +138,36 @@ describe("automation-service shadow mode (meta#21)", () => {
 
   it("rejects an arm with an unrecognized mode", async () => {
     const gateway = app();
-    const res = await request(gateway).post("/autopilot/arm").send({ token: "t", mode: "sneaky" });
+    const res = await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t", mode: "sneaky" });
     expect(res.status).toBe(400);
   });
 
   it("arms in shadow mode, reports it on status, and logs planner decisions without any fleet-service call", async () => {
     const gateway = app();
-    const armRes = await request(gateway).post("/autopilot/arm").send({ token: "test-token", mode: "shadow" });
+    const armRes = await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token", mode: "shadow" });
     expect(armRes.body).toEqual({ status: "armed", mode: "shadow" });
 
-    const statusRes = await request(gateway).get("/autopilot/status");
+    const statusRes = await request(gateway).get("/api/automation/v1/autopilot/status");
     expect(statusRes.body).toEqual({ status: "armed", mode: "shadow" });
 
-    const armedEventRes = await request(gateway).get("/autopilot/events?limit=1");
+    const armedEventRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=1");
     expect(armedEventRes.body.events[0]).toMatchObject({ type: "armed", detail: { mode: "shadow" } }); // persisted, not just echoed in the HTTP response
 
     const deadline = Date.now() + 2000;
     let shadowEvents = 0;
     while (Date.now() < deadline && shadowEvents < 2) {
-      const eventsRes = await request(gateway).get("/autopilot/events?limit=100");
+      const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
       shadowEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "planner_shadow_assignment").length;
       if (shadowEvents < 2) await new Promise((r) => setTimeout(r, 5));
     }
     expect(shadowEvents).toBeGreaterThanOrEqual(2); // the cycle replays every tick, not just once
 
-    const eventsRes = await request(gateway).get("/autopilot/events?limit=100");
+    const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
     const shadowEvent = eventsRes.body.events.find((e: { type: string }) => e.type === "planner_shadow_assignment");
     expect(shadowEvent.detail.chosen).toBe("X1-TEST-BELT"); // full scoring inputs, same shape as live's planner_assignment
 
     // No ship_task row was ever created or mutated — shadow mode never assigns for real.
-    const taskRes = await request(gateway).get("/autopilot/ships/MINING-1");
+    const taskRes = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
     expect(taskRes.status).toBe(404);
 
     // Never any ship-action call to fleet-service.
@@ -176,12 +176,12 @@ describe("automation-service shadow mode (meta#21)", () => {
 
   it("dispatches for real once switched from shadow to live via an explicit re-arm", async () => {
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "test-token", mode: "shadow" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token", mode: "shadow" });
 
     await new Promise((r) => setTimeout(r, 60)); // a few shadow cycles
     expect(fleet.calls).toHaveLength(0);
 
-    const reArmRes = await request(gateway).post("/autopilot/arm").send({ token: "test-token", mode: "live" });
+    const reArmRes = await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token", mode: "live" });
     expect(reArmRes.body).toEqual({ status: "armed", mode: "live" });
 
     const deadline = Date.now() + 2000;
@@ -196,7 +196,7 @@ describe("automation-service shadow mode (meta#21)", () => {
 
   it("defaults to live mode when no mode is specified, preserving pre-meta#21 behavior", async () => {
     const gateway = app();
-    const armRes = await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+    const armRes = await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
     expect(armRes.body.mode).toBe("live");
   });
 });

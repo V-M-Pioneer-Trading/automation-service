@@ -152,11 +152,15 @@ export function createApp(
     res.json({ status: "ok" });
   });
 
-  app.get("/autopilot/status", (_req, res) => {
+  // Resource routes live under /api/automation/v1 — /health above stays bare
+  // since it's operational tooling, not versioned API surface.
+  const apiRouter = express.Router();
+
+  apiRouter.get("/autopilot/status", (_req, res) => {
     res.json({ status: state.getStatus(), mode: state.getMode() });
   });
 
-  app.post(
+  apiRouter.post(
     "/autopilot/arm",
     asyncHandler(async (req, res) => {
       const token = req.body?.token;
@@ -197,10 +201,10 @@ export function createApp(
       }
     });
 
-  app.post("/autopilot/pause", transition("pause", "paused"));
-  app.post("/autopilot/abort", transition("abort", "aborted"));
+  apiRouter.post("/autopilot/pause", transition("pause", "paused"));
+  apiRouter.post("/autopilot/abort", transition("abort", "aborted"));
 
-  app.get(
+  apiRouter.get(
     "/autopilot/events",
     asyncHandler(async (req, res) => {
       const limit = clampLimit(req.query.limit, 100, MAX_EVENTS_LIMIT);
@@ -213,7 +217,7 @@ export function createApp(
   // to the "ai_" namespace so an external caller can log its own decisions but
   // can never spoof a lifecycle/planner event type (e.g. "armed", "knob_changed")
   // that the rest of this service treats as authoritative.
-  app.post(
+  apiRouter.post(
     "/events",
     asyncHandler(async (req, res) => {
       const type = req.body?.type;
@@ -231,14 +235,14 @@ export function createApp(
     })
   );
 
-  app.get(
+  apiRouter.get(
     "/planner/knobs",
     asyncHandler(async (_req, res) => {
       res.json({ knobs: await knobs.getAll() });
     })
   );
 
-  app.put(
+  apiRouter.put(
     "/planner/knobs/:name",
     asyncHandler(async (req, res) => {
       const value = req.body?.value;
@@ -272,7 +276,7 @@ export function createApp(
   );
 
   if (scheduler !== null) {
-    app.post(
+    apiRouter.post(
       "/planner/replan",
       asyncHandler(async (_req, res) => {
         scheduler.requestReplan("manual");
@@ -282,7 +286,7 @@ export function createApp(
   }
 
   if (metricsScheduler !== null) {
-    app.get(
+    apiRouter.get(
       "/metrics/context",
       asyncHandler(async (req, res) => {
         const rollupLimit = clampLimit(req.query.rollupLimit, DEFAULT_CONTEXT_ROLLUP_LIMIT, MAX_ROLLUPS_LIMIT);
@@ -297,7 +301,7 @@ export function createApp(
   }
 
   if (anomalyScheduler !== null) {
-    app.get(
+    apiRouter.get(
       "/anomalies/digest",
       asyncHandler(async (req, res) => {
         const windowMinutes = clampLimit(req.query.windowMinutes, DEFAULT_DIGEST_WINDOW_MINUTES, MAX_DIGEST_WINDOW_MINUTES);
@@ -314,7 +318,7 @@ export function createApp(
   }
 
   if (scheduler !== null) {
-    app.get(
+    apiRouter.get(
       "/autopilot/ships/:shipSymbol",
       asyncHandler(async (req, res) => {
         const task = await shipTaskRepo.get(req.params.shipSymbol);
@@ -326,6 +330,8 @@ export function createApp(
       })
     );
   }
+
+  app.use("/api/automation/v1", apiRouter);
 
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const status = err instanceof UpstreamCallError ? err.statusCode : 500;

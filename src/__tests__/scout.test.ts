@@ -140,7 +140,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
   let gateways: ReturnType<typeof createApp>[] = [];
   afterEach(async () => {
-    await Promise.all(gateways.map((g) => request(g).post("/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => agent.server.close(() => r())),
@@ -165,7 +165,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
   const waitForEvent = async (gateway: ReturnType<typeof createApp>, type: string, timeoutMs = 6000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const res = await request(gateway).get("/autopilot/events?limit=100");
+      const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
       const found = res.body.events.find((e: { type: string }) => e.type === type);
       if (found !== undefined) return found;
       await new Promise((r) => setTimeout(r, 5));
@@ -176,7 +176,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
   const waitForTaskPhase = async (gateway: ReturnType<typeof createApp>, phase: string, timeoutMs = 6000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const res = await request(gateway).get("/autopilot/ships/MINING-1");
+      const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.phase === phase) return res.body.task;
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -197,7 +197,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
     // Query both scores via a planner_assignment event: arm, wait for one decision.
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
 
     const evt = await waitForEvent(gateway, "planner_assignment");
     // The planner chose mining (only X1-TEST-BELT exists as asteroid), not scouting.
@@ -216,7 +216,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
     // ship starts at X1-TEST-BELT (distance 10 to X1-TEST-MARKET), should be assigned scout.
 
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
 
     const assignmentEvt = await waitForEvent(gateway, "planner_assignment");
     expect(assignmentEvt.detail.scoutWaypoint).toBe("X1-TEST-MARKET");
@@ -229,7 +229,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
   it("scout task travels to market, docks, calls getMarket, emits scout_market_refresh", async () => {
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
 
     // Ship is at X1-TEST-BELT (not at the market), so it needs to navigate.
     await waitForTaskPhase(gateway, "SCOUT_TRAVEL");
@@ -245,7 +245,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
   it("after scout_market_refresh, market_intel is recorded and ship is handed back to the planner", async () => {
     const gateway = app();
-    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
 
     // Wait for navigate to fire (sets waitingUntil), THEN advance the clock so
     // the wait resolves — same pattern as the FSM test above.
@@ -264,7 +264,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
     const deadline = Date.now() + 8000;
     let miningTask: Record<string, unknown> | null = null;
     while (Date.now() < deadline) {
-      const res = await request(gateway).get("/autopilot/ships/MINING-1");
+      const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.taskKind === "mining" && res.body.task.asteroidWaypoint !== null) {
         miningTask = res.body.task;
         break;
