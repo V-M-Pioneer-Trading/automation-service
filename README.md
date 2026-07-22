@@ -69,19 +69,19 @@ planner's job, [meta#10](https://github.com/V-M-Pioneer-Trading/meta/issues/10))
   already per-ship, so extending to N ships is mostly scheduler wiring, not
   new scoring logic.
 - "Best nearby market" is real (queries navigation-service for every
-  in-system marketplace and picks the highest sell price for whatever was
-  extracted) but has no route-cost/BFS awareness — "nearby" just means
-  "in the same system." The planner's fuel-aware routing (meta#10) only
-  governs which asteroid field is chosen, not the sell-side market leg.
-- Tracks only the single most-recently-extracted trade good. If a survey
-  yields more than one resource type before cargo fills, market selection
-  and selling only account for the last one — a sell that fails because the
-  chosen market doesn't buy an earlier-extracted good surfaces as a repeating
-  `mining_tick_error` rather than being resolved automatically. That's the
-  intended fallback for now: this is exactly the sustained-failure pattern
-  [meta#11](https://github.com/V-M-Pioneer-Trading/meta/issues/11) (anomaly
-  detection) is meant to catch and surface, rather than something this ticket
-  should silently paper over.
+  in-system marketplace and picks the highest sell price for whatever's being
+  sold) but has no route-cost/BFS awareness — "nearby" just means "in the same
+  system." The planner's fuel-aware routing (meta#10) only governs which
+  asteroid field is chosen, not the sell-side market leg.
+
+Multi-good cargo ([meta#36](https://github.com/V-M-Pioneer-Trading/meta/issues/36)):
+a survey can yield more than one resource type before cargo fills. Market
+selection and `SELL` both read the ship's live cargo, not a single tracked
+trade good — `SELL` sells whatever the current market buys and, once nothing
+left in the hold sells there, re-shops (`mining_market_reselect`) for a market
+for what remains, repeating until cargo is empty. Each market stop still costs
+a real trip, so a survey yielding many distinct goods costs proportionally
+more travel than a single-good one.
 
 The scheduler ticks on a fixed interval (`SCHEDULER_INTERVAL_MS`) and
 performs **at most one atomic action per tick** — dispatch a command, resolve

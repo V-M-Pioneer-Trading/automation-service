@@ -197,12 +197,19 @@ async function travelToMarket(
   authHeader: string
 ): Promise<TickResult> {
   if (task.marketWaypoint === null) {
-    const { waypoint: market, checked } = await findBestMarket(systemSymbol, task.tradeSymbol ?? "", clients, authHeader);
+    // Multi-good cargo (meta#36): a survey can yield more than one resource
+    // type before cargo fills, but task.tradeSymbol only ever holds the most
+    // recently extracted one. Shop for whatever's actually still in the hold
+    // — dispatchSell below re-enters here (with marketWaypoint reset) for
+    // each distinct good this market doesn't buy, so every stop picks the
+    // best market for whatever's left, not just the last-extracted good.
+    const remaining = ship.cargo.inventory[0]?.symbol ?? task.tradeSymbol ?? "";
+    const { waypoint: market, checked } = await findBestMarket(systemSymbol, remaining, clients, authHeader);
     if (market === null) {
       return {
         task,
         event: "mining_no_market_found",
-        detail: { shipSymbol: task.shipSymbol, tradeSymbol: task.tradeSymbol },
+        detail: { shipSymbol: task.shipSymbol, tradeSymbol: remaining },
       };
     }
     return {
@@ -210,7 +217,7 @@ async function travelToMarket(
       event: "mining_market_selected",
       // marketsChecked feeds the meta#15 market-intel-staleness anomaly check —
       // every marketplace priced this cycle, not just the one selected.
-      detail: { shipSymbol: task.shipSymbol, market, tradeSymbol: task.tradeSymbol, marketsChecked: checked },
+      detail: { shipSymbol: task.shipSymbol, market, tradeSymbol: remaining, marketsChecked: checked },
     };
   }
   return travelTo(task, ship, task.marketWaypoint, clients, authHeader, "SELL");
@@ -226,14 +233,39 @@ async function dispatchSell(
     await clients.dock(task.shipSymbol, authHeader);
     return { task, event: "mining_dock", detail: { shipSymbol: task.shipSymbol } };
   }
-  const item = ship.cargo.inventory[0];
-  if (item !== undefined) {
-    const res = await clients.sell(task.shipSymbol, item.symbol, item.units, authHeader);
+  if (ship.cargo.inventory.length > 0) {
+    // Multi-good cargo (meta#36): this market may not buy every good in the
+    // hold — find one it does before dispatching sell, instead of always
+    // trying inventory[0] and erroring the moment it's a good this market
+    // doesn't carry.
+    const market = await clients.getMarket(task.marketWaypoint!, authHeader);
+    const sellable = ship.cargo.inventory.find((i) => market.tradeGoods?.some((g) => g.symbol === i.symbol));
+    if (sellable === undefined) {
+      // Nothing left in the hold sells here — send the ship back to shop for
+      // a market that buys whatever remains, rather than looping forever on
+      // a sell this market will never accept.
+      return {
+        task: { ...withPhase(task, "TRAVEL_TO_MARKET"), marketWaypoint: null },
+        event: "mining_market_reselect",
+        detail: {
+          shipSymbol: task.shipSymbol,
+          market: task.marketWaypoint,
+          reason: "market doesn't buy any remaining cargo good",
+          remaining: ship.cargo.inventory.map((i) => i.symbol),
+        },
+      };
+    }
+    const res = await clients.sell(task.shipSymbol, sellable.symbol, sellable.units, authHeader);
     return {
       task,
       event: "mining_sell",
       // totalPrice feeds the meta#14 credits-per-hour rollup.
-      detail: { shipSymbol: task.shipSymbol, tradeSymbol: item.symbol, units: item.units, totalPrice: res.data.transaction.totalPrice },
+      detail: {
+        shipSymbol: task.shipSymbol,
+        tradeSymbol: sellable.symbol,
+        units: sellable.units,
+        totalPrice: res.data.transaction.totalPrice,
+      },
     };
   }
   if (ship.fuel.current < ship.fuel.capacity) {

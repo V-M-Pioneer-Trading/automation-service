@@ -62,6 +62,11 @@ describe("automation-service mining loop", () => {
   let nav: ReturnType<typeof startStubServer>;
   let agentUrl: string, fleetUrl: string, navUrl: string;
   let agentResponseDelayMs = 0;
+  // meta#36: when true, extract yields IRON_ORE then COPPER_ORE (two distinct
+  // goods before cargo fills) and a second, COPPER_ORE-only market exists —
+  // exercises the multi-good sell path without disturbing the other tests'
+  // single-good fixtures.
+  let multiGoodMode = false;
 
   beforeAll(async () => {
     pool = createPool(process.env.DATABASE_URL!);
@@ -77,6 +82,7 @@ describe("automation-service mining loop", () => {
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
     ship = makeShip();
     agentResponseDelayMs = 0;
+    multiGoodMode = false;
 
     agent = startStubServer((req, _body, res) => {
       if (req.url === "/agent" && req.method === "GET") {
@@ -130,13 +136,44 @@ describe("automation-service mining loop", () => {
         });
       } else if (req.url === "/ships/MINING-1/extract/survey") {
         const expiration = new Date(clock.now().getTime() + 500).toISOString();
-        ship.cargo = { units: 1, capacity: 1, inventory: [{ symbol: "IRON_ORE", units: 1 }] };
-        respondJson(res, 200, {
-          data: { extraction: { yield: { symbol: "IRON_ORE", units: 1 } }, cooldown: { expiration } },
-        });
+        if (multiGoodMode) {
+          // First extract yields IRON_ORE, second (once cargo already holds
+          // one good) yields a different good entirely — same survey, same
+          // cooldown cycle, just like a real multi-deposit survey would.
+          const symbol = ship.cargo.inventory.length === 0 ? "IRON_ORE" : "COPPER_ORE";
+          const existing = ship.cargo.inventory.find((i) => i.symbol === symbol);
+          if (existing !== undefined) existing.units += 1;
+          else ship.cargo.inventory.push({ symbol, units: 1 });
+          ship.cargo.units += 1;
+          respondJson(res, 200, { data: { extraction: { yield: { symbol, units: 1 } }, cooldown: { expiration } } });
+        } else {
+          ship.cargo = { units: 1, capacity: 1, inventory: [{ symbol: "IRON_ORE", units: 1 }] };
+          respondJson(res, 200, {
+            data: { extraction: { yield: { symbol: "IRON_ORE", units: 1 } }, cooldown: { expiration } },
+          });
+        }
       } else if (req.url === "/ships/MINING-1/sell") {
-        ship.cargo = { units: 0, capacity: 1, inventory: [] };
-        respondJson(res, 200, { data: { agent: {}, transaction: { totalPrice: 50 } } });
+        if (multiGoodMode) {
+          // Each market here only buys the one good it's stocked with — a
+          // sell request for the wrong good is a bug, not something to paper
+          // over, so this rejects instead of silently accepting it.
+          const marketGoods: Record<string, string> = { "X1-TEST-MARKET": "IRON_ORE", "X1-TEST-MARKET-2": "COPPER_ORE" };
+          const allowed = marketGoods[ship.nav.waypointSymbol];
+          if (parsed.symbol !== allowed) {
+            respondJson(res, 400, { error: `market ${ship.nav.waypointSymbol} does not buy ${parsed.symbol}` });
+            return;
+          }
+          const item = ship.cargo.inventory.find((i) => i.symbol === parsed.symbol);
+          if (item !== undefined) {
+            item.units -= parsed.units;
+            ship.cargo.units -= parsed.units;
+            ship.cargo.inventory = ship.cargo.inventory.filter((i) => i.units > 0);
+          }
+          respondJson(res, 200, { data: { agent: {}, transaction: { totalPrice: parsed.units * 50 } } });
+        } else {
+          ship.cargo = { units: 0, capacity: 1, inventory: [] };
+          respondJson(res, 200, { data: { agent: {}, transaction: { totalPrice: 50 } } });
+        }
       } else if (req.url === "/ships/MINING-1/refuel") {
         ship.fuel.current = ship.fuel.capacity;
         respondJson(res, 200, { data: { agent: {} } });
@@ -147,14 +184,18 @@ describe("automation-service mining loop", () => {
 
     nav = startStubServer((req, _body, res) => {
       if (req.url === "/systems/X1-TEST/waypoints") {
-        respondJson(res, 200, {
-          data: [
-            { symbol: "X1-TEST-MARKET", type: "PLANET", x: 0, y: 0, traits: [{ symbol: "MARKETPLACE" }] },
-            { symbol: "X1-TEST-BELT", type: "ASTEROID_FIELD", x: 10, y: 0, traits: [] },
-          ],
-        });
+        const waypoints = [
+          { symbol: "X1-TEST-MARKET", type: "PLANET", x: 0, y: 0, traits: [{ symbol: "MARKETPLACE" }] },
+          { symbol: "X1-TEST-BELT", type: "ASTEROID_FIELD", x: 10, y: 0, traits: [] },
+        ];
+        if (multiGoodMode) {
+          waypoints.push({ symbol: "X1-TEST-MARKET-2", type: "PLANET", x: 20, y: 0, traits: [{ symbol: "MARKETPLACE" }] });
+        }
+        respondJson(res, 200, { data: waypoints });
       } else if (req.url === "/waypoints/X1-TEST-MARKET/market") {
         respondJson(res, 200, { symbol: "X1-TEST-MARKET", tradeGoods: [{ symbol: "IRON_ORE", sellPrice: 50 }] });
+      } else if (req.url === "/waypoints/X1-TEST-MARKET-2/market") {
+        respondJson(res, 200, { symbol: "X1-TEST-MARKET-2", tradeGoods: [{ symbol: "COPPER_ORE", sellPrice: 40 }] });
       } else {
         respondJson(res, 404, { error: "unhandled: " + req.url });
       }
@@ -216,6 +257,26 @@ describe("automation-service mining loop", () => {
       await new Promise((r) => setTimeout(r, 5));
     }
     throw new Error("timed out waiting for a wait to be set");
+  };
+
+  // Distinct from waitForWaiting: guards against reobserving a wait that was
+  // already pending (and about to resolve) when called a second time within
+  // the same phase, e.g. across consecutive EXTRACT cooldowns — waitForWaiting
+  // alone would just return instantly on the still-present prior value.
+  const waitForNewWait = async (
+    gateway: ReturnType<typeof createApp>,
+    previousWaitingUntil: string | null,
+    timeoutMs = 2000
+  ) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const res = await request(gateway).get("/autopilot/ships/MINING-1");
+      if (res.status === 200 && res.body.task.waitingUntil !== null && res.body.task.waitingUntil !== previousWaitingUntil) {
+        return res.body.task;
+      }
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error("timed out waiting for a new wait to be set");
   };
 
   it("runs a full mining cycle: travel, survey, extract, sell, refuel, and loops back", async () => {
@@ -341,4 +402,66 @@ describe("automation-service mining loop", () => {
     expect(eventTypes).not.toContain("mining_orbit"); // never recorded as a real, autopilot-owned action
     expect(eventTypes).toContain("mining_discarded_after_abort");
   }, 10_000);
+
+  it("meta#36: sells each cargo good at a market that buys it instead of erroring on a multi-good hold", async () => {
+    multiGoodMode = true;
+    ship = makeShip({ cargo: { units: 0, capacity: 2, inventory: [] } });
+
+    const gateway = app();
+    await request(gateway).post("/autopilot/arm").send({ token: "test-token" });
+
+    await waitForPhase(gateway, "TRAVEL_TO_ASTEROID");
+    await waitForWaiting(gateway);
+    clock.advance(1000);
+    await waitForPhase(gateway, "SURVEY");
+
+    await waitForWaiting(gateway);
+    clock.advance(500);
+    await waitForPhase(gateway, "EXTRACT");
+
+    // EXTRACT loops twice before cargo fills (capacity 2): dispatchExtract
+    // checks cargo-full *before* extracting, so the extract that fills cargo
+    // still runs (and waits out its own cooldown) before the next dispatch
+    // sees it's full and moves on with no further wait. Track each wait's own
+    // value (waitForNewWait, not waitForWaiting) — the second cooldown is
+    // already pending by the time we look again, so a plain "is a wait set"
+    // check would just reobserve the first one instead of catching the second.
+    const firstExtractWait = await waitForWaiting(gateway); // first extract dispatched (-> IRON_ORE), cooldown wait
+    clock.advance(500);
+    await waitForNewWait(gateway, firstExtractWait.waitingUntil); // second extract dispatched (-> COPPER_ORE), cooldown wait
+    clock.advance(500);
+    await waitForPhase(gateway, "TRAVEL_TO_MARKET"); // cargo now full
+
+    // First market stop: IRON_ORE's market. Pre-fix, market selection and
+    // selling only ever looked at task.tradeSymbol (whichever good was
+    // extracted *last* — COPPER_ORE here), so this market would never even
+    // be chosen and the sell would error against whatever market was.
+    await waitForWaiting(gateway);
+    clock.advance(1000);
+    await waitForPhase(gateway, "SELL");
+
+    // Sells IRON_ORE, then discovers this market won't buy the remaining
+    // COPPER_ORE and re-shops instead of erroring (mining_market_reselect).
+    await waitForPhase(gateway, "TRAVEL_TO_MARKET", 4000);
+
+    // Second market stop: COPPER_ORE's market — cargo empties, cycle completes.
+    await waitForWaiting(gateway);
+    clock.advance(1000);
+    await waitForPhase(gateway, "SELL");
+    await waitForPhase(gateway, "TRAVEL_TO_ASTEROID", 6000);
+
+    const eventsRes = await request(gateway).get("/autopilot/events?limit=100");
+    const eventTypes = eventsRes.body.events.map((e: { type: string }) => e.type).reverse();
+    expect(eventTypes).not.toContain("mining_tick_error"); // never the repeating error loop meta#36 describes
+    expect(eventTypes).toContain("mining_market_reselect");
+    expect(eventTypes.filter((t: string) => t === "mining_market_selected")).toHaveLength(2); // two distinct market stops
+
+    const soldSymbols = fleet.calls
+      .filter((c) => c.url === "/ships/MINING-1/sell")
+      .map((c) => JSON.parse(c.body).symbol)
+      .sort();
+    expect(soldSymbols).toEqual(["COPPER_ORE", "IRON_ORE"]); // both goods actually sold, not jettisoned
+
+    expect(ship.cargo.units).toBe(0);
+  }, 20_000);
 });
