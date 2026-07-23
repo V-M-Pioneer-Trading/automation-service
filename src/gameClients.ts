@@ -105,6 +105,14 @@ export function createGameClients(config: {
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
 
+  // Purchases and sells move credits, so they're owned by agent-service (which
+  // records them into its transaction history) rather than fleet-service.
+  const agentShipAction = <T>(shipSymbol: string, action: string, authHeader: string, body?: unknown) =>
+    callJson<T>(`${config.agentServiceUrl}/ships/${shipSymbol}/${action}`, authHeader, {
+      method: "POST",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+
   return {
     getShip: (shipSymbol: string, authHeader: string) =>
       callJson<ShipSnapshot>(`${config.agentServiceUrl}/ships/${shipSymbol}`, authHeader),
@@ -155,7 +163,7 @@ export function createGameClients(config: {
       }>(shipSymbol, "extract/survey", authHeader, survey),
 
     sell: (shipSymbol: string, tradeSymbol: string, units: number, authHeader: string) =>
-      fleetAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "sell", authHeader, {
+      agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "sell", authHeader, {
         symbol: tradeSymbol,
         units,
       }),
@@ -163,10 +171,17 @@ export function createGameClients(config: {
     refuel: (shipSymbol: string, authHeader: string) => fleetAction(shipSymbol, "refuel", authHeader),
 
     purchase: (shipSymbol: string, tradeSymbol: string, units: number, authHeader: string) =>
-      fleetAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "purchase", authHeader, {
+      agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "purchase", authHeader, {
         symbol: tradeSymbol,
         units,
       }),
+
+    purchaseShip: (shipType: string, waypointSymbol: string, authHeader: string) =>
+      callJson<{ data: { ship: ShipSnapshot; transaction: { price: number } } }>(
+        `${config.agentServiceUrl}/ships/purchase`,
+        authHeader,
+        { method: "POST", body: JSON.stringify({ shipType, waypointSymbol }) }
+      ),
 
     deliverContract: (
       contractId: string,

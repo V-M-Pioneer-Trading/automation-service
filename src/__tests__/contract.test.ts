@@ -161,6 +161,16 @@ describe("automation-service contract loop (meta#11)", () => {
         const contract = contracts.find((c) => c.id === id)!;
         contract.fulfilled = true;
         respondJson(res, 200, { agent: { credits: 100_000 + contract.terms.payment.onFulfilled }, contract });
+      } else if (req.url === "/ships/MINING-1/purchase") {
+        if (failPurchase) {
+          respondJson(res, 500, { error: "simulated purchase failure" });
+          return;
+        }
+        const existing = ship.cargo.inventory.find((i) => i.symbol === parsed.symbol);
+        if (existing) existing.units += parsed.units;
+        else ship.cargo.inventory.push({ symbol: parsed.symbol, units: parsed.units });
+        ship.cargo.units += parsed.units;
+        respondJson(res, 200, { data: { transaction: { totalPrice: parsed.units * purchasePrice } } });
       } else {
         respondJson(res, 404, { error: "unhandled: " + req.url });
       }
@@ -180,16 +190,6 @@ describe("automation-service contract loop (meta#11)", () => {
         ship.nav.waypointSymbol = parsed.waypointSymbol;
         ship.nav.route = { arrival: new Date(clock.now().getTime() + 1000).toISOString() };
         respondJson(res, 200, { data: { nav: ship.nav } });
-      } else if (req.url === "/ships/MINING-1/purchase") {
-        if (failPurchase) {
-          respondJson(res, 500, { error: "simulated purchase failure" });
-          return;
-        }
-        const existing = ship.cargo.inventory.find((i) => i.symbol === parsed.symbol);
-        if (existing) existing.units += parsed.units;
-        else ship.cargo.inventory.push({ symbol: parsed.symbol, units: parsed.units });
-        ship.cargo.units += parsed.units;
-        respondJson(res, 200, { data: { transaction: { totalPrice: parsed.units * purchasePrice } } });
       } else if (req.url?.match(/^\/contracts\/[\w-]+\/deliver$/)) {
         const item = ship.cargo.inventory.find((i) => i.symbol === parsed.tradeSymbol);
         if (item !== undefined) {
@@ -361,7 +361,7 @@ describe("automation-service contract loop (meta#11)", () => {
     await waitForTaskPhase(firstRun, "CONTRACT_TRAVEL_TO_DESTINATION");
     await request(firstRun).post("/api/automation/v1/autopilot/abort");
 
-    const callsBeforeRestart = fleet.calls.length;
+    const callsBeforeRestart = agent.calls.length;
 
     const restarted = app();
     await request(restarted).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
@@ -370,7 +370,7 @@ describe("automation-service contract loop (meta#11)", () => {
     expect(task.phase).toBe("CONTRACT_TRAVEL_TO_DESTINATION"); // resumed, not reset to CONTRACT_TRAVEL_TO_MARKET
 
     await new Promise((r) => setTimeout(r, 60));
-    const rePurchased = fleet.calls.slice(callsBeforeRestart).some((c) => c.url === "/ships/MINING-1/purchase");
+    const rePurchased = agent.calls.slice(callsBeforeRestart).some((c) => c.url === "/ships/MINING-1/purchase");
     expect(rePurchased).toBe(false); // never re-buys what an earlier run already procured
   }, 20_000);
 
