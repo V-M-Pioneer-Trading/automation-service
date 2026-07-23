@@ -84,7 +84,7 @@ describe("automation-service mining loop", () => {
     agentResponseDelayMs = 0;
     multiGoodMode = false;
 
-    agent = startStubServer((req, _body, res) => {
+    agent = startStubServer((req, body, res) => {
       if (req.url === "/agent" && req.method === "GET") {
         respondJson(res, 200, { credits: 100_000 });
         return;
@@ -105,6 +105,31 @@ describe("automation-service mining loop", () => {
       }
       if (req.url === "/contracts" && req.method === "GET") {
         respondJson(res, 200, []); // no contracts in this suite — mining-only fixtures
+        return;
+      }
+      if (req.url === "/ships/MINING-1/sell" && req.method === "POST") {
+        const parsed = body.length > 0 ? JSON.parse(body) : undefined;
+        if (multiGoodMode) {
+          // Each market here only buys the one good it's stocked with — a
+          // sell request for the wrong good is a bug, not something to paper
+          // over, so this rejects instead of silently accepting it.
+          const marketGoods: Record<string, string> = { "X1-TEST-MARKET": "IRON_ORE", "X1-TEST-MARKET-2": "COPPER_ORE" };
+          const allowed = marketGoods[ship.nav.waypointSymbol];
+          if (parsed.symbol !== allowed) {
+            respondJson(res, 400, { error: `market ${ship.nav.waypointSymbol} does not buy ${parsed.symbol}` });
+            return;
+          }
+          const item = ship.cargo.inventory.find((i) => i.symbol === parsed.symbol);
+          if (item !== undefined) {
+            item.units -= parsed.units;
+            ship.cargo.units -= parsed.units;
+            ship.cargo.inventory = ship.cargo.inventory.filter((i) => i.units > 0);
+          }
+          respondJson(res, 200, { data: { agent: {}, transaction: { totalPrice: parsed.units * 50 } } });
+        } else {
+          ship.cargo = { units: 0, capacity: 1, inventory: [] };
+          respondJson(res, 200, { data: { agent: {}, transaction: { totalPrice: 50 } } });
+        }
         return;
       }
       respondJson(res, 404, { error: "not found" });
@@ -151,28 +176,6 @@ describe("automation-service mining loop", () => {
           respondJson(res, 200, {
             data: { extraction: { yield: { symbol: "IRON_ORE", units: 1 } }, cooldown: { expiration } },
           });
-        }
-      } else if (req.url === "/ships/MINING-1/sell") {
-        if (multiGoodMode) {
-          // Each market here only buys the one good it's stocked with — a
-          // sell request for the wrong good is a bug, not something to paper
-          // over, so this rejects instead of silently accepting it.
-          const marketGoods: Record<string, string> = { "X1-TEST-MARKET": "IRON_ORE", "X1-TEST-MARKET-2": "COPPER_ORE" };
-          const allowed = marketGoods[ship.nav.waypointSymbol];
-          if (parsed.symbol !== allowed) {
-            respondJson(res, 400, { error: `market ${ship.nav.waypointSymbol} does not buy ${parsed.symbol}` });
-            return;
-          }
-          const item = ship.cargo.inventory.find((i) => i.symbol === parsed.symbol);
-          if (item !== undefined) {
-            item.units -= parsed.units;
-            ship.cargo.units -= parsed.units;
-            ship.cargo.inventory = ship.cargo.inventory.filter((i) => i.units > 0);
-          }
-          respondJson(res, 200, { data: { agent: {}, transaction: { totalPrice: parsed.units * 50 } } });
-        } else {
-          ship.cargo = { units: 0, capacity: 1, inventory: [] };
-          respondJson(res, 200, { data: { agent: {}, transaction: { totalPrice: 50 } } });
         }
       } else if (req.url === "/ships/MINING-1/refuel") {
         ship.fuel.current = ship.fuel.capacity;
@@ -456,7 +459,7 @@ describe("automation-service mining loop", () => {
     expect(eventTypes).toContain("mining_market_reselect");
     expect(eventTypes.filter((t: string) => t === "mining_market_selected")).toHaveLength(2); // two distinct market stops
 
-    const soldSymbols = fleet.calls
+    const soldSymbols = agent.calls
       .filter((c) => c.url === "/ships/MINING-1/sell")
       .map((c) => JSON.parse(c.body).symbol)
       .sort();
