@@ -148,12 +148,16 @@ export function createApp(
       : null;
   anomalyScheduler?.start();
 
-  app.get("/health", (_req, res) => {
+  const health = (_req: express.Request, res: express.Response) => {
     res.json({ status: "ok" });
-  });
+  };
+  // Resource routes live under /api/automation/v1 — health stays unversioned
+  // since it's operational tooling, not versioned API surface. Mounted both
+  // bare (local dev/compose) and under /api/automation (production CloudFront
+  // only routes requests matching a configured path pattern).
+  app.get("/health", health);
+  app.get("/api/automation/health", health);
 
-  // Resource routes live under /api/automation/v1 — /health above stays bare
-  // since it's operational tooling, not versioned API surface.
   const apiRouter = express.Router();
 
   apiRouter.get("/autopilot/status", (_req, res) => {
