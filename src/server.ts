@@ -91,6 +91,12 @@ export function createApp(
   corsAllowedOrigin: string = "http://localhost:3000"
 ) {
   const app = express();
+  // Every response here is either a live status check or reflects mutable
+  // autopilot/event state — none of it is meaningfully cacheable, and
+  // Express's default auto-generated ETag turns a fixed-interval poller (the
+  // health check) into a 304-with-no-body once a client's If-None-Match
+  // matches, which callers checking res.ok read as "down".
+  app.set("etag", false);
   app.use(
     cors({
       origin: corsAllowedOrigin,
@@ -149,6 +155,7 @@ export function createApp(
   anomalyScheduler?.start();
 
   const health = (_req: express.Request, res: express.Response) => {
+    res.set("Cache-Control", "no-store");
     res.json({ status: "ok" });
   };
   // Resource routes live under /api/automation/v1 — health stays unversioned
