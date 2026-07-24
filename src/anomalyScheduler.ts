@@ -55,16 +55,7 @@ export class AnomalyScheduler {
 
   start(): void {
     if (this.timer !== null) return;
-    this.timer = setInterval(() => {
-      if (this.ticking) return;
-      this.ticking = true;
-      this.inFlight = this.tick()
-        .catch(() => {})
-        .finally(() => {
-          this.ticking = false;
-          this.inFlight = null;
-        });
-    }, this.config.intervalMs);
+    this.timer = setInterval(() => this.runGuardedTick(), this.config.intervalMs);
     this.timer.unref?.();
   }
 
@@ -73,6 +64,34 @@ export class AnomalyScheduler {
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
     if (this.inFlight !== null) await this.inFlight;
+  }
+
+  /**
+   * Deterministic alternative to waiting on the real setInterval — drains
+   * whatever tick is currently in flight (so it can't straddle a caller's
+   * state mutation) and then runs exactly one fresh tick to completion. Since
+   * the drain-then-mutate-then-force sequence has no `await` between the
+   * mutation and the forceTick() call, no interval-triggered tick can sneak
+   * in between: JS runs that synchronous span to completion before any timer
+   * callback gets a turn. Exists for tests driving a FakeClock, where a real
+   * tick's async work (e.g. an HTTP round trip) can otherwise span a fake
+   * clock jump and stamp a stale reading with an already-advanced timestamp.
+   */
+  async forceTick(): Promise<void> {
+    if (this.inFlight !== null) await this.inFlight;
+    await this.runGuardedTick();
+  }
+
+  private runGuardedTick(): Promise<void> {
+    if (this.ticking) return this.inFlight ?? Promise.resolve();
+    this.ticking = true;
+    this.inFlight = this.tick()
+      .catch(() => {})
+      .finally(() => {
+        this.ticking = false;
+        this.inFlight = null;
+      });
+    return this.inFlight;
   }
 
   async tick(): Promise<void> {

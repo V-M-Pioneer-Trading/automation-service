@@ -358,6 +358,13 @@ export function createApp(
     await Promise.all([metricsScheduler?.stop(), anomalyScheduler?.stop()]);
   };
 
+  // Test-only escape hatch from the anomaly scheduler's real setInterval —
+  // lets a test force exactly one deterministic tick (draining any in-flight
+  // one first) instead of racing FakeClock jumps against wall-clock ticks.
+  app.locals.forceAnomalyTick = async () => {
+    await anomalyScheduler?.forceTick();
+  };
+
   return app;
 }
 

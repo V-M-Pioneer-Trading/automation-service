@@ -249,10 +249,15 @@ describe("automation-service anomaly detection (meta#15)", () => {
     const gateway = app({ withMining: true });
     await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
-    // First snapshot at window start.
-    await new Promise((r) => setTimeout(r, 30));
+    // Force ticks instead of racing the real setInterval against the fake
+    // clock: forceAnomalyTick() drains any tick already in flight and then
+    // runs exactly one to completion, so nothing can straddle the mutations
+    // below and observe a stale credits value stamped with an already-
+    // advanced timestamp (see anomalyScheduler.ts's forceTick doc comment).
+    await gateway.locals.forceAnomalyTick(); // first snapshot, at window start
     clock.advance(2 * 60 * 60 * 1000 + 60_000); // just past the 2h default window
     credits = 90_000; // credits dropped, not increased
+    await gateway.locals.forceAnomalyTick(); // snapshot + check in one deterministic tick
     const anomaly = await waitForAnomaly(gateway, "credits_flat");
     expect(anomaly.detail.netChange).toBeLessThanOrEqual(0);
   }, 10_000);
@@ -261,11 +266,11 @@ describe("automation-service anomaly detection (meta#15)", () => {
     const gateway = app({ withMining: true });
     await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
-    await new Promise((r) => setTimeout(r, 30));
+    await gateway.locals.forceAnomalyTick(); // first snapshot, at window start
     clock.advance(2 * 60 * 60 * 1000 + 60_000);
     credits = 150_000; // grew
-    await new Promise((r) => setTimeout(r, 60)); // let a tick observe the new snapshot
-    await expectNoAnomaly(gateway, "credits_flat");
+    await gateway.locals.forceAnomalyTick(); // snapshot + check in one deterministic tick
+    await expectNoAnomaly(gateway, "credits_flat", 0); // state is already settled, no wait needed
   }, 10_000);
 
   it("fires market_stale for a market not repriced within the staleness window, while active markets stay quiet", async () => {
