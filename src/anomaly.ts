@@ -88,8 +88,24 @@ function rowToAnomaly(row: {
 }
 
 /**
- * Runs the six meta#15 health checks and returns every candidate detected this
- * tick. Deliberately read-only and side-effect free — persistence, dedupe, and
+ * Five health checks, each answering a different question about the fleet:
+ *
+ * | Check | Question |
+ * |---|---|
+ * | `ship_idle` | Is a ship stuck? |
+ * | `earnings_stalled` | Has the money stopped coming in? |
+ * | `consecutive_failures` | Is one ship failing repeatedly? |
+ * | `error_rate` | Is the fleet as a whole erroring? |
+ * | `market_stale` | Are we deciding on prices that are too old? |
+ *
+ * `earnings_stalled` covers two conditions that were previously separate checks
+ * (`profit_drop` and `credits_flat`). They are two ways of measuring one thing —
+ * a fleet that stops earning trips both, and paging twice for one problem made
+ * the digest look busier than the fleet actually was. They stay separately
+ * tunable and are reported in `detail.reasons`, so nothing is lost but the
+ * duplicate alert.
+ *
+ * Deliberately read-only and side-effect free — persistence, dedupe, and
  * webhook delivery are the caller's (AnomalyScheduler's) job, so these checks
  * stay simple functions of "what does the data say right now."
  */
@@ -100,23 +116,46 @@ export class AnomalyChecker {
     const now = this.clock.now();
     const miningActive = this.state.getStatus() === "armed" && this.state.getMode() === "live";
 
-    // The six checks are independent reads (different tables/knobs), so run
-    // them concurrently rather than paying for six sequential round trips.
+    // Independent reads (different tables and knobs), so run them concurrently
+    // rather than paying for sequential round trips.
     const results = await Promise.all([
       miningActive && shipTaskUpdatedAt !== null
         ? this.checkShipIdle(shipSymbol, shipTaskUpdatedAt, now)
         : Promise.resolve(null),
-      this.checkProfitDrop(now),
+      this.checkEarningsStalled(now),
       this.checkConsecutiveFailures(shipSymbol, shipFailureCount),
       this.checkErrorRate(now),
-      this.checkCreditsFlat(now),
       this.checkMarketStaleness(now),
     ]);
 
-    const [idle, profit, failures, errorRate, creditsFlat, marketStale] = results;
-    return [idle, profit, failures, errorRate, creditsFlat, ...marketStale].filter(
-      (c): c is AnomalyCandidate => c !== null
+    const [idle, earnings, failures, errorRate, marketStale] = results;
+    return [idle, earnings, failures, errorRate, ...marketStale].filter((c): c is AnomalyCandidate => c !== null);
+  }
+
+  /**
+   * "The money stopped." Two independent readings of the same underlying
+   * problem, either of which is enough to fire:
+   *
+   *  - **profit_drop** — the latest hourly rate collapsed against its own
+   *    recent history. Catches a fleet that's still working but earning less.
+   *  - **credits_flat** — total credits haven't grown at all over a window.
+   *    Catches a fleet that looks busy but nets nothing, which a rate compared
+   *    only against itself can miss.
+   */
+  private async checkEarningsStalled(now: Date): Promise<AnomalyCandidate | null> {
+    const [profitDrop, creditsFlat] = await Promise.all([this.detectProfitDrop(now), this.detectCreditsFlat(now)]);
+    const reasons = [profitDrop, creditsFlat].filter(
+      (r): r is { reason: string; detail: Record<string, unknown> } => r !== null
     );
+    if (reasons.length === 0) return null;
+    return {
+      type: "earnings_stalled",
+      dedupeKey: "earnings_stalled",
+      detail: {
+        reasons: reasons.map((r) => r.reason),
+        ...Object.assign({}, ...reasons.map((r) => r.detail)),
+      },
+    };
   }
 
   private async checkShipIdle(shipSymbol: string, updatedAt: Date, now: Date): Promise<AnomalyCandidate | null> {
@@ -130,7 +169,7 @@ export class AnomalyChecker {
     };
   }
 
-  private async checkProfitDrop(now: Date): Promise<AnomalyCandidate | null> {
+  private async detectProfitDrop(now: Date): Promise<{ reason: string; detail: Record<string, unknown> } | null> {
     const { rows } = await this.pool.query(
       `SELECT credits_per_hour, window_end FROM metrics_rollup WHERE window_end <= $1 ORDER BY window_end DESC LIMIT 1`,
       [now]
@@ -154,8 +193,7 @@ export class AnomalyChecker {
     const fraction = await this.knobs.get("anomaly.profitDropFraction");
     if (latest >= avg6h * fraction) return null;
     return {
-      type: "profit_drop",
-      dedupeKey: "profit_drop",
+      reason: "profit_drop",
       detail: { latestCreditsPerHour: latest, avg6hCreditsPerHour: avg6h, fraction },
     };
   }
@@ -193,7 +231,7 @@ export class AnomalyChecker {
     };
   }
 
-  private async checkCreditsFlat(now: Date): Promise<AnomalyCandidate | null> {
+  private async detectCreditsFlat(now: Date): Promise<{ reason: string; detail: Record<string, unknown> } | null> {
     const windowHours = await this.knobs.get("anomaly.creditsFlatWindowHours");
     const since = new Date(now.getTime() - windowHours * 60 * 60 * 1000);
 
@@ -232,8 +270,7 @@ export class AnomalyChecker {
     const netChange = newestCredits - oldestCredits;
     if (netChange > 0) return null;
     return {
-      type: "credits_flat",
-      dedupeKey: "credits_flat",
+      reason: "credits_flat",
       detail: { netChange, windowHours, oldestCredits, newestCredits },
     };
   }

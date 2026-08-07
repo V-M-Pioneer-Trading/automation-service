@@ -11,7 +11,8 @@
     "start": "node dist/server.js",
     "dev": "npm run build && npm start",
     "typecheck": "tsc --noEmit",
-    "test": "jest"
+    "test": "jest",
+    "replay": "npm run build && node dist/replay.js"
   },
   "dependencies": {
     "cors": "^2.8.6",

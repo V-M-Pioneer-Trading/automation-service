@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { createApp } from "../server";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
+import { resetDatabase } from "../testSupport/resetDatabase";
 
 class FakeClock implements Clock {
   constructor(private current: Date) {}
@@ -70,8 +71,9 @@ describe("automation-service fleet replan (meta#13)", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE event_log, ship_task, contract, market_intel RESTART IDENTITY");
-    await pool.query("UPDATE knob SET value = default_value");
+    // Scouting off: these cases are about replan triggering and scope, not
+    // about which task kind wins.
+    await resetDatabase(pool);
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
     includeAsteroidField = true;
 

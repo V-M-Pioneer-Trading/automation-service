@@ -22,17 +22,32 @@ export interface ShipTask {
   tradeSymbol: string | null;
   /** Mining: the sell market. Contract: the procurement market. */
   marketWaypoint: string | null;
-  /** Null whenever the ship needs a fresh assignment from the planner (meta#10): a brand new task, or the moment a cycle completes. */
+  /** Null whenever the ship needs a fresh assignment from the planner: a brand new task, or the moment a cycle completes. */
   asteroidWaypoint: string | null;
   /** Consecutive tick failures against the current target; resets on any successful tick. */
   failureCount: number;
-  /** Contract loop (meta#11): the contract this task is working, and its delivery destination/progress. */
+  /** Contract loop: the contract this task is working, and its delivery destination/progress. */
   contractId: string | null;
   destinationWaypoint: string | null;
   unitsDelivered: number;
-  /** Last time this task's row changed — drives the meta#15 ship-idle anomaly check. */
+  /**
+   * Running tallies for the cycle in progress. A cycle spans many ticks and can
+   * survive a restart, so what it earned and how long it took can only be known
+   * by accumulating here and reading it back when the cycle completes — at
+   * which point it becomes one row in `mining_observation` and the planner
+   * learns something. See observations.ts.
+   */
+  cycleStartedAt: Date | null;
+  cycleRevenue: number;
+  cycleTravelDistance: number;
+  cycleUnitsExtracted: number;
+  /** Last time this task's row changed — drives the ship-idle anomaly check. */
   updatedAt: Date;
 }
+
+const TASK_COLUMNS = `ship_symbol, task_kind, phase, waiting_until, survey, trade_symbol, market_waypoint,
+       asteroid_waypoint, failure_count, contract_id, destination_waypoint, units_delivered,
+       cycle_started_at, cycle_revenue, cycle_travel_distance, cycle_units_extracted, updated_at`;
 
 function rowToTask(row: {
   ship_symbol: string;
@@ -47,6 +62,10 @@ function rowToTask(row: {
   contract_id: string | null;
   destination_waypoint: string | null;
   units_delivered: number;
+  cycle_started_at: Date | null;
+  cycle_revenue: string | number;
+  cycle_travel_distance: string | number;
+  cycle_units_extracted: string | number;
   updated_at: Date;
 }): ShipTask {
   return {
@@ -62,6 +81,10 @@ function rowToTask(row: {
     contractId: row.contract_id,
     destinationWaypoint: row.destination_waypoint,
     unitsDelivered: row.units_delivered,
+    cycleStartedAt: row.cycle_started_at,
+    cycleRevenue: Number(row.cycle_revenue),
+    cycleTravelDistance: Number(row.cycle_travel_distance),
+    cycleUnitsExtracted: Number(row.cycle_units_extracted),
     updatedAt: row.updated_at,
   };
 }
@@ -69,7 +92,7 @@ function rowToTask(row: {
 export class ShipTaskRepo {
   // Pool | PoolClient (not just Pool) so callers can pass a transaction's
   // checked-out client (see db.ts's withTransaction) to make this write part
-  // of a larger atomic transaction (meta#30).
+  // of a larger atomic transaction.
   constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
   async getOrCreate(shipSymbol: string): Promise<ShipTask> {
@@ -87,9 +110,7 @@ export class ShipTaskRepo {
 
   async get(shipSymbol: string): Promise<ShipTask | null> {
     const { rows } = await this.pool.query(
-      `SELECT ship_symbol, task_kind, phase, waiting_until, survey, trade_symbol, market_waypoint, asteroid_waypoint,
-              failure_count, contract_id, destination_waypoint, units_delivered, updated_at
-       FROM ship_task WHERE ship_symbol = $1`,
+      `SELECT ${TASK_COLUMNS} FROM ship_task WHERE ship_symbol = $1`,
       [shipSymbol]
     );
     if (rows.length === 0) return null;
@@ -97,16 +118,13 @@ export class ShipTaskRepo {
   }
 
   /**
-   * Every ship with no assigned target (meta#10's "needs assignment" predicate —
-   * a brand new task, or the moment a cycle completes) — the candidate set a
-   * fleet-wide replan (meta#13) reassigns. A ship mid-task never matches this,
-   * so a replan can never preempt work already in flight.
+   * Every ship with no assigned target (a brand new task, or one whose cycle
+   * just completed) — the candidate set a fleet-wide replan reassigns. A ship
+   * mid-task never matches this, so a replan can never preempt work in flight.
    */
   async listIdle(): Promise<ShipTask[]> {
     const { rows } = await this.pool.query(
-      `SELECT ship_symbol, task_kind, phase, waiting_until, survey, trade_symbol, market_waypoint, asteroid_waypoint,
-              failure_count, contract_id, destination_waypoint, units_delivered, updated_at
-       FROM ship_task WHERE asteroid_waypoint IS NULL AND contract_id IS NULL`
+      `SELECT ${TASK_COLUMNS} FROM ship_task WHERE asteroid_waypoint IS NULL AND contract_id IS NULL`
     );
     return rows.map(rowToTask);
   }
@@ -116,7 +134,8 @@ export class ShipTaskRepo {
       `UPDATE ship_task
        SET task_kind = $2, phase = $3, waiting_until = $4, survey = $5, trade_symbol = $6, market_waypoint = $7,
            asteroid_waypoint = $8, failure_count = $9, contract_id = $10, destination_waypoint = $11,
-           units_delivered = $12, updated_at = $13
+           units_delivered = $12, cycle_started_at = $13, cycle_revenue = $14, cycle_travel_distance = $15,
+           cycle_units_extracted = $16, updated_at = $17
        WHERE ship_symbol = $1`,
       [
         task.shipSymbol,
@@ -131,6 +150,10 @@ export class ShipTaskRepo {
         task.contractId,
         task.destinationWaypoint,
         task.unitsDelivered,
+        task.cycleStartedAt,
+        task.cycleRevenue,
+        task.cycleTravelDistance,
+        task.cycleUnitsExtracted,
         this.clock.now(),
       ]
     );

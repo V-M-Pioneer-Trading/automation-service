@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { createApp } from "../server";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
+import { resetDatabase } from "../testSupport/resetDatabase";
 
 class FakeClock implements Clock {
   constructor(private current: Date) {}
@@ -131,8 +132,9 @@ describe("automation-service contract loop (meta#11)", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE event_log, ship_task, contract RESTART IDENTITY");
-    await pool.query("UPDATE knob SET value = default_value");
+    // Scouting stays off: this file is about contracts winning (or losing) to
+    // mining, and a third competing task kind would only obscure that.
+    await resetDatabase(pool);
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
     ship = makeShip();
     contracts = [makeContract()];

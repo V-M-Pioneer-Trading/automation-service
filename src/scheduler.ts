@@ -9,14 +9,35 @@ import { EventLog } from "./eventLog";
 import { GameClients } from "./gameClients";
 import { KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
-import { advanceMiningTask, TickResult } from "./miningTask";
+import { advanceMiningTask, TickObservations, TickResult } from "./miningTask";
+import { ObservationRepo } from "./observations";
 import { Planner } from "./planner";
 import { advanceScoutTask } from "./scoutTask";
 import { ShipTask, ShipTaskRepo } from "./shipTaskRepo";
 
+/**
+ * The blank slate a ship returns to whenever it needs a fresh planner
+ * assignment. Resets the cycle tallies too — a new assignment starts a new
+ * cycle, and carrying the previous one's revenue forward would corrupt the
+ * observation written when this one completes.
+ */
 const FRESH_MINING_TASK: Pick<
   ShipTask,
-  "taskKind" | "phase" | "waitingUntil" | "survey" | "tradeSymbol" | "marketWaypoint" | "asteroidWaypoint" | "contractId" | "destinationWaypoint" | "unitsDelivered" | "failureCount"
+  | "taskKind"
+  | "phase"
+  | "waitingUntil"
+  | "survey"
+  | "tradeSymbol"
+  | "marketWaypoint"
+  | "asteroidWaypoint"
+  | "contractId"
+  | "destinationWaypoint"
+  | "unitsDelivered"
+  | "failureCount"
+  | "cycleStartedAt"
+  | "cycleRevenue"
+  | "cycleTravelDistance"
+  | "cycleUnitsExtracted"
 > = {
   taskKind: "mining",
   phase: "TRAVEL_TO_ASTEROID",
@@ -29,6 +50,10 @@ const FRESH_MINING_TASK: Pick<
   destinationWaypoint: null,
   unitsDelivered: 0,
   failureCount: 0,
+  cycleStartedAt: null,
+  cycleRevenue: 0,
+  cycleTravelDistance: 0,
+  cycleUnitsExtracted: 0,
 };
 
 /**
@@ -78,9 +103,38 @@ export class MiningScheduler {
     private knobs: KnobRepo,
     private contracts: ContractRepo,
     private marketIntel: MarketIntelRepo,
+    private observations: ObservationRepo,
     private pool: Pool,
     private config: { shipSymbol: string; intervalMs: number; replanIntervalMs: number }
   ) {}
+
+  /**
+   * Persists whatever this tick taught the fleet. Deliberately best-effort: a
+   * failure here costs one data point for future calibration, and must never
+   * turn a successful ship action into a failed tick.
+   */
+  private async recordObservations(observations: TickObservations | undefined): Promise<void> {
+    if (observations === undefined) return;
+    try {
+      if (observations.travel !== undefined) {
+        await this.observations.recordTravel(observations.travel);
+      }
+      if (observations.refuel !== undefined) {
+        await this.observations.recordTravel({
+          distance: observations.refuel.distance,
+          fuelCredits: observations.refuel.fuelCredits,
+        });
+      }
+      if (observations.miningCycle !== undefined) {
+        await this.observations.recordMiningCycle({
+          shipSymbol: this.config.shipSymbol,
+          ...observations.miningCycle,
+        });
+      }
+    } catch (err) {
+      await this.events.append("observation_write_error", { message: String(err) });
+    }
+  }
 
   /**
    * Requests a fleet replan (meta#13): a knob change, a newly-recorded anomaly,
@@ -252,6 +306,10 @@ export class MiningScheduler {
     }
 
     await this.repo.save(finalTask);
+    // Observations land after the task write, same save-then-log order the rest
+    // of this class uses: anything reading them can trust the state they
+    // describe is already visible.
+    await this.recordObservations(result.observations);
     await this.events.append(result.event, result.detail);
   }
 

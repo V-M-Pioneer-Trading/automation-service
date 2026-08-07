@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { createApp } from "../server";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
+import { resetDatabase } from "../testSupport/resetDatabase";
 
 class FakeClock implements Clock {
   constructor(private current: Date) {}
@@ -24,7 +25,14 @@ function makeShip(overrides: Record<string, unknown> = {}) {
       systemSymbol: "X1-TEST",
       waypointSymbol: "X1-TEST-MARKET",
       status: "DOCKED",
-      route: { arrival: "2026-01-01T00:00:00Z" },
+      // Same shape a real nav route has — the endpoint coordinates and
+      // departure time are what make a flight measurable.
+      route: { arrival: "2026-01-01T00:00:00Z" } as {
+        arrival: string;
+        departureTime?: string;
+        origin?: { symbol: string; x: number; y: number };
+        destination?: { symbol: string; x: number; y: number };
+      },
     },
     cooldown: { expiration: null },
     fuel: { current: 60, capacity: 100 },
@@ -52,6 +60,14 @@ const respondJson = (res: http.ServerResponse, status: number, data: unknown) =>
   res.end(JSON.stringify(data));
 };
 
+/** The one place waypoint coordinates are defined, shared by the nav and fleet stubs. */
+const WAYPOINT_COORDS: Record<string, { x: number; y: number }> = {
+  "X1-TEST-MARKET": { x: 0, y: 0 },
+  "X1-TEST-BELT": { x: 10, y: 0 },
+  "X1-TEST-MARKET-2": { x: 20, y: 0 },
+};
+const coordsOf = (symbol: string) => WAYPOINT_COORDS[symbol] ?? { x: 0, y: 0 };
+
 describe("automation-service mining loop", () => {
   let pool: Pool;
   let clock: FakeClock;
@@ -78,7 +94,9 @@ describe("automation-service mining loop", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE event_log, ship_task RESTART IDENTITY");
+    // Scouting off: this file drives the mining FSM end to end, and a scout
+    // assignment winning a tick would take the ship away from that.
+    await resetDatabase(pool);
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
     ship = makeShip();
     agentResponseDelayMs = 0;
@@ -144,10 +162,20 @@ describe("automation-service mining loop", () => {
         ship.nav.status = "DOCKED";
         respondJson(res, 200, { data: { nav: ship.nav } });
       } else if (req.url === "/ships/MINING-1/navigate") {
+        const origin = ship.nav.waypointSymbol;
         ship.nav.status = "IN_TRANSIT";
         ship.nav.waypointSymbol = parsed.waypointSymbol;
+        const departureTime = clock.now().toISOString();
         const arrival = new Date(clock.now().getTime() + 1000).toISOString();
-        ship.nav.route = { arrival };
+        // A real SpaceTraders nav route carries both endpoints' coordinates and
+        // both timestamps. Mirrored here because that's what lets the fleet
+        // measure its own speed instead of assuming one (see observations.ts).
+        ship.nav.route = {
+          arrival,
+          departureTime,
+          origin: { symbol: origin, ...coordsOf(origin) },
+          destination: { symbol: parsed.waypointSymbol, ...coordsOf(parsed.waypointSymbol) },
+        };
         respondJson(res, 200, { data: { nav: ship.nav } });
       } else if (req.url === "/ships/MINING-1/survey") {
         const expiration = new Date(clock.now().getTime() + 500).toISOString();
@@ -188,11 +216,16 @@ describe("automation-service mining loop", () => {
     nav = startStubServer((req, _body, res) => {
       if (req.url === "/systems/X1-TEST/waypoints") {
         const waypoints = [
-          { symbol: "X1-TEST-MARKET", type: "PLANET", x: 0, y: 0, traits: [{ symbol: "MARKETPLACE" }] },
-          { symbol: "X1-TEST-BELT", type: "ASTEROID_FIELD", x: 10, y: 0, traits: [] },
+          { symbol: "X1-TEST-MARKET", type: "PLANET", ...coordsOf("X1-TEST-MARKET"), traits: [{ symbol: "MARKETPLACE" }] },
+          { symbol: "X1-TEST-BELT", type: "ASTEROID_FIELD", ...coordsOf("X1-TEST-BELT"), traits: [] },
         ];
         if (multiGoodMode) {
-          waypoints.push({ symbol: "X1-TEST-MARKET-2", type: "PLANET", x: 20, y: 0, traits: [{ symbol: "MARKETPLACE" }] });
+          waypoints.push({
+            symbol: "X1-TEST-MARKET-2",
+            type: "PLANET",
+            ...coordsOf("X1-TEST-MARKET-2"),
+            traits: [{ symbol: "MARKETPLACE" }],
+          });
         }
         respondJson(res, 200, { data: waypoints });
       } else if (req.url === "/waypoints/X1-TEST-MARKET/market") {
@@ -332,6 +365,34 @@ describe("automation-service mining loop", () => {
     expect(finalTask.marketWaypoint).toBeNull();
     expect(finalTask.tradeSymbol).toBeNull();
     expect(ship.fuel.current).toBe(ship.fuel.capacity);
+
+    // The cycle's tallies were reset for the next one, not left to accumulate.
+    expect(finalTask.cycleRevenue).toBe(0);
+    expect(finalTask.cycleStartedAt).toBeNull();
+
+    // Closing the loop: what the cycle actually earned is now on record against
+    // the field it was earned at, so the next planner decision scores this
+    // field on evidence rather than on the cold-start prior.
+    const { rows: observations } = await pool.query(
+      "SELECT asteroid_waypoint, revenue, units_extracted, travel_distance, cycle_hours FROM mining_observation"
+    );
+    expect(observations).toHaveLength(1);
+    expect(observations[0].asteroid_waypoint).toBe("X1-TEST-BELT");
+    expect(Number(observations[0].revenue)).toBe(50); // the one sell in this cycle
+    expect(Number(observations[0].units_extracted)).toBe(1);
+    // Market (x=0) out to the belt (x=10) and back again.
+    expect(Number(observations[0].travel_distance)).toBeCloseTo(20);
+    expect(Number(observations[0].cycle_hours)).toBeGreaterThan(0);
+
+    // And both legs were timed, which is what calibrates ship speed.
+    const { rows: flights } = await pool.query(
+      "SELECT distance, hours FROM travel_observation WHERE hours IS NOT NULL"
+    );
+    expect(flights).toHaveLength(2);
+    for (const flight of flights) {
+      expect(Number(flight.distance)).toBeCloseTo(10);
+      expect(Number(flight.hours)).toBeCloseTo(1000 / 3_600_000);
+    }
     expect(ship.cargo.units).toBe(0);
   }, 20_000);
 

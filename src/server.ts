@@ -14,6 +14,7 @@ import { createGameClients, UpstreamCallError } from "./gameClients";
 import { KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
 import { MetricsRepo } from "./metrics";
 import { MetricsScheduler } from "./metricsScheduler";
+import { ObservationRepo } from "./observations";
 import { Planner } from "./planner";
 import { MiningScheduler } from "./scheduler";
 import { ShipTaskRepo } from "./shipTaskRepo";
@@ -111,17 +112,31 @@ export function createApp(
   const anomalyRepo = new AnomalyRepo(pool, clock);
   const contractRepo = new ContractRepo(pool, clock);
 
+  const observationRepo = new ObservationRepo(pool, clock);
   const gameClients = mining !== undefined ? createGameClients(mining) : null;
-  const planner = gameClients !== null ? new Planner(gameClients, knobs) : null;
+  const planner = gameClients !== null ? new Planner(gameClients, knobs, observationRepo) : null;
   const marketIntelRepo = new MarketIntelRepo(pool, clock);
 
   const scheduler =
     mining !== undefined && gameClients !== null && planner !== null
-      ? new MiningScheduler(state, shipTaskRepo, events, gameClients, clock, planner, knobs, contractRepo, marketIntelRepo, pool, {
-          shipSymbol: mining.miningShipSymbol,
-          intervalMs: mining.schedulerIntervalMs,
-          replanIntervalMs: mining.replanIntervalMs,
-        })
+      ? new MiningScheduler(
+          state,
+          shipTaskRepo,
+          events,
+          gameClients,
+          clock,
+          planner,
+          knobs,
+          contractRepo,
+          marketIntelRepo,
+          observationRepo,
+          pool,
+          {
+            shipSymbol: mining.miningShipSymbol,
+            intervalMs: mining.schedulerIntervalMs,
+            replanIntervalMs: mining.replanIntervalMs,
+          }
+        )
       : null;
 
   // Runs independent of autopilot arm/pause/abort — metrics (including the
@@ -243,10 +258,40 @@ export function createApp(
     })
   );
 
+  // `?class=policy` is how the AI supervisor asks for exactly the knobs it is
+  // allowed to write. Serving the filter here rather than trusting the caller
+  // to filter means the restriction holds even if a client forgets it.
   apiRouter.get(
     "/planner/knobs",
-    asyncHandler(async (_req, res) => {
+    asyncHandler(async (req, res) => {
+      const requested = req.query.class;
+      if (requested !== undefined) {
+        if (requested !== "model" && requested !== "policy" && requested !== "alert") {
+          res.status(400).json({ error: { message: 'class must be "model", "policy" or "alert"' } });
+          return;
+        }
+        res.json({ knobs: await knobs.getByClass(requested) });
+        return;
+      }
       res.json({ knobs: await knobs.getAll() });
+    })
+  );
+
+  // What the planner currently believes about the universe, and whether each
+  // belief was measured or assumed. The single most useful thing to look at
+  // when a ship goes somewhere surprising.
+  apiRouter.get(
+    "/planner/model",
+    asyncHandler(async (_req, res) => {
+      const values = await knobs.getValues();
+      const model = await observationRepo.calibrate({
+        creditsPerCyclePrior: values["mine.creditsPerCyclePrior"],
+        speedUnitsPerHourPrior: values["travel.speedUnitsPerHourPrior"],
+        overheadHoursPrior: values["cycle.overheadHoursPrior"],
+        fuelCreditsPerUnitDistancePrior: values["fuel.creditsPerUnitDistancePrior"],
+        halfLifeHours: values["observation.halfLifeHours"],
+      });
+      res.json({ model });
     })
   );
 

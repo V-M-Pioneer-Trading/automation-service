@@ -5,17 +5,39 @@
  * as command-interface does.
  */
 
+/**
+ * One end of a nav route. SpaceTraders reports both ends with coordinates and
+ * both timestamps, which is what lets us measure real flight speed instead of
+ * assuming one — see observations.ts. Optional throughout because these fields
+ * are only used for calibration: a response without them costs an observation,
+ * never a dispatch.
+ */
+export interface RouteEndpoint {
+  symbol: string;
+  x?: number;
+  y?: number;
+}
+
+export interface NavRoute {
+  arrival: string;
+  departureTime?: string;
+  origin?: RouteEndpoint;
+  destination?: RouteEndpoint;
+}
+
 export interface ShipSnapshot {
   symbol: string;
   nav: {
     systemSymbol: string;
     waypointSymbol: string;
     status: "DOCKED" | "IN_ORBIT" | "IN_TRANSIT";
-    route: { arrival: string };
+    route: NavRoute;
   };
   cooldown: { expiration: string | null };
   fuel: { current: number; capacity: number };
   cargo: { units: number; capacity: number; inventory: { symbol: string; units: number }[] };
+  /** Present on a real SpaceTraders ship; absent in older stubs, hence optional. */
+  engine?: { speed?: number };
 }
 
 export interface SurveyData {
@@ -168,7 +190,11 @@ export function createGameClients(config: {
         units,
       }),
 
-    refuel: (shipSymbol: string, authHeader: string) => fleetAction(shipSymbol, "refuel", authHeader),
+    // The transaction is optional in the type because it's only used to
+    // calibrate fuel cost (observations.ts) — a refuel that reports no price
+    // still refuels the ship, it just teaches us nothing.
+    refuel: (shipSymbol: string, authHeader: string) =>
+      fleetAction<{ data?: { transaction?: { totalPrice?: number } } }>(shipSymbol, "refuel", authHeader),
 
     purchase: (shipSymbol: string, tradeSymbol: string, units: number, authHeader: string) =>
       agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "purchase", authHeader, {
