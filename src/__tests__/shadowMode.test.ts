@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { createApp } from "../server";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
+import { resetDatabase } from "../testSupport/resetDatabase";
 
 class FakeClock implements Clock {
   constructor(private current: Date) {}
@@ -66,8 +67,9 @@ describe("automation-service shadow mode (meta#21)", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE event_log, ship_task RESTART IDENTITY");
-    await pool.query("UPDATE knob SET value = default_value");
+    // Scouting off: shadow mode is about logging-without-dispatch, and these
+    // cases assert the mining target it would have chosen.
+    await resetDatabase(pool);
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
 
     agent = startStubServer((req, _body, res) => {

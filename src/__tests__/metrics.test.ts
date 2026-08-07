@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { createApp } from "../server";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
+import { resetDatabase } from "../testSupport/resetDatabase";
 
 class FakeClock implements Clock {
   constructor(private current: Date) {}
@@ -28,7 +29,7 @@ describe("automation-service metrics rollups (meta#14)", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE event_log, metrics_rollup RESTART IDENTITY");
+    await resetDatabase(pool);
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
   });
 

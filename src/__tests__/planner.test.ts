@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { createApp } from "../server";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
+import { resetDatabase } from "../testSupport/resetDatabase";
 
 class FakeClock implements Clock {
   constructor(private current: Date) {}
@@ -71,8 +72,9 @@ describe("automation-service planner (meta#10)", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE event_log, ship_task RESTART IDENTITY");
-    await pool.query("UPDATE knob SET value = default_value"); // reset any prior test's writes
+    // Scouting off: these cases assert which asteroid field wins, so mining
+    // needs to be the only bidder.
+    await resetDatabase(pool);
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
     credits = 100_000;
     fleetShouldFail = false;
@@ -164,6 +166,82 @@ describe("automation-service planner (meta#10)", () => {
     }
     throw new Error("timed out waiting for a planner assignment");
   };
+
+  /** An armed gateway, ready to make its first assignment. */
+  const armed = async () => {
+    const gateway = app();
+    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    return gateway;
+  };
+
+  /**
+   * The point of measuring revenue per field rather than assuming one number
+   * for all of them. With a single flat estimate every field scores the same
+   * per cycle, so the nearest one always wins and the planner is really just
+   * a distance sort. These two cases show the planner changing its mind purely
+   * because of what the fleet has learned.
+   */
+  describe("scoring on measured revenue", () => {
+    const recordCycle = (waypoint: string, revenue: number, at: Date) =>
+      pool.query(
+        `INSERT INTO mining_observation
+           (ship_symbol, asteroid_waypoint, observed_at, revenue, cycle_hours, travel_distance, units_extracted)
+         VALUES ('MINING-1', $1, $2, $3, 1, 0, 10)`,
+        [waypoint, at, revenue]
+      );
+
+    it("picks the nearest field while every field is still an unknown quantity", async () => {
+      const task = await waitForAssignment(await armed());
+      expect(task.asteroidWaypoint).toBe("X1-TEST-BELT-NEAR");
+    });
+
+    it("switches to a farther field once that field is measured to be worth much more", async () => {
+      // NEAR is a 20-unit round trip; FAR is 180. At the default 30 units/hour
+      // and 0.3h overhead that's 0.97h vs 6.3h per cycle — so FAR only wins if
+      // its measured revenue more than makes up for the extra flying.
+      await recordCycle("X1-TEST-BELT-NEAR", 500, clock.now());
+      await recordCycle("X1-TEST-BELT-FAR", 60_000, clock.now());
+
+      const task = await waitForAssignment(await armed());
+      expect(task.asteroidWaypoint).toBe("X1-TEST-BELT-FAR");
+    });
+
+    it("records where each field's revenue estimate came from, so a decision can be explained", async () => {
+      await recordCycle("X1-TEST-BELT-NEAR", 4000, clock.now());
+      const gateway = await armed();
+      await waitForAssignment(gateway);
+
+      const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
+      const assignment = eventsRes.body.events.find((e: { type: string }) => e.type === "planner_assignment");
+      const candidates = assignment.detail.candidates as {
+        waypoint: string;
+        creditsPerCycle?: number;
+        creditsPerCycleSource?: string;
+      }[];
+
+      const near = candidates.find((c) => c.waypoint === "X1-TEST-BELT-NEAR");
+      const far = candidates.find((c) => c.waypoint === "X1-TEST-BELT-FAR");
+      expect(near).toMatchObject({ creditsPerCycle: 4000, creditsPerCycleSource: "measured-here" });
+      // FAR has never been mined, so it inherits the fleet-wide average.
+      expect(far).toMatchObject({ creditsPerCycle: 4000, creditsPerCycleSource: "fleet-average" });
+      expect(assignment.detail.model.provenance.creditsPerCycle).toBe("measured");
+    });
+
+    it("reports an uncalibrated model as running on priors, not as measured fact", async () => {
+      const gateway = await armed();
+      await waitForAssignment(gateway);
+
+      const modelRes = await request(gateway).get("/api/automation/v1/planner/model");
+      expect(modelRes.status).toBe(200);
+      expect(modelRes.body.model.provenance).toMatchObject({
+        creditsPerCycle: "prior",
+        speed: "prior",
+        overhead: "prior",
+        fuel: "prior",
+      });
+      expect(modelRes.body.model.speedUnitsPerHour).toBe(30);
+    });
+  });
 
   it("knob table: reads defaults, accepts an in-range write, rejects out-of-range and unknown names", async () => {
     const gateway = app();

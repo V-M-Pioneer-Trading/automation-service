@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { createApp } from "../server";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
+import { resetDatabase } from "../testSupport/resetDatabase";
 
 class FakeClock implements Clock {
   constructor(private current: Date) {}
@@ -70,11 +71,11 @@ describe("automation-service market scouting loop (meta#12)", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE event_log, ship_task, contract, market_intel RESTART IDENTITY");
-    await pool.query("UPDATE knob SET value = default_value");
-    // Enable scouting: a stale market at threshold scores the same as mining's
-    // default expectedCreditsPerCycle (5000), so it wins over a distant asteroid.
-    await pool.query("UPDATE knob SET value = 5000 WHERE name = 'scout.valuePerRefresh'");
+    await resetDatabase(pool, { enableScouting: true });
+    // Priced well above the default so a market at exactly one threshold of
+    // staleness matches a whole mining cycle's worth of revenue — that makes
+    // the staleness arithmetic, not the relative pricing, what these cases test.
+    await pool.query("UPDATE knob SET value = 5000 WHERE name = 'scout.creditsPerRefresh'");
 
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
     ship = makeShip();
@@ -183,7 +184,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
     throw new Error(`timed out waiting for phase ${phase}`);
   };
 
-  it("a stale market scores higher than a fresh one when scout.valuePerRefresh > 0 (scenario fixtures)", async () => {
+  it("a freshly-refreshed market scores nothing, so mining wins instead", async () => {
     // Insert fresh intel for the market — just refreshed, score should be 0.
     await pool.query(
       "INSERT INTO market_intel (waypoint, last_refreshed_at) VALUES ($1, $2)",
@@ -211,7 +212,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
     expect(evt.detail.chosen).toBe("X1-TEST-BELT");
   }, 10_000);
 
-  it("a never-seen market (no intel entry) wins assignment over mining when scout.valuePerRefresh > 0", async () => {
+  it("a never-seen market (no intel entry) wins assignment over mining", async () => {
     // No market_intel entries → never-seen → stalenessFactor = 10× threshold → high score.
     // ship starts at X1-TEST-BELT (distance 10 to X1-TEST-MARKET), should be assigned scout.
 

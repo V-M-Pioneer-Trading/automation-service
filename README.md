@@ -1,527 +1,505 @@
 # automation-service
 
-Autopilot lifecycle, mining loop, planner, contract loop, market scouting,
-fleet replan, shadow mode, metrics rollups, anomaly detection, and
-append-only event log for the SpaceTraders fleet
-([meta#8](https://github.com/V-M-Pioneer-Trading/meta/issues/8),
-[meta#9](https://github.com/V-M-Pioneer-Trading/meta/issues/9),
-[meta#10](https://github.com/V-M-Pioneer-Trading/meta/issues/10),
-[meta#11](https://github.com/V-M-Pioneer-Trading/meta/issues/11),
-[meta#12](https://github.com/V-M-Pioneer-Trading/meta/issues/12),
-[meta#13](https://github.com/V-M-Pioneer-Trading/meta/issues/13),
-[meta#14](https://github.com/V-M-Pioneer-Trading/meta/issues/14),
-[meta#15](https://github.com/V-M-Pioneer-Trading/meta/issues/15),
-[meta#18](https://github.com/V-M-Pioneer-Trading/meta/issues/18),
-[meta#19](https://github.com/V-M-Pioneer-Trading/meta/issues/19),
-[meta#20](https://github.com/V-M-Pioneer-Trading/meta/issues/20),
-[meta#21](https://github.com/V-M-Pioneer-Trading/meta/issues/21)).
+The autopilot. Decides what each ship should do next, drives it there, watches
+for trouble, and records everything it did and why.
 
-## What it does
+This service never calls SpaceTraders directly — every read and every ship
+action goes through navigation-service, agent-service, and fleet-service.
 
-- **Arm**: `POST /api/automation/v1/autopilot/arm { token, mode? }` holds the SpaceTraders
-  account token **in memory only** — nothing token-shaped is ever written to
-  Postgres or echoed back. A restart always disarms; there is no
-  auto-resume. Arming is allowed from any status (including re-arming after
-  a pause or abort), and starts the mining scheduler if one is configured.
-  `mode` is `"live"` (default) or `"shadow"` — see below. Switching between
-  them always goes through an explicit re-arm; there's no other way to
-  change it.
-- **Pause**: `POST /api/automation/v1/autopilot/pause` — only valid while armed. The scheduler
-  keeps polling so an already-dispatched wait (a transit or a cooldown) gets
-  to finish and its result gets recorded, but no *new* action is dispatched
-  afterward — the ship idles at whatever phase that wait resolved into.
-- **Abort**: `POST /api/automation/v1/autopilot/abort` — valid while armed or paused, clears
-  the held token and stops the scheduler immediately (no further dispatch,
-  not even finishing an in-flight wait).
-- **Status**: `GET /api/automation/v1/autopilot/status` — current lifecycle state and mode
-  (`mode` is `null` whenever no token is held, i.e. disarmed or aborted).
-- **Event log**: every transition and every mining action is appended to
-  Postgres (`GET /api/automation/v1/autopilot/events?limit=`, newest first) and survives
-  restarts even though the lifecycle state itself does not.
+**New here?** Read [How it decides](#how-it-decides) first. It's the part that
+matters, and it's shorter than it looks.
 
-Invalid transitions (e.g. pausing while disarmed) return `409` naming the
-current status. A DB failure on the event-log write returns `500` rather
-than hanging the request — but note the in-memory status has already
-transitioned by that point (arm/pause/abort mutate state, then persist the
-event), so a failed write can leave status and the audit trail briefly
-diverged. Acceptable for now (single-row insert, no distributed transaction
-available between memory and Postgres); revisit if it proves troublesome
-once real dispatch traffic exists.
+- [How it decides](#how-it-decides)
+- [What the fleet has learned](#what-the-fleet-has-learned)
+- [Knobs](#knobs)
+- [The work loops](#the-work-loops)
+- [Replan](#replan)
+- [Shadow mode](#shadow-mode)
+- [Watching for trouble](#watching-for-trouble)
+- [Replaying decisions](#replaying-decisions)
+- [API](#api)
+- [Configuration](#configuration)
+- [Developing](#developing)
+- [Known limitations](#known-limitations)
 
-## Mining loop (meta#9)
+---
 
-While armed, one configured ship runs travel → survey → extract → travel to
-market → sell → refuel → repeat, driven entirely through navigation-service,
-agent-service, and fleet-service — this service never calls SpaceTraders
-directly. Per-ship progress persists to Postgres (`ship_task`), so a restart
-+ re-arm resumes from the last completed phase instead of starting over.
+## How it decides
 
-`GET /api/automation/v1/autopilot/ships/:shipSymbol` returns the ship's current phase, wait
-state, and in-progress survey/market data.
-
-**Deliberate tracer-bullet simplifications** (this ticket proves the FSM
-end-to-end for one ship; picking *which* asteroid field to mine is the
-planner's job, [meta#10](https://github.com/V-M-Pioneer-Trading/meta/issues/10)):
-
-- The ship is fixed by config (`MINING_SHIP_SYMBOL`); which field it mines is
-  chosen dynamically by the planner (see below). Multi-ship, fleet-wide
-  dispatch is still future work — the planner's `assignMiningTarget` is
-  already per-ship, so extending to N ships is mostly scheduler wiring, not
-  new scoring logic.
-- "Best nearby market" is real (queries navigation-service for every
-  in-system marketplace and picks the highest sell price for whatever's being
-  sold) but has no route-cost/BFS awareness — "nearby" just means "in the same
-  system." The planner's fuel-aware routing (meta#10) only governs which
-  asteroid field is chosen, not the sell-side market leg.
-
-Multi-good cargo ([meta#36](https://github.com/V-M-Pioneer-Trading/meta/issues/36)):
-a survey can yield more than one resource type before cargo fills. Market
-selection and `SELL` both read the ship's live cargo, not a single tracked
-trade good — `SELL` sells whatever the current market buys and, once nothing
-left in the hold sells there, re-shops (`mining_market_reselect`) for a market
-for what remains, repeating until cargo is empty. Each market stop still costs
-a real trip, so a survey yielding many distinct goods costs proportionally
-more travel than a single-good one.
-
-The scheduler ticks on a fixed interval (`SCHEDULER_INTERVAL_MS`) and
-performs **at most one atomic action per tick** — dispatch a command, resolve
-an elapsed wait, or get a planner assignment, never more than one of those.
-That granularity is what makes pause take effect between actions instead of
-admin-killing something mid-flight. Abort stops the scheduler's timer
-immediately, but an action already in flight when abort lands can't be
-un-sent — its result is discarded (not persisted, not logged as a real
-action; a `mining_discarded_after_abort` event marks it) rather than
-silently taking effect after the operator asked to stop.
-
-## Planner (meta#10)
-
-Whenever a ship has no assigned asteroid field — a brand new task, the moment
-a cycle completes, or after a target has failed out (see below) — the
-scheduler's very next tick asks the planner for one, instead of waiting on
-any separate periodic process. That's the scheduler's one atomic action for
-that tick; dispatch toward the new target starts the tick after.
-
-**Scoring**: every `ASTEROID_FIELD` waypoint in the ship's system is scored
-in expected credits/hour. Route cost from the ship's current position (and
-back) is computed with a fuel-aware Dijkstra search
-([`routeCost.ts`](src/routeCost.ts)) over the system's waypoint graph — a leg
-longer than the ship's fuel range is infeasible, and a multi-leg route may
-only pass through waypoints with a fuel station (a `MARKETPLACE` trait,
-in practice) except at its final stop. Unreachable fields score nothing.
-Reachable fields are scored `(expectedCreditsPerCycle × taskWeight) /
-cycleHours`, where `cycleHours` comes from round-trip distance over an
-assumed travel speed plus a fixed survey/extract/cooldown/sell overhead — all
-knob-configurable. The planner never assigns a field whose estimated
-round-trip fuel cost would drop the agent's credits below the configured
-reserve floor; if every reachable field would breach it, no assignment is
-made (`planner_no_viable_target`) and the ship idles until conditions change.
-
-Every assignment decision — every candidate considered, its distance,
-reachability, score, and reserve-floor check, plus the knob values used — is
-logged as a `planner_assignment` event, so any decision can be replayed from
-`GET /api/automation/v1/autopilot/events`.
-
-**v1 simplification**: `expectedCreditsPerCycle` is a flat knob-configured
-estimate, not yet derived from real per-good extraction yield and market
-price data — scoring which field is *fastest to reach* is real; scoring which
-field is *most profitable to mine* is future work. Fuel-station detection
-also just checks the `MARKETPLACE` trait rather than confirming the market
-actually stocks `FUEL`.
-
-**Failure-driven reassignment**: if working the assigned target keeps
-failing (`mine.failureRetryLimit` consecutive tick errors, default 3), the
-scheduler resets the ship to a fresh planner assignment on its very next
-tick — unless the ship is already holding cargo extracted from that target
-and hasn't sold it yet, in which case it keeps retrying the same target
-indefinitely rather than stranding that cargo.
-
-### Knobs
-
-`GET /api/automation/v1/planner/knobs` lists every knob (`name`, `value`, `default`, `min`,
-`max`). `PUT /api/automation/v1/planner/knobs/:name { value }` updates one — `404` for an
-unknown name, `400` for a value outside `[min, max]`. A successful write is
-logged as a `knob_changed` event (`{name, previousValue, newValue}`) and
-triggers a fleet replan ([meta#13](https://github.com/V-M-Pioneer-Trading/meta/issues/13))
-— read and write happen inside one transaction (`SELECT ... FOR UPDATE`) so
-`previousValue` is always the value actually overwritten, never stale under
-concurrent writes to the same knob. [meta#18](https://github.com/V-M-Pioneer-Trading/meta/issues/18)
-adds a UI editor for these on top of this same endpoint.
-
-| Knob | Default | Meaning |
-|---|---|---|
-| `mine.taskWeight` | `1` | Multiplier applied to every mining-task score. |
-| `mine.expectedCreditsPerCycle` | `5000` | Flat estimated revenue per cycle (v1 simplification above). |
-| `travel.speedUnitsPerHour` | `30` | Assumed ship speed for travel-time estimates. |
-| `cycle.fixedOverheadHours` | `0.3` | Fixed survey+extract+cooldown+sell time per cycle. |
-| `fuel.creditsPerUnitDistance` | `5` | Assumed credits cost per unit of travel distance. |
-| `credit.reserveFloor` | `0` | The planner never assigns work that would drop credits below this. |
-| `mine.failureRetryLimit` | `3` | Consecutive tick failures on one target before reassigning away from it. |
-
-## Contract loop (meta#11)
-
-A ship that needs a target is offered contracts alongside asteroid fields —
-whichever scores higher in the same expected-credits/hour units wins. A
-second FSM (`advanceContractTask`, mirroring the mining FSM's one-atomic-
-action-per-tick discipline) carries an accepted contract through
-`CONTRACT_TRAVEL_TO_MARKET → CONTRACT_PURCHASE → CONTRACT_TRAVEL_TO_DESTINATION
-→ CONTRACT_DELIVER → CONTRACT_FULFILL`, reusing the mining FSM's travel/dock
-helpers since traveling for a contract behaves identically to traveling to
-mine. Both FSMs share one `ship_task` row (`task_kind` distinguishes them) —
-a ship works one target at a time, whichever kind it is.
-
-**Discovery and evaluation**: right before every scoring decision, the
-scheduler calls `discoverAndEvaluateContracts` synchronously — fetches
-contracts not yet seen, evaluates each deterministically
-(`Planner.evaluateContract`: cheapest in-system market selling the
-deliverable good, fuel-aware route cost from the ship's position through that
-market to the delivery destination, `expectedProfit = totalPayment -
-procurementCost - travelCost`), and accepts or declines immediately based on
-`contract.minProfitThreshold`. This is a plain function, not a background
-scheduler — an earlier draft used one, and it raced the mining scheduler's
-own assignment: a fresh, higher-scoring contract could still be mid-
-evaluation when the ship got locked into mining instead. Calling it inline
-guarantees discovery is always caught up before a decision is made. A
-discovery failure (upstream hiccup) is caught and logged
-(`contract_discovery_error`) rather than blocking mining — contracts are
-additive on top of mining, never a hard dependency of it.
-
-**Scoring**: an accepted contract's score is `(expectedProfit × taskWeight) /
-cycleHours`, using the values frozen at evaluation time. The planner never
-lets a contract win assignment if `currentCredits - (totalPayment -
-expectedProfit)` would drop below `credit.reserveFloor` — the same
-protection mining candidates get via their fuel-cost check, using
-`totalPayment - expectedProfit` (procurement + travel cost combined) as a
-conservative upper bound on what accepting would spend.
-
-Every assignment decision — mining candidates, the best accepted contract's
-score, and which one won — is logged as `planner_assignment`, same event
-type mining-only decisions already used (the "none"/"mine" branches flatten
-the mining detail rather than nesting it, so existing consumers reading
-`detail.candidates` keep working unchanged when there are no contracts in
-play).
-
-**Failure and abandonment**: a contract task that fails out
-(`mine.failureRetryLimit` consecutive errors, same knob as mining) releases
-the contract back to `accepted` status rather than leaving it permanently
-`assigned` to a ship that's given up on it, then resets the ship to a fresh
-planner assignment — same pattern as mining's failure-driven reassignment.
-Cargo already purchased toward a contract is treated the same as mining's
-"cargo at stake" rule: the ship keeps retrying rather than abandoning a
-target while cargo it can't easily dispose of sits in the hold.
-
-**v1 simplifications**:
-
-- Only the contract's **first** deliverable is evaluated/worked — multi-good
-  contracts are not yet supported.
-- No standalone background scheduler for contract discovery — see above.
-  With one ship that can only work one target at a time, there's no benefit
-  to ahead-of-time discovery; revisit once multiple ships mean contracts
-  should be pursued ahead of any one ship actually needing work.
-- `discoverAndEvaluateContracts` runs on every assignment tick with no cheap
-  pre-check or cooldown — acceptable given how infrequently a ship actually
-  needs a fresh assignment (once per idle-ship tick, not every scheduler
-  tick), but would need one if that assumption stops holding.
-- Purchase quantity math (`dispatchPurchase`) treats the ship's entire cargo
-  hold as belonging to the contract's trade good — correct for a
-  contract-dedicated ship with an empty hold at assignment time (mining
-  always sells out before handing a ship back to the planner), but would
-  undercount if a ship ever carried an unrelated good into a contract task.
-- The reserve-floor check for contracts uses `totalPayment - expectedProfit`
-  as a combined procurement+travel cost estimate rather than the
-  procurement cost alone, since `ContractRecord` doesn't persist them
-  separately — conservative (may decline a contract mining's equivalent
-  check would allow), not permissive.
-
-### New knobs
-
-| Knob | Default | Meaning |
-|---|---|---|
-| `contract.taskWeight` | `1` | Multiplier applied to every contract-task score, same role as `mine.taskWeight`. |
-| `contract.minProfitThreshold` | `0` | Minimum `expectedProfit` for a contract to be accepted. |
-
-## Market scouting loop (meta#12)
-
-Market price data ages — procurement and sell prices change on SpaceTraders'
-clock. The scouting loop keeps the planner's economic decisions grounded in
-current data by scoring "visit this market and refresh its intel" as a
-first-class task kind that competes with mining and contracts in the same
-credits/hour units.
-
-**Intel tracking**: `market_intel` (one row per marketplace, `last_refreshed_at`)
-records when automation-service last called `getMarket` while a ship was docked
-at that market. This is the "cache" the planner's scoring reads from. The table
-is the authoritative freshness record for automation-service; what the upstream
-navigation-service holds in its own cache is separate and not directly
-observable here.
-
-**Scoring**: the planner scores each marketplace's scouting urgency as:
+Three kinds of work compete for every ship: **mine** an asteroid field, **run**
+a contract, **scout** a market to refresh its prices. They're compared in one
+currency — **expected credits per hour** — and the highest number wins.
 
 ```
-score = (scout.valuePerRefresh × stalenessFactor × scout.taskWeight) / cycleHours
+mining     score = (credits this field earns per cycle × mine weight) / cycle hours
+contract   score = (expected profit × contract weight) / cycle hours
+scouting   score = (credits per refresh × how stale the market is) / cycle hours
+
+cycle hours = distance / ship speed + fixed overhead
 ```
 
-where `stalenessFactor = elapsedHours / scout.stalenessThresholdHours` grows
-linearly as the market ages. At exactly one threshold's worth of staleness the
-scouting score equals `scout.valuePerRefresh / cycleHours` — calibrated to
-be directly comparable to a mining assignment (`mine.expectedCreditsPerCycle /
-cycleHours`) when `scout.valuePerRefresh ≈ mine.expectedCreditsPerCycle`. A
-market refreshed the moment it's needed scores 0 (don't bother); a market not
-seen in 2× the threshold scores 2×. Markets never seen before are treated as
-10× stale — very high priority for a first-pass scout, then normal decay
-takes over.
+That's the whole model. It lives in [`src/scoring.ts`](src/scoring.ts) as pure
+functions with no I/O, which is what lets it be unit-tested directly and
+re-run over history (see [Replaying decisions](#replaying-decisions)).
 
-**Default: opt-in** (`scout.valuePerRefresh = 0`). Scouting only competes
-for assignments when an operator explicitly sets `scout.valuePerRefresh > 0`
-via `PUT /api/automation/v1/planner/knobs/scout.valuePerRefresh`. This keeps the default
-behavior purely mining-and-contracts — scouting doesn't win any assignment
-until it's valued.
+Two rules apply before any of it matters:
 
-**FSM**: `advanceScoutTask` runs two phases — `SCOUT_TRAVEL` (travel to the
-market, reusing the mining FSM's `travelTo` helper) → `SCOUT_REFRESH` (dock,
-call `getMarket` to pull live data, emit `scout_market_refresh`). The scheduler
-records the fresh timestamp in `market_intel` on `scout_market_refresh`, then
-resets the ship to a fresh planner assignment — same "hand back to planner on
-completion" pattern as mining (`mining_cycle_complete`) and contracts
-(`contract_fulfilled`).
+- **Cash floor.** Work whose estimated cost would drop credits below
+  `credit.reserveFloor` is removed from consideration, not scored against. If
+  everything reachable would breach it, the ship deliberately idles. Running out
+  of money for fuel is not recoverable in SpaceTraders.
+- **Reachability.** A target the ship can't route to isn't a candidate. Routing
+  is fuel-aware: a leg longer than the tank is impossible, and an intermediate
+  stop must have a fuel station. See [`src/routeCost.ts`](src/routeCost.ts) —
+  and note the honest caveat there, that since every waypoint is directly
+  reachable from every other, this search is mostly answering *"can we get
+  there"* rather than *"what's the shortest way"*.
 
-**v1 simplifications**:
+### A worked example
 
-- `getSystemWaypoints` is called twice per assignment cycle — once inside
-  `assignMiningTarget` and once in `assignTarget` for scout scoring — because
-  both run in the same `Promise.all` and sharing the result would require
-  refactoring `assignMiningTarget`'s return type. Both calls run in parallel
-  so there's no latency penalty; the redundant HTTP round-trip is the cost.
-- No per-market refresh cooldown after scouting — after a `scout_market_refresh`
-  the market's `last_refreshed_at` is recorded, stalenessFactor resets to 0,
-  and score drops to 0, so the planner naturally won't re-scout it until it
-  ages again. No explicit cooldown knob needed.
-- Scouting doesn't track *which* price changed or by how much — it just
-  records that data was refreshed. Downstream decisions (contract evaluation,
-  mining market selection) re-read from the navigation service each time they
-  run anyway, so they always get current data when it matters.
+A ship sits at a market. Two asteroid fields are in range:
 
-### New knobs
+| | distance (one way) | round trip | credits/cycle | cycle hours | score |
+|---|---|---|---|---|---|
+| `BELT-NEAR` | 10 | 20 | 4,200 (measured here) | 20/30 + 0.3 = **0.97** | **4,340 cr/h** |
+| `BELT-FAR` | 90 | 180 | 11,800 (measured here) | 180/30 + 0.3 = **6.3** | **1,873 cr/h** |
+
+`BELT-NEAR` wins, despite being worth less than a third as much per trip,
+because it turns around six times faster. Now suppose a few more cycles at
+`BELT-FAR` come back richer still — say 60,000 — and its score becomes 9,524
+cr/h. The planner switches, on its own, with no knob touched.
+
+**That switch is only possible because `credits/cycle` differs per field.** If
+it were one fleet-wide constant, it would cancel out of every comparison and
+scoring would collapse into "always pick the nearest field". Which brings us to
+the next section.
+
+---
+
+## What the fleet has learned
+
+The scoring model needs four facts about the universe: what a mining cycle
+earns, how fast ships fly, how long the non-flying part of a cycle takes, and
+what fuel costs.
+
+These used to be hand-typed constants. They're now **measured from the fleet's
+own history** ([`src/observations.ts`](src/observations.ts)):
+
+| Fact | Measured from |
+|---|---|
+| Credits per mining cycle, **per field** | Every completed cycle: what it sold, at which field |
+| Ship speed | Real flights — the game reports both endpoints' coordinates and both timestamps |
+| Fixed cycle overhead | Measured cycle time minus the travel that cycle's distance accounts for |
+| Fuel credits per unit distance | Real refuel purchases, against the distance they paid for |
+
+Older observations count for less, on a half-life set by
+`observation.halfLifeHours` — so a field that has got better recently outweighs
+how it behaved yesterday, without one lucky trip swinging the estimate.
+
+**Before there's data**, each falls back to its `*Prior` knob, and the planner
+behaves exactly as it did before any of this existed. There's no cold-start
+cliff; a brand new fleet just prefers whatever is closest until it knows better.
+
+Every planner decision logs which numbers it used **and whether each was
+measured or assumed**, so a surprising choice can be explained rather than
+guessed at. `GET /planner/model` shows the current state of that:
+
+```json
+{
+  "model": {
+    "creditsPerCycleByWaypoint": { "X1-AB12-BELT": 4213.4 },
+    "fleetCreditsPerCycle": 4213.4,
+    "speedUnitsPerHour": 27.6,
+    "overheadHours": 0.42,
+    "fuelCreditsPerUnitDistance": 4.1,
+    "provenance": {
+      "creditsPerCycle": "measured", "speed": "measured",
+      "overhead": "measured", "fuel": "prior",
+      "miningSampleCount": 14, "flightSampleCount": 28, "refuelSampleCount": 0,
+      "waypointsWithOwnAverage": ["X1-AB12-BELT"]
+    }
+  }
+}
+```
+
+---
+
+## Knobs
+
+Every tunable number, with bounds, stored in Postgres and editable through the
+API. Knobs come in three classes, and **the class is the point**:
+
+| Class | What it is | Who may write it |
+|---|---|---|
+| **model** | A claim about how the universe behaves. Calibrated from observation; the stored value is only a cold-start prior. | Operator (to test a hypothesis). **Not the AI.** |
+| **policy** | A preference with no measurable true value. | Operator **and the AI supervisor**. |
+| **alert** | The threshold that decides when something is wrong. | Operator only. **Not the AI.** |
+
+Model knobs are fenced off because editing one doesn't change reality — it
+changes what the planner *believes* about reality, which is how you get a fleet
+confidently flying to the wrong asteroid. Alert knobs are fenced off for a
+sharper reason: an agent that can widen its own alarm thresholds will
+eventually resolve "profit dropped" by deciding profit drops are fine.
+`GET /planner/knobs?class=policy` is what the supervisor reads, and the filter
+is applied server-side so the restriction holds even if a client forgets it.
+
+### model
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `scout.taskWeight` | `1` | Multiplier applied to every scouting-task score. |
-| `scout.valuePerRefresh` | `0` | Flat credit value of refreshing one market's intel; **set above 0 to enable scouting**. |
-| `scout.stalenessThresholdHours` | `0.5` | Hours at which a market's scouting score equals `scout.valuePerRefresh / cycleHours`. |
+| `mine.creditsPerCyclePrior` | `5000` | Assumed revenue per mining cycle, until real cycles replace it. |
+| `travel.speedUnitsPerHourPrior` | `30` | Assumed ship speed, until real flights are timed. |
+| `cycle.overheadHoursPrior` | `0.3` | Assumed survey+extract+cooldown+sell time, until real cycles replace it. |
+| `fuel.creditsPerUnitDistancePrior` | `5` | Assumed fuel cost per unit distance, until real refuels replace it. |
+| `observation.halfLifeHours` | `6` | How fast old observations stop counting. Lower adapts faster but is noisier. |
 
-## Fleet replan (meta#13)
-
-Every idle-or-completing ship's target is re-scored against the planner's
-current knobs/state whenever something changes that could make a different
-choice — not just the moment a ship becomes idle. Three trigger sources call
-`MiningScheduler.requestReplan(reason)`:
-
-- **Knob change** — any successful `PUT /api/automation/v1/planner/knobs/:name`
-- **Anomaly** — any newly-recorded (non-deduped) anomaly from the meta#15 checks
-- **Manual** — `POST /api/automation/v1/planner/replan`
-
-plus a **periodic fallback** that fires on `REPLAN_INTERVAL_MS` (default 5
-minutes) regardless of whether anything else triggered one, so a replan still
-happens even if no operator or anomaly does for a while.
-
-**Debounce**: all four sources share one clock. A requested replan (knob/
-anomaly/manual) only runs once `replan.debounceSeconds` (knob, default 30)
-has elapsed since the last replan of *any* kind — multiple triggers inside
-that window coalesce into the one replan that runs once it clears. The very
-first-ever request is never held back waiting on a run that hasn't happened
-yet. The periodic fallback is anchored to arm time (`schedulerStartedAt`) so
-a fresh arm doesn't read as "infinitely overdue" and fire immediately.
-
-**Scope**: a replan re-scores every ship matching meta#10's idle predicate
-(`asteroidWaypoint === null && contractId === null` — a brand new task, or one
-whose cycle just completed) via `ShipTaskRepo.listIdle()`. A ship mid-task
-never matches that predicate, so **running work is never preempted** — abort
-remains the only interrupt. Every replan run (whether or not it reassigned
-anything) is logged as a `replan_executed` event with `{ reason,
-shipsConsidered }`.
-
-**v1 simplifications**:
-
-- Only ever one ship is actually in `ship_task` today (the single configured
-  `MINING_SHIP_SYMBOL`), so `listIdle()`'s fleet-wide query returns at most
-  one row in practice — the mechanism is written to scale to N ships (each
-  `assignTarget` call is now keyed off `task.shipSymbol`, not
-  `this.config.shipSymbol`) without further changes once multi-ship dispatch
-  lands, but there's nothing to demonstrate fleet-wide fan-out with yet.
-- If a replan considers a ship and finds no viable target
-  (`planner_no_viable_target`), that still counts as that ship's one atomic
-  action for the tick — the normal per-tick idle-dispatch path is skipped for
-  that ship this tick so it isn't asked twice in a row, duplicating the real
-  `discoverAndEvaluateContracts` upstream calls a plain re-ask would trigger.
-- A replan's `assignTarget` calls for each idle ship still run sequentially
-  inside the same tick, same as the rest of this codebase's single-ship
-  dispatch; a pause landing mid-loop across several idle ships doesn't stop
-  ships already past their token check from completing their (real, upstream)
-  contract-discovery call before the result is discarded — the same accepted
-  risk `assignTarget` already carries for a single ship (meta#11), just
-  potentially repeated once per idle ship in a future multi-ship fleet.
-
-### New knobs
+### policy
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `replan.debounceSeconds` | `30` | Minimum seconds between two replans triggered by a knob change or anomaly; multiple triggers inside the window coalesce into one. |
+| `mine.taskWeight` | `1` | How much to favour mining. `0` disables it. |
+| `contract.taskWeight` | `1` | How much to favour contracts, same units. `0` disables them. |
+| `contract.minProfitThreshold` | `0` | Minimum expected profit to accept a contract. Raise to be pickier. |
+| `scout.creditsPerRefresh` | `500` | What refreshing one market's prices is worth. `0` disables scouting. |
+| `scout.stalenessThresholdHours` | `0.5` | Staleness at which a refresh is worth its full value. |
+| `credit.reserveFloor` | `0` | Cash floor the planner will never spend past. |
+| `mine.failureRetryLimit` | `3` | Consecutive failures on a target before giving up on it. |
+| `replan.debounceSeconds` | `30` | Minimum gap between replans; bursts coalesce into one. |
 
-### New endpoint
+### alert
 
-`POST /api/automation/v1/planner/replan` — requests a replan (subject to the debounce above).
-Responds `{ requested: true }` immediately; the actual replan runs on a
-subsequent scheduler tick once due.
-
-## Shadow mode (meta#21)
-
-Arming with `mode: "shadow"` runs the planner's full scoring/assignment cycle
-on the same schedule as live mode, and logs every decision as a
-`planner_shadow_assignment` event (same scoring-input detail shape as live's
-`planner_assignment`) — but never touches `ship_task` and never calls
-`advanceMiningTask`, which is where every ship-action call to fleet-service
-lives. Nothing is ever "assigned" for real in shadow, so the same cycle
-recomputes and re-logs every tick: a continuous preview of what live mode
-would decide, safe to run unattended before trusting it with a live session.
-
-Switching from shadow to live (or back) always requires an explicit re-arm —
-there's no other way to change `mode`, so an operator can't accidentally
-drift from dry-run into live dispatch mid-session. Switching live to shadow
-while a live dispatch is genuinely in flight (a real navigate/extract/sell
-call already sent) doesn't undo that call — SpaceTraders has already acted
-on it — but the scheduler discards its result rather than persisting or
-logging it as something the (now-shadow) autopilot did; the ship's
-`ship_task` phase resumes from wherever it was before the switch the next
-time the operator re-arms live.
-
-## Metrics rollups (meta#14)
-
-Independent of autopilot arm/pause/abort — metrics, including the error
-rate, are meaningful whether or not the fleet is currently armed — a
-background scheduler computes and persists one rollup per tick
-(`METRICS_ROLLUP_INTERVAL_MS`, default one minute in production), each
-covering the window since the previous rollup ended. Resuming from the last
-persisted rollup's `window_end` after a restart means no gap and no
-double-counted window, same as `ship_task`'s restart-resumability.
-
-Each rollup has:
-
-- `creditsPerHour` — total `mining_sell` transaction revenue in the window,
-  divided by the window's duration in hours. v1 simplification: revenue
-  only, not netted against fuel or other costs.
-- `extractionUnits` — total units extracted (`mining_extract`) in the window.
-- `errorRate` — the fraction of all `mining_*` events in the window that were
-  a `mining_tick_error` or `mining_task_failed`.
-
-**v1 simplifications**: the "resume from the last persisted rollup" restart
-logic assumes exactly one running instance — there's no distributed lock, so
-two live instances (two replicas, or an old process not yet drained during a
-restart) would each bootstrap from the same `window_end` and double-count
-that window's activity. `metrics_rollup` also has no retention/pruning yet;
-it grows one row per tick indefinitely.
-
-`GET /api/automation/v1/metrics/context?rollupLimit=&eventLimit=` returns rollups and recent
-event-log entries together in one bounded response (default 10 rollups / 20
-events, capped at 200 / 100) — shaped to fit an AI context window, which is
-what the AI supervisor ([ai-service](https://github.com/V-M-Pioneer-Trading/ai-service),
-meta#19) and the [spacetraders-mcp-server](https://github.com/V-M-Pioneer-Trading/spacetraders-mcp-server)
-(meta#20) both read, for an autonomous and an interactive-operator consumer
-of the same context respectively.
-
-## Anomaly detection (meta#15)
-
-Independent of autopilot arm/pause/abort, once `ANOMALY_WEBHOOK_URL` is
-configured — a background scheduler runs six deterministic health checks on a
-fixed interval (`ANOMALY_INTERVAL_MS`), every threshold a bounded, AI-tunable
-knob:
-
-| Check | Fires when | Knob(s) |
+| Knob | Default | Meaning |
 |---|---|---|
-| `ship_idle` | A mining ship's task hasn't changed phase in over N minutes, while armed and live | `anomaly.shipIdleMinutes` |
-| `profit_drop` | The latest metrics rollup's credits/hour drops below a fraction of the trailing 6h average | `anomaly.profitDropFraction` |
-| `consecutive_failures` | A ship's consecutive tick-failure count reaches a limit (regardless of arm state — a broken ship stays broken until investigated) | `anomaly.consecutiveFailureLimit` |
-| `error_rate` | The fraction of `mining_*` events that are errors, in a trailing window, exceeds a threshold | `anomaly.errorRateThreshold`, `anomaly.errorRateWindowMinutes` |
-| `credits_flat` | Agent credits show no net increase across a trailing window | `anomaly.creditsFlatWindowHours` |
-| `market_stale` | A market priced in the last 24h (i.e. "in active use") hasn't been repriced in over N minutes | `anomaly.marketStalenessMinutes` |
+| `anomaly.shipIdleMinutes` | `10` | Minutes without a phase change before a ship is flagged idle. |
+| `anomaly.profitDropFraction` | `0.5` | Earnings stalled if the latest rate falls below this fraction of the 6h average. |
+| `anomaly.creditsFlatWindowHours` | `2` | Earnings also stalled if credits show no net increase across this window. |
+| `anomaly.consecutiveFailureLimit` | `3` | Consecutive failures on one ship that raise an anomaly. |
+| `anomaly.errorRateThreshold` | `0.1` | Error fraction of recent mining events that flags the fleet as failing. |
+| `anomaly.errorRateWindowMinutes` | `5` | Window that fraction is computed over. |
+| `anomaly.marketStalenessMinutes` | `30` | Minutes before an in-use market's prices are flagged stale. |
+| `anomaly.dedupeCooldownMinutes` | `15` | How long a fired anomaly stays suppressed. |
 
-Each anomaly is **persisted before** its webhook delivery is attempted —
-`POST`ed as `{ id, type, dedupeKey, detectedAt, detail }` with up to 3 retries
-and exponential backoff (`WebhookDelivery`). Repeat firings of the same
-underlying condition (by `dedupeKey`) are suppressed for
-`anomaly.dedupeCooldownMinutes` rather than paging the webhook every tick a
-problem stays open. `GET /api/automation/v1/anomalies/digest?windowMinutes=&anomalyLimit=&eventLimit=`
-returns anomalies plus notable lifecycle/failure events (not every routine
-mining tick) for a requested window — the source for an hourly pull review.
+**Scouting is priced, not switched.** `scout.creditsPerRefresh` is both the
+value of a refresh and scouting's only weight — a separate weight would just
+multiply against it, which is one knob pretending to be two. It can't be
+measured the way mining revenue can: the cost of stale prices is the bad trades
+you never see. So it's an honest policy judgment, defaulting to roughly a tenth
+of a typical cycle's revenue.
 
-## External events (meta#19)
+**Redeploys**: bounds, defaults and classes come from
+[`KNOB_DEFINITIONS`](src/knobs.ts) and are re-synced on every boot; an
+operator's tuned *value* survives. A knob removed from the definitions is
+deleted, so no orphan lever outlives the code that read it. A tuned value that
+no longer fits tightened bounds is clamped, never left in a state the write path
+would reject.
 
-`POST /api/automation/v1/events { type, detail }` lets an external supervisor
-([ai-service](https://github.com/V-M-Pioneer-Trading/ai-service)) append its
-own audit-trail entries — `type` must start with `ai_` (`400` otherwise), so
-an unauthenticated external caller can log its own decisions but can never
-spoof a lifecycle/planner event type (`armed`, `knob_changed`, etc.) the rest
-of this service treats as authoritative. `ai_intervention` and
-`ai_no_action` are both included in `NOTABLE_EVENT_TYPES`, so they show up in
-`GET /api/automation/v1/anomalies/digest` alongside everything else notable — both for an
-operator's hourly review and so ai-service's own next run sees its prior
-actions in the digest it reads for context.
+---
 
-**v1 simplifications**:
+## The work loops
 
-- `consecutive_failures` and `credits_flat` are **not** gated on the autopilot
-  being currently armed/live, unlike `ship_idle` — a ship that failed
-  repeatedly before an operator paused to investigate, or a credits trend from
-  before a disarm, is still worth surfacing. This is deliberate, not an
-  oversight.
-- Within one tick, multiple newly-detected anomalies are persisted and
-  delivered **sequentially**, not in parallel — if several checks trip at once
-  against a slow/down webhook, later anomalies in that tick wait out the
-  earlier ones' full retry/backoff budget before being persisted. Acceptable
-  for the expected cadence (rarely more than one distinct condition trips in
-  the same tick); revisit if that assumption stops holding.
-- `market_stale`'s "in active use" window is a fixed 24h lookback, not itself
-  a knob.
-- The credits-flat check's only data source is a snapshot of agent credits
-  logged each tick while armed and live — an anomaly-only deployment with no
-  `MINING_SHIP_SYMBOL` configured never gets these snapshots, so
-  `credits_flat` (and `ship_idle`/`consecutive_failures`, which need a ship
-  task) stay permanently inert in that configuration.
+Each ship runs one task at a time as a resumable state machine. Per-ship
+progress persists to Postgres after every phase change, so a restart plus
+re-arm resumes from the last completed phase.
+
+Every tick performs **at most one atomic action** — dispatch one command,
+resolve one elapsed wait, or get one planner assignment. Never two. That
+granularity is a safety property, not an optimisation: it's what lets *pause*
+take effect cleanly between actions instead of killing something mid-flight.
+
+### Mining
+
+```
+TRAVEL_TO_ASTEROID → SURVEY → EXTRACT → TRAVEL_TO_MARKET → SELL → (refuel) → done
+```
+
+The sell leg queries every in-system marketplace and picks the best price for
+what's in the hold. A survey can yield several goods before cargo fills, so
+`SELL` sells whatever the current market buys and then re-shops for a market
+that takes the rest, repeating until the hold is empty. Each extra stop costs a
+real trip.
+
+On completion the ship hands itself back to the planner, and the cycle's
+takings become one `mining_observation` row — which is how the next decision
+gets smarter.
+
+### Contracts
+
+```
+CONTRACT_TRAVEL_TO_MARKET → CONTRACT_PURCHASE → CONTRACT_TRAVEL_TO_DESTINATION
+  → CONTRACT_DELIVER → CONTRACT_FULFILL
+```
+
+Right before every assignment decision, any contract not yet seen is discovered
+and evaluated: cheapest in-system market selling the deliverable, fuel-aware
+route through it to the destination, `profit = payment − procurement − travel`.
+Anything clearing `contract.minProfitThreshold` is accepted on the spot.
+
+This runs **inline, not as a background job**. An earlier version used a
+background scheduler and it raced the planner — a freshly discovered,
+higher-scoring contract could lose to mining purely for being mid-evaluation.
+A discovery failure is logged and ignored rather than blocking mining;
+contracts are additive, never a dependency.
+
+### Scouting
+
+```
+SCOUT_TRAVEL → SCOUT_REFRESH
+```
+
+Market prices age, and a planner deciding on stale prices decides blind.
+Scouting scores "go refresh that market" against real work. A market's value
+grows linearly with staleness and drops to zero the moment it's refreshed, so
+the planner rotates through markets on its own — no cooldown or round-robin
+needed. A market never seen is treated as ten thresholds stale: high priority,
+but finite.
+
+### When a target keeps failing
+
+After `mine.failureRetryLimit` consecutive failures the ship is reset for a
+fresh assignment — **unless it's holding cargo it hasn't disposed of**, in which
+case it keeps retrying rather than stranding it. An abandoned contract is
+released back to the pool rather than left claimed by a ship that gave up.
+
+---
+
+## Replan
+
+Assignment normally happens ship-by-ship as ships free up. A **replan**
+re-scores every *idle* ship when something changes that could change the answer:
+any knob write, any new anomaly, a manual request, or a periodic fallback
+(`REPLAN_INTERVAL_MS`, default 5 minutes).
+
+All triggers share one debounce clock, so a storm of knob changes coalesces into
+a single replan.
+
+**Running work is never preempted.** A replan only touches ships with no
+assigned target. Tasks are kept short and bounded — one mining round trip, one
+delivery leg — so a stale assignment costs minutes at most. Abort is the only
+interrupt.
+
+---
+
+## Shadow mode
+
+Arming with `mode: "shadow"` runs the full scoring cycle on the live schedule
+and logs every would-be decision as `planner_shadow_assignment` — but never
+writes task state and never dispatches a ship action. Nothing is ever assigned,
+so the same cycle recomputes every tick: a continuous preview of what live mode
+would do.
+
+Switching between shadow and live always requires an explicit re-arm, so nobody
+drifts from dry run into live dispatch by accident.
+
+---
+
+## Watching for trouble
+
+Five checks run on a fixed interval, independent of whether the autopilot is
+armed — a broken ship stays worth reporting while an operator investigates.
+
+| Check | Fires when |
+|---|---|
+| `ship_idle` | A ship's task hasn't changed phase in N minutes (while armed and live) |
+| `earnings_stalled` | The money stopped: the hourly rate collapsed against its own history, **or** credits show no net increase across a window |
+| `consecutive_failures` | One ship accumulates N consecutive failures |
+| `error_rate` | The error fraction of recent mining events exceeds a threshold |
+| `market_stale` | A market in active use hasn't been repriced in N minutes |
+
+`earnings_stalled` covers what used to be two separate checks (`profit_drop`
+and `credits_flat`). They're two ways of measuring one thing — a fleet that
+stops earning trips both — so paging twice made the digest look busier than the
+fleet was. Both conditions stay separately tunable and are reported in
+`detail.reasons`.
+
+Each anomaly is **persisted before** delivery is attempted, then POSTed to
+`ANOMALY_WEBHOOK_URL` with up to three retries and exponential backoff. Repeat
+firings of the same condition are suppressed for `anomaly.dedupeCooldownMinutes`
+rather than paging every tick a problem stays open.
+
+---
+
+## Replaying decisions
+
+Every planner decision logs the inputs it used — each candidate's distance, the
+calibrated model, every knob value. Since scoring is pure arithmetic over
+exactly those inputs, past decisions can be re-scored under different knobs
+without touching the game:
+
+```bash
+npm run replay -- --set mine.taskWeight=2
+```
+
+```bash
+npm run replay -- --since 6h --set credit.reserveFloor=50000 --verbose
+```
+
+It reports how many past decisions would have gone differently. **Zero flips
+means the change does nothing** — worth knowing before you attribute a later
+swing in profit to it.
+
+Flags: `--set name=value` (repeatable, validated against the knob's real
+bounds), `--since 90m|2h|7d` (default 24h), `--limit` (default 200),
+`--verbose` to show every candidate's score rather than only the flips.
+
+It replays the **choice between asteroid fields**, which is where the
+field-vs-field trade-off lives. It doesn't re-derive whether a contract or scout
+would have beaten mining outright — those scores were frozen from market state
+at the time and can't be honestly recomputed from the log.
+
+---
+
+## API
+
+All routes are under `/api/automation/v1`. `/health` is unversioned.
+
+**Autopilot**
+
+| | |
+|---|---|
+| `POST /autopilot/arm` | `{ token, mode? }` — `mode` is `"live"` (default) or `"shadow"`. Holds the token **in memory only**; a restart always disarms. Valid from any status. |
+| `POST /autopilot/pause` | Lets an already-dispatched wait finish and be recorded, then stops dispatching. Armed only. |
+| `POST /autopilot/abort` | Clears the token and stops immediately. An action already in flight can't be un-sent, so its result is discarded and marked, not silently applied. |
+| `GET /autopilot/status` | Current status and mode (`mode` is `null` whenever no token is held). |
+| `GET /autopilot/ships/:shipSymbol` | One ship's phase, wait state, and cycle progress. |
+| `GET /autopilot/events?limit=` | The event log, newest first. |
+
+**Planner**
+
+| | |
+|---|---|
+| `GET /planner/knobs?class=` | Every knob, or one class. |
+| `PUT /planner/knobs/:name` | `{ value }`. `404` unknown, `400` out of bounds. Logs `knob_changed` and triggers a replan. |
+| `GET /planner/model` | What the planner currently believes, and whether each belief is measured or assumed. |
+| `POST /planner/replan` | Requests a replan, subject to the debounce. |
+
+**Observability**
+
+| | |
+|---|---|
+| `GET /metrics/context?rollupLimit=&eventLimit=` | Rollups plus recent events in one bounded response, shaped to fit an AI context window. |
+| `GET /anomalies/digest?windowMinutes=&anomalyLimit=&eventLimit=` | Anomalies plus notable events for a window. |
+| `POST /events` | `{ type, detail }` for an external supervisor. `type` must start with `ai_`, so an external caller can log its own decisions but can never spoof a lifecycle or planner event. |
+
+Invalid lifecycle transitions return `409` naming the current status.
+
+### Metrics rollups
+
+A background scheduler persists one rollup per tick, each covering the window
+since the last one ended — credits/hour (sell revenue, not netted against
+costs), units extracted, and error rate. On restart it resumes from the last
+persisted `window_end`, so there's no gap and no double count.
+
+---
 
 ## Configuration
 
 | Env var | Meaning |
 |---|---|
 | `PORT` | Listen port (default `3003`) |
-| `DATABASE_URL` | Postgres connection string (required) |
-| `NAVIGATION_SERVICE_URL` | e.g. `http://navigation-service:8080/api/v1` (required) |
-| `AGENT_SERVICE_URL` | e.g. `http://agent-service:80/api/agent` (required) |
-| `FLEET_SERVICE_URL` | e.g. `http://fleet-service:3001/api/fleet` (required) |
-| `MINING_SHIP_SYMBOL` | Ship symbol to fly (required) |
+| `DATABASE_URL` | Postgres connection string (**required**) |
+| `NAVIGATION_SERVICE_URL` | e.g. `http://navigation-service:8080/api/v1` (**required**) |
+| `AGENT_SERVICE_URL` | e.g. `http://agent-service:80/api/agent` (**required**) |
+| `FLEET_SERVICE_URL` | e.g. `http://fleet-service:3001/api/fleet` (**required**) |
+| `MINING_SHIP_SYMBOL` | Ship to fly (**required**) |
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
-| `REPLAN_INTERVAL_MS` | Periodic fleet-replan fallback cadence (default `300000`) |
-| `ANOMALY_WEBHOOK_URL` | Webhook URL for anomaly delivery — anomaly detection is disabled entirely if unset |
+| `REPLAN_INTERVAL_MS` | Periodic replan fallback (default `300000`) |
+| `ANOMALY_WEBHOOK_URL` | Anomaly delivery target — anomaly detection is disabled entirely if unset |
 | `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
-| `METRICS_ROLLUP_INTERVAL_MS` | Metrics rollup cadence (default `60000`) |
-| `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`, matching command-interface's dev port) — same convention as agent-service/fleet-service |
+| `METRICS_ROLLUP_INTERVAL_MS` | Rollup cadence (default `60000`) |
+| `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |
 
-The asteroid field is no longer configured — the planner (below) chooses it
-dynamically. Tune its scoring via the knobs API instead of env vars.
+Which asteroid field to mine is **not** configured — the planner chooses it.
+Tune scoring through knobs, not env vars.
 
-## Develop
+---
 
-Tests run against a real Postgres — no mocked DB layer, per the project's
-testing decisions (drive the REST boundary, one seam) — with in-process stub
-HTTP servers standing in for navigation/agent/fleet-service and an injectable
-clock so multi-minute transits and cooldowns resolve instantly.
+## Developing
+
+Tests drive the real HTTP API against a real Postgres, with stub HTTP servers
+standing in for the three upstream services and an injectable clock so
+multi-minute transits resolve instantly. No mocked database layer.
 
 ```bash
 docker run --rm -d --name automation-service-test-db -p 5433:5432 \
   -e POSTGRES_PASSWORD=test -e POSTGRES_DB=automation_test postgres:16-alpine
-
-npm install
-npm test        # jest + supertest against the REST boundary + real Postgres
-npm run dev      # build + start (needs DATABASE_URL + the service URLs above)
 ```
 
-Test files share one Postgres database, so `jest.config.js` pins
-`maxWorkers: 1` — running files in parallel races one file's `TRUNCATE`
-against another's inserts.
+```bash
+npm install && npm test
+```
+
+```bash
+npm run dev
+```
+
+Test files share one database, so `jest.config.js` pins `maxWorkers: 1` —
+parallel files race each other's `TRUNCATE`. Every file resets through
+[`resetDatabase`](src/testSupport/resetDatabase.ts); a new table needs adding
+there once, not in eight `beforeEach` blocks. Files not testing scouting leave
+it disabled, so a third bidder doesn't quietly change what they're asserting.
+
+[`src/scoring.ts`](src/scoring.ts) has no I/O and is tested directly — start
+there if you want to understand or change what the autopilot optimises for.
+
+---
+
+## Known limitations
+
+Everything the implementation deliberately doesn't do yet, in one place.
+
+**Scope**
+
+- **Single ship.** The planner, replan, and `listIdle()` are all written per-ship
+  and scale to N ships without further changes, but dispatch is still keyed to
+  one configured `MINING_SHIP_SYMBOL`. Nothing demonstrates fleet-wide fan-out.
+- **One system.** Every candidate must be in the ship's current system.
+- **Contracts evaluate only their first deliverable.** Multi-good contracts
+  aren't supported.
+- **Contract purchase quantity** assumes the whole hold belongs to the
+  contract's good. True for a ship that arrives empty (mining always sells out
+  first), wrong if a ship ever carried something unrelated into a contract task.
+
+**Model**
+
+- **Fuel cost is usually a prior.** It's only measured when a refuel response
+  reports a transaction price; otherwise `fuel.creditsPerUnitDistancePrior`
+  stands. It affects the reserve-floor safety margin, not scoring order.
+- **A fuel observation assumes the cycle started on a full tank**, since it
+  divides the refuel price by the distance flown that cycle. True from the
+  second cycle onward (every cycle ends by refuelling), but a ship's first
+  cycle after arming can start part-full and will overstate the cost per unit
+  distance. The error is conservative — it widens the cash safety margin — and
+  decays out as later cycles are observed.
+- **Routing is really a reachability check.** Every waypoint is directly
+  reachable from every other and legs cost Euclidean distance, so the direct hop
+  is always shortest — the search only does interesting work when the direct hop
+  is out of fuel range.
+- **Fuel stations are inferred** from the `MARKETPLACE` trait, without
+  confirming the market actually stocks fuel.
+- **The mining sell leg has no route-cost awareness.** "Best market" means best
+  price in the same system, not best price net of getting there.
+- **A field's revenue is measured, not predicted.** The model learns what a
+  field *has* paid; it doesn't model deposit types, market depth, or the price
+  impact of selling into the same market repeatedly.
+
+**Operations**
+
+- **Metrics rollups assume a single instance.** There's no distributed lock, so
+  two live replicas would each bootstrap from the same `window_end` and
+  double-count.
+- **No retention policy.** `metrics_rollup`, `event_log`, and the two
+  observation tables grow indefinitely. Observations are bounded at read time
+  (recent rows only), so this is a disk concern, not a correctness one.
+- **Anomalies deliver sequentially** within a tick, so several tripping at once
+  against a slow webhook queue behind each other's retry budget.
+- **`market_stale`'s "in active use" window** is a fixed 24h lookback, not a knob.
+- **The credits-flat half of `earnings_stalled`** reads credit snapshots that
+  are only logged while armed and live, so an anomaly-only deployment with no
+  `MINING_SHIP_SYMBOL` never gets them.
+- **Arm/pause/abort mutate in-memory status before persisting the event**, so a
+  failed event write can briefly leave status and audit trail diverged.
+- **The token lives in memory only** and is never persisted, so a restart always
+  disarms. A dedicated auth-service is a known future step.
+
+See [CHANGELOG.md](CHANGELOG.md) for how this service got here, and which
+`meta` issue introduced each piece.

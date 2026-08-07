@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { createApp } from "../server";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
+import { resetDatabase } from "../testSupport/resetDatabase";
 
 class FakeClock implements Clock {
   constructor(private current: Date) {}
@@ -55,7 +56,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE event_log, ship_task, metrics_rollup, anomaly RESTART IDENTITY");
+    await resetDatabase(pool);
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
     webhookStatus = 200;
     credits = 100_000;
@@ -157,7 +158,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     await expectNoAnomaly(gateway, "ship_idle");
   }, 10_000);
 
-  it("fires profit_drop when the latest rollup is well below the trailing 6h average", async () => {
+  it("fires earnings_stalled (reason: profit_drop) when the latest rollup is well below the trailing 6h average", async () => {
     // Seed 6 hourly rollups averaging 1000 credits/hour, then one much lower.
     for (let i = 6; i >= 1; i--) {
       const windowEnd = new Date(clock.now().getTime() - i * 60 * 60 * 1000);
@@ -175,12 +176,13 @@ describe("automation-service anomaly detection (meta#15)", () => {
     );
 
     const gateway = app();
-    const anomaly = await waitForAnomaly(gateway, "profit_drop");
+    const anomaly = await waitForAnomaly(gateway, "earnings_stalled");
+    expect(anomaly.detail.reasons).toContain("profit_drop");
     expect(anomaly.detail.latestCreditsPerHour).toBe(100);
     expect(anomaly.detail.avg6hCreditsPerHour).toBeCloseTo(1000, 5);
   }, 10_000);
 
-  it("does not fire profit_drop when the latest rollup is healthy", async () => {
+  it("does not fire earnings_stalled on a profit drop when the latest rollup is healthy", async () => {
     for (let i = 6; i >= 0; i--) {
       const windowEnd = new Date(clock.now().getTime() - i * 60 * 60 * 1000);
       const windowStart = new Date(windowEnd.getTime() - 60 * 60 * 1000);
@@ -191,7 +193,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
       );
     }
     const gateway = app();
-    await expectNoAnomaly(gateway, "profit_drop");
+    await expectNoAnomaly(gateway, "earnings_stalled");
   }, 10_000);
 
   it("fires consecutive_failures once a ship's failure_count reaches the knob limit", async () => {
@@ -245,7 +247,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     await expectNoAnomaly(gateway, "error_rate");
   }, 10_000);
 
-  it("fires credits_flat when agent credits show no net increase across the window", async () => {
+  it("fires earnings_stalled (reason: credits_flat) when agent credits show no net increase across the window", async () => {
     const gateway = app({ withMining: true });
     await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
@@ -258,11 +260,12 @@ describe("automation-service anomaly detection (meta#15)", () => {
     clock.advance(2 * 60 * 60 * 1000 + 60_000); // just past the 2h default window
     credits = 90_000; // credits dropped, not increased
     await gateway.locals.forceAnomalyTick(); // snapshot + check in one deterministic tick
-    const anomaly = await waitForAnomaly(gateway, "credits_flat");
+    const anomaly = await waitForAnomaly(gateway, "earnings_stalled");
+    expect(anomaly.detail.reasons).toContain("credits_flat");
     expect(anomaly.detail.netChange).toBeLessThanOrEqual(0);
   }, 10_000);
 
-  it("does not fire credits_flat when credits have grown", async () => {
+  it("does not fire earnings_stalled on flat credits when credits have grown", async () => {
     const gateway = app({ withMining: true });
     await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
 
@@ -270,7 +273,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     clock.advance(2 * 60 * 60 * 1000 + 60_000);
     credits = 150_000; // grew
     await gateway.locals.forceAnomalyTick(); // snapshot + check in one deterministic tick
-    await expectNoAnomaly(gateway, "credits_flat", 0); // state is already settled, no wait needed
+    await expectNoAnomaly(gateway, "earnings_stalled", 0); // state is already settled, no wait needed
   }, 10_000);
 
   it("fires market_stale for a market not repriced within the staleness window, while active markets stay quiet", async () => {

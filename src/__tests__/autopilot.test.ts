@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { createApp } from "../server";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
+import { resetDatabase } from "../testSupport/resetDatabase";
 
 class FakeClock implements Clock {
   constructor(private current: Date) {}
@@ -27,7 +28,7 @@ describe("automation-service autopilot lifecycle", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE event_log RESTART IDENTITY");
+    await resetDatabase(pool);
   });
 
   const app = (clock?: Clock) => createApp(pool, clock);

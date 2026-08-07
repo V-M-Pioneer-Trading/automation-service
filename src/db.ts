@@ -26,6 +26,36 @@ export async function withTransaction<T>(pool: Pool, fn: (client: PoolClient) =>
   }
 }
 
+/**
+ * Brings the `knob` table in line with KNOB_DEFINITIONS.
+ *
+ * An operator's *tuned value* always survives a redeploy — that's the whole
+ * point of storing it — but everything else about a knob (its class, bounds,
+ * default) is code, and code wins. A knob dropped from the definitions is
+ * deleted rather than left behind: an orphan row would still appear in the API
+ * and in the AI supervisor's tool list, offering a lever wired to nothing.
+ *
+ * A tuned value that no longer fits newly-tightened bounds is clamped, not
+ * discarded, so a redeploy can never leave a value the write path itself would
+ * reject.
+ */
+export async function syncKnobDefinitions(pool: Pool): Promise<void> {
+  for (const def of KNOB_DEFINITIONS) {
+    await pool.query(
+      `INSERT INTO knob (name, knob_class, value, default_value, min_value, max_value)
+       VALUES ($1, $2, $3, $3, $4, $5)
+       ON CONFLICT (name) DO UPDATE SET
+         knob_class = EXCLUDED.knob_class,
+         default_value = EXCLUDED.default_value,
+         min_value = EXCLUDED.min_value,
+         max_value = EXCLUDED.max_value,
+         value = LEAST(GREATEST(knob.value, EXCLUDED.min_value), EXCLUDED.max_value)`,
+      [def.name, def.class, def.default, def.min, def.max]
+    );
+  }
+  await pool.query(`DELETE FROM knob WHERE name <> ALL($1::text[])`, [KNOB_DEFINITIONS.map((d) => d.name)]);
+}
+
 /** Idempotent so it can run on every boot; no separate migration runner for one table yet. */
 export async function migrate(pool: Pool): Promise<void> {
   await pool.query(`
@@ -77,9 +107,19 @@ export async function migrate(pool: Pool): Promise<void> {
   await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS destination_waypoint TEXT`);
   await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS units_delivered INTEGER NOT NULL DEFAULT 0`);
 
-  // Planner knobs (meta#10): value + default + min/max, schema-validated on write.
-  // Seeded from KNOB_DEFINITIONS below; existing rows are left alone so an operator's
-  // tuning survives a redeploy.
+  // Per-cycle accumulators. A mining cycle's revenue and duration can only be
+  // known once the cycle ends, and a cycle spans many ticks and a restart — so
+  // they're tallied on the task row as the cycle runs, then written to
+  // mining_observation and reset when the ship hands itself back to the planner.
+  await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS cycle_started_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS cycle_revenue DOUBLE PRECISION NOT NULL DEFAULT 0`);
+  await pool.query(
+    `ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS cycle_travel_distance DOUBLE PRECISION NOT NULL DEFAULT 0`
+  );
+  await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS cycle_units_extracted DOUBLE PRECISION NOT NULL DEFAULT 0`);
+
+  // Knobs: value + class + default + min/max, schema-validated on write.
+  // Synced from KNOB_DEFINITIONS below on every boot.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS knob (
       name TEXT PRIMARY KEY,
@@ -89,14 +129,11 @@ export async function migrate(pool: Pool): Promise<void> {
       max_value DOUBLE PRECISION NOT NULL
     )
   `);
-  for (const def of KNOB_DEFINITIONS) {
-    await pool.query(
-      `INSERT INTO knob (name, value, default_value, min_value, max_value)
-       VALUES ($1, $2, $2, $3, $4)
-       ON CONFLICT (name) DO NOTHING`,
-      [def.name, def.default, def.min, def.max]
-    );
-  }
+  // 'policy' is the safe default for a pre-existing row: it's the class the AI
+  // may write, so a knob that somehow misses the sync below stays functional
+  // rather than silently disappearing from the supervisor's tool list.
+  await pool.query(`ALTER TABLE knob ADD COLUMN IF NOT EXISTS knob_class TEXT NOT NULL DEFAULT 'policy'`);
+  await syncKnobDefinitions(pool);
 
   // Metrics rollups (meta#14): each row summarizes activity over one
   // [window_start, window_end) slice of event_log, computed and persisted on
@@ -138,15 +175,59 @@ export async function migrate(pool: Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS anomaly_detected_at_idx ON anomaly (detected_at DESC)
   `);
 
-  // Market scouting (meta#12): one row per marketplace, tracking the last time
-  // this automation-service called getMarket while a ship was docked there.
+  // Market scouting: one row per marketplace, tracking the last time this
+  // automation-service called getMarket while a ship was docked there.
   // Freshness decays over time; the planner scores scouting tasks higher as
-  // staleness grows to ensure price data stays current (see README).
+  // staleness grows to keep price data current (see README).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS market_intel (
       waypoint TEXT PRIMARY KEY,
       last_refreshed_at TIMESTAMPTZ NOT NULL
     )
+  `);
+
+  // What the fleet has learned by flying. These two tables are what let the
+  // planner score on measured values instead of hand-typed constants — see
+  // observations.ts. One row per completed mining cycle, one per real flight.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mining_observation (
+      id BIGSERIAL PRIMARY KEY,
+      ship_symbol TEXT NOT NULL,
+      asteroid_waypoint TEXT NOT NULL,
+      observed_at TIMESTAMPTZ NOT NULL,
+      revenue DOUBLE PRECISION NOT NULL,
+      cycle_hours DOUBLE PRECISION NOT NULL,
+      travel_distance DOUBLE PRECISION NOT NULL DEFAULT 0,
+      units_extracted DOUBLE PRECISION NOT NULL DEFAULT 0
+    )
+  `);
+  // Calibration always reads "recent observations, newest first" — for one
+  // waypoint when scoring a known field, across all of them for the fleet-wide
+  // fallback. Both are served by this index.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS mining_observation_waypoint_observed_at_idx
+      ON mining_observation (asteroid_waypoint, observed_at DESC)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS mining_observation_observed_at_idx ON mining_observation (observed_at DESC)
+  `);
+
+  // Two things are learned from moving a ship, and both are recorded here:
+  // how long a flight of known distance took (hours), and what refuelling after
+  // a known distance cost (fuel_credits). A row carries whichever it observed —
+  // a flight has no price attached, a refuel has no duration — so both columns
+  // are nullable and each calibration reads only the rows that inform it.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS travel_observation (
+      id BIGSERIAL PRIMARY KEY,
+      observed_at TIMESTAMPTZ NOT NULL,
+      distance DOUBLE PRECISION NOT NULL,
+      hours DOUBLE PRECISION,
+      fuel_credits DOUBLE PRECISION
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS travel_observation_observed_at_idx ON travel_observation (observed_at DESC)
   `);
 
   // Contract loop (meta#11): one row per contract this agent has ever seen,

@@ -1,8 +1,27 @@
-import { Contract, GameClients, ShipSnapshot } from "./gameClients";
+import { Contract, GameClients, ShipSnapshot, WaypointSummary } from "./gameClients";
 import { KnobRepo } from "./knobs";
 import { ContractRecord } from "./contractRepo";
 import { MarketIntel } from "./marketIntelRepo";
+import { CalibratedModel, ObservationRepo } from "./observations";
 import { fuelAwareRoute, RouteWaypoint } from "./routeCost";
+import { breachesReserveFloor, cycleHours, contractScore, miningScore, scoutScore } from "./scoring";
+
+/**
+ * Decides what a ship should do next.
+ *
+ * Three kinds of work compete — mine a field, run a contract, refresh a
+ * market's prices — and they are compared in one currency: expected credits per
+ * hour. Highest wins. The arithmetic lives in scoring.ts; this file's job is to
+ * gather the inputs, apply the safety rules, and record why it chose what it
+ * chose.
+ *
+ * The inputs that matter are **measured, not assumed**. What a mining cycle at
+ * a given field is worth comes from cycles actually completed there
+ * (observations.ts); ship speed comes from flights actually timed. That is what
+ * makes one asteroid field score differently from another. Before those
+ * measurements exist the model falls back to the `*Prior` knobs, and the
+ * planner degrades gracefully to preferring whatever is closest.
+ */
 
 export interface PlannerCandidate {
   waypoint: string;
@@ -10,6 +29,9 @@ export interface PlannerCandidate {
   distance?: number;
   cycleHours?: number;
   estimatedFuelCost?: number;
+  /** What one cycle here is expected to earn, and whether that's measured or assumed. */
+  creditsPerCycle?: number;
+  creditsPerCycleSource?: "measured-here" | "fleet-average" | "prior";
   score?: number;
   breachesReserveFloor?: boolean;
 }
@@ -33,11 +55,7 @@ export interface ContractEvaluation {
   detail: Record<string, unknown>;
 }
 
-/**
- * The winning target for a ship that needs one — either a mining field or an
- * accepted-but-unassigned contract, whichever scores higher in the same
- * credits-per-hour units (meta#11).
- */
+/** The winning target for a ship that needs one. */
 export type TargetAssignment =
   | { kind: "mine"; asteroidWaypoint: string; detail: Record<string, unknown> }
   | {
@@ -52,74 +70,132 @@ export type TargetAssignment =
   | { kind: "scout"; scoutWaypoint: string; detail: Record<string, unknown> }
   | { kind: "none"; detail: Record<string, unknown> };
 
-/**
- * Scores every asteroid field in the ship's system by expected credits/hour —
- * fuel-aware route cost to and from it, weighted per knob-configured task
- * weight — and picks the highest-scoring one that doesn't breach the credit
- * reserve floor. v1 simplification: revenue is a flat knob-configured estimate
- * per cycle (`mine.expectedCreditsPerCycle`), not yet derived from real
- * per-good yield and market price data — see automation-service/README.md.
- */
+/** Everything the planner needs to score, fetched once per decision. */
+interface DecisionContext {
+  waypoints: WaypointSummary[];
+  routeWaypoints: RouteWaypoint[];
+  credits: number;
+  knobs: Record<string, number>;
+  model: CalibratedModel;
+}
+
+const toRouteWaypoints = (waypoints: WaypointSummary[]): RouteWaypoint[] =>
+  waypoints.map((w) => ({
+    symbol: w.symbol,
+    x: w.x,
+    y: w.y,
+    hasFuelStation: w.traits.some((t) => t.symbol === "MARKETPLACE"),
+  }));
+
+const isMarketplace = (w: WaypointSummary): boolean => w.traits.some((t) => t.symbol === "MARKETPLACE");
+
 export class Planner {
-  constructor(private clients: GameClients, private knobs: KnobRepo) {}
+  constructor(private clients: GameClients, private knobs: KnobRepo, private observations: ObservationRepo) {}
 
-  async assignMiningTarget(params: {
-    ship: ShipSnapshot;
-    systemSymbol: string;
-    authHeader: string;
-  }): Promise<PlannerAssignment> {
-    const { ship, systemSymbol, authHeader } = params;
-
-    const [rawWaypoints, agent, knobValues] = await Promise.all([
+  /**
+   * One fetch of everything a decision depends on. Gathered here rather than
+   * inside each scoring path so a single assignment costs one waypoint lookup
+   * and one calibration, and so every task kind is scored against exactly the
+   * same snapshot of the world.
+   */
+  private async loadContext(systemSymbol: string, authHeader: string): Promise<DecisionContext> {
+    const [waypoints, agent, knobs] = await Promise.all([
       this.clients.getSystemWaypoints(systemSymbol, authHeader),
       this.clients.getAgent(authHeader),
-      this.knobs.getAll(),
+      this.knobs.getValues(),
     ]);
-    const knob = (name: string): number => {
-      const found = knobValues.find((k) => k.name === name);
-      if (found === undefined) throw new Error(`planner requires knob "${name}" to exist`);
-      return found.value;
+
+    const requireKnob = (name: string): number => {
+      const value = knobs[name];
+      if (value === undefined) throw new Error(`planner requires knob "${name}" to exist`);
+      return value;
     };
 
-    const routeWaypoints: RouteWaypoint[] = rawWaypoints.map((w) => ({
-      symbol: w.symbol,
-      x: w.x,
-      y: w.y,
-      hasFuelStation: w.traits.some((t) => t.symbol === "MARKETPLACE"),
-    }));
-    const asteroids = rawWaypoints.filter((w) => w.type === "ASTEROID_FIELD");
+    const model = await this.observations.calibrate({
+      creditsPerCyclePrior: requireKnob("mine.creditsPerCyclePrior"),
+      speedUnitsPerHourPrior: requireKnob("travel.speedUnitsPerHourPrior"),
+      overheadHoursPrior: requireKnob("cycle.overheadHoursPrior"),
+      fuelCreditsPerUnitDistancePrior: requireKnob("fuel.creditsPerUnitDistancePrior"),
+      halfLifeHours: requireKnob("observation.halfLifeHours"),
+    });
 
-    const taskWeight = knob("mine.taskWeight");
-    const expectedCreditsPerCycle = knob("mine.expectedCreditsPerCycle");
-    const speed = knob("travel.speedUnitsPerHour");
-    const fixedOverheadHours = knob("cycle.fixedOverheadHours");
-    const fuelCreditsPerUnitDistance = knob("fuel.creditsPerUnitDistance");
-    const reserveFloor = knob("credit.reserveFloor");
+    return {
+      waypoints,
+      routeWaypoints: toRouteWaypoints(waypoints),
+      credits: agent.credits,
+      knobs,
+      model,
+    };
+  }
+
+  /**
+   * Scores every asteroid field in the ship's system and picks the best one.
+   *
+   * A field's revenue estimate comes from cycles completed at that field where
+   * there are any, the fleet-wide average where there aren't, and the cold-start
+   * prior only when nothing has been mined at all — so a rich field beats a
+   * closer poor one once the fleet has flown enough to know the difference.
+   *
+   * Takes an already-loaded context rather than fetching its own: mining is
+   * always scored as one arm of `assignTarget`'s comparison, and every arm has
+   * to be scored against the same snapshot of the world for the comparison to
+   * mean anything.
+   */
+  private scoreMining(ship: ShipSnapshot, systemSymbol: string, context: DecisionContext): PlannerAssignment {
+    const { model, knobs, routeWaypoints, credits } = context;
+    const asteroids = context.waypoints.filter((w) => w.type === "ASTEROID_FIELD");
+
+    const taskWeight = knobs["mine.taskWeight"];
+    const reserveFloor = knobs["credit.reserveFloor"];
 
     const candidates: PlannerCandidate[] = asteroids.map((asteroid) => {
-      // fuel.current, not fuel.capacity: a fresh task can be assigned to a ship
-      // that isn't at full tank, and only the fuel actually on board bounds what
-      // the first leg can reach. (After every cycle the ship is at full tank —
-      // dispatchSell always refuels before mining_cycle_complete fires — so this
-      // only matters for the very first assignment of a ship's lifetime.)
-      const route = fuelAwareRoute(routeWaypoints, ship.nav.waypointSymbol, asteroid.symbol, ship.fuel.current);
+      // fuel.current bounds the first leg: a fresh assignment can land on a ship
+      // that isn't at full tank. fuel.capacity bounds every leg after a
+      // refuelling stop. (After a completed cycle the ship is always full —
+      // dispatchSell refuels before handing back to the planner — so the
+      // distinction only bites on a ship's very first assignment.)
+      const route = fuelAwareRoute(
+        routeWaypoints,
+        ship.nav.waypointSymbol,
+        asteroid.symbol,
+        ship.fuel.current,
+        ship.fuel.capacity
+      );
       if (route === null) return { waypoint: asteroid.symbol, reachable: false };
 
+      const measuredHere = model.creditsPerCycleByWaypoint[asteroid.symbol];
+      const creditsPerCycle = measuredHere ?? model.fleetCreditsPerCycle;
+      const creditsPerCycleSource: PlannerCandidate["creditsPerCycleSource"] =
+        measuredHere !== undefined
+          ? "measured-here"
+          : model.provenance.creditsPerCycle === "measured"
+            ? "fleet-average"
+            : "prior";
+
       const roundTripDistance = route.distance * 2;
-      const cycleHours = roundTripDistance / speed + fixedOverheadHours;
-      const estimatedFuelCost = roundTripDistance * fuelCreditsPerUnitDistance;
-      const revenue = expectedCreditsPerCycle * taskWeight;
-      const score = cycleHours > 0 ? revenue / cycleHours : 0;
-      const breachesReserveFloor = agent.credits - estimatedFuelCost < reserveFloor;
+      const { cycleHours: hours, score } = miningScore({
+        roundTripDistance,
+        creditsPerCycle,
+        taskWeight,
+        speedUnitsPerHour: model.speedUnitsPerHour,
+        overheadHours: model.overheadHours,
+      });
+      const estimatedFuelCost = roundTripDistance * model.fuelCreditsPerUnitDistance;
 
       return {
         waypoint: asteroid.symbol,
         reachable: true,
         distance: route.distance,
-        cycleHours,
+        cycleHours: hours,
         estimatedFuelCost,
+        creditsPerCycle,
+        creditsPerCycleSource,
         score,
-        breachesReserveFloor,
+        breachesReserveFloor: breachesReserveFloor({
+          currentCredits: credits,
+          estimatedCost: estimatedFuelCost,
+          reserveFloor,
+        }),
       };
     });
 
@@ -134,121 +210,132 @@ export class Planner {
     return {
       asteroidWaypoint: chosen?.waypoint ?? null,
       chosenScore: chosen?.score ?? null,
-      currentCredits: agent.credits,
+      currentCredits: credits,
       detail: {
         shipSymbol: ship.symbol,
         systemSymbol,
         shipWaypoint: ship.nav.waypointSymbol,
-        currentCredits: agent.credits,
+        currentCredits: credits,
         candidates,
         chosen: chosen?.waypoint ?? null,
-        knobsUsed: Object.fromEntries(knobValues.map((k) => [k.name, k.value])),
+        knobsUsed: knobs,
+        // The calibrated numbers actually scored with, and where each came
+        // from. Without this a replay can reproduce the arithmetic but not the
+        // beliefs it ran on, which is the half that usually explains a
+        // surprising decision.
+        model: {
+          speedUnitsPerHour: model.speedUnitsPerHour,
+          overheadHours: model.overheadHours,
+          fuelCreditsPerUnitDistance: model.fuelCreditsPerUnitDistance,
+          fleetCreditsPerCycle: model.fleetCreditsPerCycle,
+          provenance: model.provenance,
+        },
       },
     };
   }
 
   /**
-   * The winning target for a ship that needs one (meta#11) — compares the best
-   * mining candidate's score against every accepted-but-unassigned contract's
-   * score (computed once at evaluation time, not recomputed here) in the same
-   * credits-per-hour units, and returns whichever is higher.
+   * The winning target for a ship that needs one — the best mining field, the
+   * best accepted-but-unassigned contract, and the most worthwhile market to
+   * re-price, compared in the same credits-per-hour units.
    */
   async assignTarget(params: {
     ship: ShipSnapshot;
     systemSymbol: string;
     authHeader: string;
     acceptedContracts: ContractRecord[];
-    /** Market intel snapshot from MarketIntelRepo — drives scout staleness scoring (meta#12). */
+    /** Market freshness snapshot — drives scout staleness scoring. */
     marketIntel: MarketIntel[];
-    /** Decision time — needed to compute market staleness (meta#12). */
+    /** Decision time — needed to compute market staleness. */
     now: Date;
   }): Promise<TargetAssignment> {
     const { ship, systemSymbol, authHeader, acceptedContracts, marketIntel, now } = params;
 
-    // v1 simplification: getSystemWaypoints is called twice — once inside
-    // assignMiningTarget and once here for scout scoring. Both calls run in
-    // parallel so there's no latency penalty; the redundant HTTP round-trip is
-    // documented for a future refactor.
-    const [miningResult, rawWaypoints, contractTaskWeight, reserveFloor, scoutTaskWeight, scoutValuePerRefresh, scoutThresholdHours, speed, fixedOverheadHours, fuelCreditsPerUnitDistance] =
-      await Promise.all([
-        this.assignMiningTarget({ ship, systemSymbol, authHeader }),
-        this.clients.getSystemWaypoints(systemSymbol, authHeader),
-        this.knobs.get("contract.taskWeight"),
-        this.knobs.get("credit.reserveFloor"),
-        this.knobs.get("scout.taskWeight"),
-        this.knobs.get("scout.valuePerRefresh"),
-        this.knobs.get("scout.stalenessThresholdHours"),
-        this.knobs.get("travel.speedUnitsPerHour"),
-        this.knobs.get("cycle.fixedOverheadHours"),
-        this.knobs.get("fuel.creditsPerUnitDistance"),
-      ]);
+    const context = await this.loadContext(systemSymbol, authHeader);
+    const { knobs, model, routeWaypoints, credits } = context;
+    const miningResult = this.scoreMining(ship, systemSymbol, context);
 
-    // --- Contract scoring ---
-    // Same reserve-floor protection mining candidates get via breachesReserveFloor:
-    // totalPayment - expectedProfit is procurementCost + travelCost combined (the
-    // ContractRecord doesn't break those out separately), so this is a conservative
-    // upper bound on what accepting would actually spend before payment lands.
+    const reserveFloor = knobs["credit.reserveFloor"];
+
+    // --- Contracts ---
+    // Same reserve-floor protection mining candidates get: totalPayment minus
+    // expectedProfit is procurement plus travel combined (the ContractRecord
+    // doesn't break them out), so it's a conservative upper bound on what
+    // accepting would spend before the payment lands.
     let bestContract: { record: ContractRecord; score: number } | null = null;
     for (const record of acceptedContracts) {
       const estimatedCost = record.totalPayment - record.expectedProfit;
-      if (miningResult.currentCredits - estimatedCost < reserveFloor) continue;
-      const score = record.cycleHours > 0 ? (record.expectedProfit * contractTaskWeight) / record.cycleHours : 0;
+      if (breachesReserveFloor({ currentCredits: credits, estimatedCost, reserveFloor })) continue;
+      const score = contractScore({
+        expectedProfit: record.expectedProfit,
+        cycleHours: record.cycleHours,
+        taskWeight: knobs["contract.taskWeight"],
+      });
       if (bestContract === null || score > bestContract.score) bestContract = { record, score };
     }
 
-    // --- Scout scoring (meta#12) ---
-    // Score = (valuePerRefresh * stalenessFactor * taskWeight) / cycleHours,
-    // in the same credits/hour units as mining and contracts. stalenessFactor
-    // grows linearly from 0 (just refreshed) upward; a market that's been
-    // un-seen for exactly stalenessThreshold hours scores equivalently to a
-    // mine.expectedCreditsPerCycle-worth of mining. Markets never seen before
-    // are treated as 10× the threshold stale (very high priority but finite).
-    const routeWaypoints: RouteWaypoint[] = rawWaypoints.map((w) => ({
-      symbol: w.symbol,
-      x: w.x,
-      y: w.y,
-      hasFuelStation: w.traits.some((t) => t.symbol === "MARKETPLACE"),
-    }));
-    const marketplaces = rawWaypoints.filter((w) => w.traits.some((t) => t.symbol === "MARKETPLACE"));
+    // --- Scouting ---
+    const creditsPerRefresh = knobs["scout.creditsPerRefresh"];
+    const stalenessThresholdHours = knobs["scout.stalenessThresholdHours"];
+    const marketplaces = context.waypoints.filter(isMarketplace);
     const nowMs = now.getTime();
 
-    let bestScout: { waypoint: string; score: number } | null = null;
-    if (scoutValuePerRefresh > 0 && scoutThresholdHours > 0) {
+    let bestScout: { waypoint: string; score: number; elapsedHours: number } | null = null;
+    if (creditsPerRefresh > 0 && stalenessThresholdHours > 0) {
       for (const marketplace of marketplaces) {
         const intel = marketIntel.find((m) => m.waypoint === marketplace.symbol);
+        // A market nobody has ever priced is the most valuable to visit, but the
+        // value has to stay finite or it would beat every other kind of work
+        // forever. Ten thresholds' worth is "very stale" without being infinite.
         const elapsedHours =
           intel !== undefined
             ? (nowMs - intel.lastRefreshedAt.getTime()) / 3_600_000
-            : scoutThresholdHours * 10; // never-seen = 10× stale
-        const stalenessFactor = elapsedHours / scoutThresholdHours;
-        if (stalenessFactor <= 0) continue;
+            : stalenessThresholdHours * 10;
+        if (elapsedHours <= 0) continue;
 
-        const route = fuelAwareRoute(routeWaypoints, ship.nav.waypointSymbol, marketplace.symbol, ship.fuel.current);
+        const route = fuelAwareRoute(
+          routeWaypoints,
+          ship.nav.waypointSymbol,
+          marketplace.symbol,
+          ship.fuel.current,
+          ship.fuel.capacity
+        );
         if (route === null) continue;
-        if (miningResult.currentCredits - route.distance * fuelCreditsPerUnitDistance < reserveFloor) continue;
+        const estimatedCost = route.distance * model.fuelCreditsPerUnitDistance;
+        if (breachesReserveFloor({ currentCredits: credits, estimatedCost, reserveFloor })) continue;
 
-        const cycleHours = route.distance / speed + fixedOverheadHours;
-        const score = cycleHours > 0 ? (scoutValuePerRefresh * stalenessFactor * scoutTaskWeight) / cycleHours : 0;
-        if (bestScout === null || score > bestScout.score) bestScout = { waypoint: marketplace.symbol, score };
+        const { score } = scoutScore({
+          distance: route.distance,
+          elapsedHours,
+          stalenessThresholdHours,
+          creditsPerRefresh,
+          speedUnitsPerHour: model.speedUnitsPerHour,
+          overheadHours: model.overheadHours,
+        });
+        if (bestScout === null || score > bestScout.score) {
+          bestScout = { waypoint: marketplace.symbol, score, elapsedHours };
+        }
       }
     }
 
     // --- Pick the highest-scoring task kind ---
-    const miningScore = miningResult.chosenScore;
+    const miningScoreValue = miningResult.chosenScore;
     const scores = {
       contract: bestContract?.score ?? -Infinity,
       scout: bestScout?.score ?? -Infinity,
-      mine: miningScore ?? -Infinity,
+      mine: miningScoreValue ?? -Infinity,
     };
 
-    const contractWins =
-      bestContract !== null &&
-      scores.contract > scores.mine &&
-      scores.contract > scores.scout;
-    const scoutWins =
-      bestScout !== null &&
-      scores.scout > scores.mine &&
-      scores.scout >= scores.contract; // tie-break: scout before contract (no monetary risk)
+    const contractWins = bestContract !== null && scores.contract > scores.mine && scores.contract > scores.scout;
+    // Ties go to scouting over contracts: it spends no credits up front, so an
+    // equally-scoring scout is the strictly safer bet.
+    const scoutWins = bestScout !== null && scores.scout > scores.mine && scores.scout >= scores.contract;
+
+    const comparison = {
+      miningScore: miningScoreValue,
+      contractScore: bestContract?.score ?? null,
+      scoutScore: bestScout?.score ?? null,
+    };
 
     if (contractWins && bestContract !== null && bestContract.record.procurementMarket !== null) {
       return {
@@ -259,11 +346,10 @@ export class Planner {
         unitsRequired: bestContract.record.unitsRequired,
         procurementMarket: bestContract.record.procurementMarket,
         detail: {
+          chosenKind: "contract",
           contractId: bestContract.record.contractId,
-          contractScore: bestContract.score,
-          miningScore,
-          scoutScore: bestScout?.score ?? null,
-          taskWeight: contractTaskWeight,
+          ...comparison,
+          taskWeight: knobs["contract.taskWeight"],
           miningDetail: miningResult.detail,
         },
       };
@@ -274,26 +360,32 @@ export class Planner {
         kind: "scout",
         scoutWaypoint: bestScout.waypoint,
         detail: {
+          chosenKind: "scout",
           scoutWaypoint: bestScout.waypoint,
-          scoutScore: bestScout.score,
-          miningScore,
-          contractScore: bestContract?.score ?? null,
+          scoutStaleHours: bestScout.elapsedHours,
+          ...comparison,
           miningDetail: miningResult.detail,
         },
       };
     }
 
     if (miningResult.asteroidWaypoint !== null) {
-      return { kind: "mine", asteroidWaypoint: miningResult.asteroidWaypoint, detail: miningResult.detail };
+      return {
+        kind: "mine",
+        asteroidWaypoint: miningResult.asteroidWaypoint,
+        detail: { chosenKind: "mine", ...miningResult.detail, ...comparison },
+      };
     }
 
-    // Flattened (not nested under miningDetail) so existing consumers of a
-    // pure-mining planner_assignment event — e.g. reading detail.candidates —
-    // keep working unchanged when there are no contracts or scouts in the picture.
+    // Flattened (not nested under miningDetail) so consumers reading
+    // detail.candidates keep working when there are no contracts or scouts in
+    // the picture — replay.ts relies on that shape.
     return {
       kind: "none",
       detail: {
+        chosenKind: "none",
         ...miningResult.detail,
+        ...comparison,
         contractsConsidered: acceptedContracts.length,
         marketsConsidered: marketplaces.length,
       },
@@ -301,11 +393,12 @@ export class Planner {
   }
 
   /**
-   * Deterministic profitability evaluation for one contract: cheapest market
-   * in-system selling the required good, fuel-aware route cost from the ship's
-   * position through that market to the delivery destination, weighed against
-   * the contract's total payment. v1 simplification: only the contract's first
-   * deliverable is evaluated — see README.
+   * Is this contract worth accepting? Find the cheapest in-system market
+   * selling what it wants, route through there to the delivery point, and
+   * subtract. Runs once per contract, when it's first seen; the result is
+   * frozen into the contract record and scored against mining from then on.
+   *
+   * v1 simplification: only the contract's first deliverable is evaluated.
    */
   async evaluateContract(params: {
     contract: Contract;
@@ -316,30 +409,21 @@ export class Planner {
     const { contract, ship, systemSymbol, authHeader } = params;
     const deliverable = contract.terms.deliver[0];
     if (deliverable === undefined) {
-      return { procurementMarket: null, expectedProfit: -Infinity, cycleHours: 0, detail: { contractId: contract.id, reason: "no deliverables" } };
+      return {
+        procurementMarket: null,
+        expectedProfit: -Infinity,
+        cycleHours: 0,
+        detail: { contractId: contract.id, reason: "no deliverables" },
+      };
     }
 
-    const [rawWaypoints, knobValues] = await Promise.all([
-      this.clients.getSystemWaypoints(systemSymbol, authHeader),
-      this.knobs.getAll(),
-    ]);
-    const knob = (name: string): number => {
-      const found = knobValues.find((k) => k.name === name);
-      if (found === undefined) throw new Error(`planner requires knob "${name}" to exist`);
-      return found.value;
-    };
+    const context = await this.loadContext(systemSymbol, authHeader);
+    const { model, routeWaypoints } = context;
+    const marketplaces = context.waypoints.filter(isMarketplace);
 
-    const routeWaypoints: RouteWaypoint[] = rawWaypoints.map((w) => ({
-      symbol: w.symbol,
-      x: w.x,
-      y: w.y,
-      hasFuelStation: w.traits.some((t) => t.symbol === "MARKETPLACE"),
-    }));
-    const marketplaces = rawWaypoints.filter((w) => w.traits.some((t) => t.symbol === "MARKETPLACE"));
-
-    // Independent per-marketplace lookups — now on the critical ship-dispatch
-    // path (assignTarget calls this via discoverAndEvaluateContracts), so a
-    // system with many marketplaces no longer pays for them one at a time.
+    // Independent per-marketplace lookups, and this sits on the critical
+    // ship-dispatch path — a system with many marketplaces shouldn't pay for
+    // them one at a time.
     const markets = await Promise.all(marketplaces.map((w) => this.clients.getMarket(w.symbol, authHeader)));
     let cheapest: { waypoint: string; price: number } | null = null;
     for (let i = 0; i < marketplaces.length; i++) {
@@ -353,17 +437,34 @@ export class Planner {
         procurementMarket: null,
         expectedProfit: -Infinity,
         cycleHours: 0,
-        detail: { contractId: contract.id, reason: `no market in ${systemSymbol} sells ${deliverable.tradeSymbol}` },
+        detail: {
+          contractId: contract.id,
+          reason: `no market in ${systemSymbol} sells ${deliverable.tradeSymbol}`,
+        },
       };
     }
 
     const unitsRequired = deliverable.unitsRequired - deliverable.unitsFulfilled;
-    // ship.fuel.capacity, not fuel.current: this is a planning-time estimate for
-    // whichever ship eventually takes the contract, not necessarily the one
-    // fetched here — a full tank is the reasonable assumption to evaluate against.
-    const toMarket = fuelAwareRoute(routeWaypoints, ship.nav.waypointSymbol, cheapest.waypoint, ship.fuel.capacity);
+    // fuel.capacity, not fuel.current: this estimates the trip for whichever
+    // ship eventually takes the contract, not necessarily the one read here, so
+    // a full tank is the right assumption.
+    const toMarket = fuelAwareRoute(
+      routeWaypoints,
+      ship.nav.waypointSymbol,
+      cheapest.waypoint,
+      ship.fuel.capacity,
+      ship.fuel.capacity
+    );
     const toDestination =
-      toMarket === null ? null : fuelAwareRoute(routeWaypoints, cheapest.waypoint, deliverable.destinationSymbol, ship.fuel.capacity);
+      toMarket === null
+        ? null
+        : fuelAwareRoute(
+            routeWaypoints,
+            cheapest.waypoint,
+            deliverable.destinationSymbol,
+            ship.fuel.capacity,
+            ship.fuel.capacity
+          );
     if (toMarket === null || toDestination === null) {
       return {
         procurementMarket: null,
@@ -373,13 +474,13 @@ export class Planner {
       };
     }
 
-    const speed = knob("travel.speedUnitsPerHour");
-    const fixedOverheadHours = knob("cycle.fixedOverheadHours");
-    const fuelCreditsPerUnitDistance = knob("fuel.creditsPerUnitDistance");
-
     const travelDistance = toMarket.distance + toDestination.distance;
-    const cycleHours = travelDistance / speed + fixedOverheadHours;
-    const travelCost = travelDistance * fuelCreditsPerUnitDistance;
+    const hours = cycleHours({
+      distance: travelDistance,
+      speedUnitsPerHour: model.speedUnitsPerHour,
+      overheadHours: model.overheadHours,
+    });
+    const travelCost = travelDistance * model.fuelCreditsPerUnitDistance;
     const procurementCost = unitsRequired * cheapest.price;
     const totalPayment = contract.terms.payment.onAccepted + contract.terms.payment.onFulfilled;
     const expectedProfit = totalPayment - procurementCost - travelCost;
@@ -387,7 +488,7 @@ export class Planner {
     return {
       procurementMarket: cheapest.waypoint,
       expectedProfit,
-      cycleHours,
+      cycleHours: hours,
       detail: {
         contractId: contract.id,
         tradeSymbol: deliverable.tradeSymbol,
@@ -398,9 +499,15 @@ export class Planner {
         procurementCost,
         travelDistance,
         travelCost,
-        cycleHours,
+        cycleHours: hours,
         totalPayment,
         expectedProfit,
+        model: {
+          speedUnitsPerHour: model.speedUnitsPerHour,
+          overheadHours: model.overheadHours,
+          fuelCreditsPerUnitDistance: model.fuelCreditsPerUnitDistance,
+          provenance: model.provenance,
+        },
       },
     };
   }
