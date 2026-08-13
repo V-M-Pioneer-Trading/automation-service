@@ -202,13 +202,6 @@ export function createGameClients(config: {
         units,
       }),
 
-    purchaseShip: (shipType: string, waypointSymbol: string, authHeader: string) =>
-      callJson<{ data: { ship: ShipSnapshot; transaction: { price: number } } }>(
-        `${config.agentServiceUrl}/ships/purchase`,
-        authHeader,
-        { method: "POST", body: JSON.stringify({ shipType, waypointSymbol }) }
-      ),
-
     deliverContract: (
       contractId: string,
       shipSymbol: string,

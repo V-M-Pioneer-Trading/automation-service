@@ -350,7 +350,14 @@ at the time and can't be honestly recomputed from the log.
 
 ## API
 
-All routes are under `/api/automation/v1`. `/health` is unversioned.
+All routes are under `/api/automation/v1`. Health is unversioned and mounted
+twice — `/health` (local dev/compose) and `/api/automation/health` (production,
+where CloudFront only routes requests matching the configured path pattern).
+
+Four routes are **only mounted when the matching config exists**, and 404 otherwise:
+`GET /autopilot/ships/:shipSymbol` and `POST /planner/replan` need the mining
+config (`MINING_SHIP_SYMBOL` and the three service URLs), `GET /metrics/context`
+needs the metrics scheduler, `GET /anomalies/digest` needs `ANOMALY_WEBHOOK_URL`.
 
 **Autopilot**
 

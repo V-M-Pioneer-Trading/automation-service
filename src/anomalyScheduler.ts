@@ -13,7 +13,7 @@ export interface AnomalyConfig {
 }
 
 /**
- * Runs the six meta#15 health checks on a fixed interval, independent of
+ * Runs the five meta#15 health checks on a fixed interval, independent of
  * autopilot arm/pause/abort (the checks themselves gate on live/armed where
  * that's the relevant condition — e.g. ship-idle only means something while
  * mining is actually supposed to be happening). Each detected anomaly is
