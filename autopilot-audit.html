@@ -1,0 +1,986 @@
+<title>Autopilot Audit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+  :root {
+    --paper:        #F1F3F2;
+    --surface:      #FAFBFA;
+    --ink:          #16191D;
+    --ink-soft:     #4A5350;
+    --ink-faint:    #6E7875;
+    --rule:         #CDD4D1;
+    --rule-strong:  #A9B3AF;
+    --accent:       #1F5F5B;
+    --accent-soft:  #E0EAE8;
+
+    --sev-crit:     #9E2B21;
+    --sev-crit-bg:  #F6E4E1;
+    --sev-high:     #8A5D0E;
+    --sev-high-bg:  #F6EDDB;
+    --sev-med:      #35607E;
+    --sev-med-bg:   #E2ECF2;
+    --sev-good:     #2C6349;
+    --sev-good-bg:  #E1EDE6;
+
+    --measure: 68ch;
+    --step--1: 0.815rem;
+    --step-0:  1.0rem;
+    --step-1:  1.22rem;
+    --step-2:  1.55rem;
+    --step-3:  2.1rem;
+    --step-4:  3.0rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:        #14181A;
+      --surface:      #1B2023;
+      --ink:          #E6EAE8;
+      --ink-soft:     #A8B2AF;
+      --ink-faint:    #7D8784;
+      --rule:         #2E3639;
+      --rule-strong:  #454F52;
+      --accent:       #6FBDB4;
+      --accent-soft:  #1E2E2D;
+
+      --sev-crit:     #E88075;
+      --sev-crit-bg:  #351E1B;
+      --sev-high:     #D5A44F;
+      --sev-high-bg:  #322717;
+      --sev-med:      #7FB4D2;
+      --sev-med-bg:   #1A2830;
+      --sev-good:     #74BF9B;
+      --sev-good-bg:  #182A22;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:        #14181A;
+    --surface:      #1B2023;
+    --ink:          #E6EAE8;
+    --ink-soft:     #A8B2AF;
+    --ink-faint:    #7D8784;
+    --rule:         #2E3639;
+    --rule-strong:  #454F52;
+    --accent:       #6FBDB4;
+    --accent-soft:  #1E2E2D;
+
+    --sev-crit:     #E88075;
+    --sev-crit-bg:  #351E1B;
+    --sev-high:     #D5A44F;
+    --sev-high-bg:  #322717;
+    --sev-med:      #7FB4D2;
+    --sev-med-bg:   #1A2830;
+    --sev-good:     #74BF9B;
+    --sev-good-bg:  #182A22;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+    font-size: var(--step-0);
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 1.5rem 6rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 78ch; margin: 0 auto; }
+
+  h1, h2, h3, .label, .chip, th, .fid {
+    font-family: Archivo, "Helvetica Neue", Arial, sans-serif;
+  }
+
+  code, .mono, .ref {
+    font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    border-bottom: 2px solid var(--ink);
+    padding: 4.5rem 0 1.5rem;
+    margin-bottom: 2rem;
+  }
+
+  .eyebrow {
+    font-family: Archivo, sans-serif;
+    font-size: var(--step--1);
+    font-weight: 600;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1rem;
+  }
+
+  h1 {
+    font-size: var(--step-4);
+    font-weight: 700;
+    line-height: 1.02;
+    letter-spacing: -0.022em;
+    text-wrap: balance;
+    margin: 0 0 1rem;
+  }
+
+  .standfirst {
+    font-size: var(--step-1);
+    color: var(--ink-soft);
+    max-width: var(--measure);
+    margin: 0 0 2rem;
+    text-wrap: pretty;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 2rem;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: var(--step--1);
+    color: var(--ink-faint);
+  }
+  .meta span strong { color: var(--ink-soft); font-weight: 500; }
+
+  /* ---------- severity instrument strip ---------- */
+
+  .instrument {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin: 0 0 3.5rem;
+  }
+  .gauge {
+    background: var(--surface);
+    padding: 1rem 1.1rem 1.05rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .gauge .n {
+    font-family: Archivo, sans-serif;
+    font-size: var(--step-3);
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .gauge .k {
+    font-family: Archivo, sans-serif;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .gauge.crit .n { color: var(--sev-crit); }
+  .gauge.high .n { color: var(--sev-high); }
+  .gauge.med  .n { color: var(--sev-med); }
+  .gauge.good .n { color: var(--sev-good); }
+
+  /* ---------- sections ---------- */
+
+  section { margin: 0 0 4rem; }
+
+  h2 {
+    font-size: var(--step-2);
+    font-weight: 700;
+    letter-spacing: -0.014em;
+    text-wrap: balance;
+    margin: 0 0 0.4rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--rule-strong);
+  }
+
+  .section-note {
+    color: var(--ink-faint);
+    font-size: var(--step--1);
+    font-family: "IBM Plex Mono", monospace;
+    margin: 0 0 2rem;
+  }
+
+  p { max-width: var(--measure); margin: 0 0 1rem; text-wrap: pretty; }
+
+  a { color: var(--accent); text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  code {
+    font-size: 0.87em;
+    background: var(--accent-soft);
+    color: var(--ink);
+    padding: 0.1em 0.34em;
+    border-radius: 2px;
+  }
+
+  /* ---------- findings ---------- */
+
+  .finding {
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--rule-strong);
+    background: var(--surface);
+    padding: 1.5rem 1.6rem 1.2rem;
+    margin: 0 0 1.5rem;
+  }
+  .finding.crit { border-top-color: var(--sev-crit); }
+  .finding.high { border-top-color: var(--sev-high); }
+  .finding.med  { border-top-color: var(--sev-med); }
+
+  .fhead {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.65rem 0.9rem;
+    margin-bottom: 0.9rem;
+  }
+
+  .fid {
+    font-size: var(--step--1);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-faint);
+    letter-spacing: 0.04em;
+  }
+
+  h3 {
+    font-size: var(--step-1);
+    font-weight: 600;
+    line-height: 1.28;
+    letter-spacing: -0.01em;
+    margin: 0;
+    flex: 1 1 22ch;
+    text-wrap: balance;
+  }
+
+  .chip {
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    padding: 0.28em 0.6em;
+    white-space: nowrap;
+    border: 1px solid transparent;
+  }
+  .chip.crit { color: var(--sev-crit); background: var(--sev-crit-bg); border-color: var(--sev-crit); }
+  .chip.high { color: var(--sev-high); background: var(--sev-high-bg); border-color: var(--sev-high); }
+  .chip.med  { color: var(--sev-med);  background: var(--sev-med-bg);  border-color: var(--sev-med); }
+  .chip.good { color: var(--sev-good); background: var(--sev-good-bg); border-color: var(--sev-good); }
+  .chip.verified { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+
+  .finding p { margin-bottom: 0.85rem; }
+  .finding p:last-child { margin-bottom: 0; }
+
+  .ref {
+    display: block;
+    font-size: var(--step--1);
+    color: var(--ink-faint);
+    border-left: 2px solid var(--rule-strong);
+    padding: 0.15rem 0 0.15rem 0.8rem;
+    margin: 0 0 0.9rem;
+    max-width: var(--measure);
+  }
+
+  .breaks {
+    background: var(--paper);
+    border: 1px dashed var(--rule-strong);
+    padding: 0.85rem 1rem;
+    margin: 0 0 0.9rem;
+    max-width: var(--measure);
+  }
+  .breaks .label {
+    display: block;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 0.35rem;
+  }
+  .breaks p { margin: 0; font-size: 0.95rem; }
+
+  /* ---------- tables ---------- */
+
+  .scroll { overflow-x: auto; margin: 0 0 1.5rem; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.93rem;
+    min-width: 34rem;
+  }
+  th {
+    text-align: left;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border-bottom: 1px solid var(--ink);
+    padding: 0 0.9rem 0.5rem 0;
+    vertical-align: bottom;
+  }
+  td {
+    border-bottom: 1px solid var(--rule);
+    padding: 0.7rem 0.9rem 0.7rem 0;
+    vertical-align: top;
+  }
+  td:first-child { font-family: Archivo, sans-serif; font-weight: 600; }
+  tbody tr:last-child td { border-bottom: 1px solid var(--rule-strong); }
+
+  .verdict { font-family: Archivo, sans-serif; font-weight: 600; white-space: nowrap; }
+  .verdict.pass { color: var(--sev-good); }
+  .verdict.part { color: var(--sev-high); }
+  .verdict.fail { color: var(--sev-crit); }
+
+  /* ---------- keeps list ---------- */
+
+  ul.keeps { list-style: none; padding: 0; margin: 0; max-width: var(--measure); }
+  ul.keeps li {
+    border-bottom: 1px solid var(--rule);
+    padding: 0.85rem 0 0.85rem 1.6rem;
+    position: relative;
+  }
+  ul.keeps li::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 1.42rem;
+    width: 0.7rem; height: 0.7rem;
+    border: 2px solid var(--sev-good);
+    border-right: 0; border-top: 0;
+    transform: rotate(-45deg) translateY(-2px);
+  }
+
+  footer {
+    border-top: 2px solid var(--ink);
+    padding-top: 1.2rem;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: var(--step--1);
+    color: var(--ink-faint);
+    max-width: var(--measure);
+  }
+
+  @media (max-width: 640px) {
+    :root { --step-4: 2.2rem; --step-3: 1.7rem; --step-2: 1.35rem; }
+    body { padding: 0 1.1rem 4rem; }
+    .masthead { padding-top: 3rem; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">automation-service · architecture review</p>
+    <h1>Autopilot Audit</h1>
+    <p class="standfirst">
+      Thirteen findings against the decision model, safety machinery, and governance
+      of a fleet autopilot that spends real money without a human in the loop.
+    </p>
+    <div class="meta">
+      <span><strong>Scope</strong> src/ · 20 modules · 14 test files</span>
+      <span><strong>Date</strong> 2026-08-21</span>
+      <span><strong>Head</strong> claude/automation-review-prompt-4mtne6</span>
+    </div>
+  </header>
+
+  <div class="instrument">
+    <div class="gauge crit"><span class="n">4</span><span class="k">Critical</span></div>
+    <div class="gauge high"><span class="n">5</span><span class="k">Correctness</span></div>
+    <div class="gauge med"><span class="n">4</span><span class="k">Limitation</span></div>
+    <div class="gauge good"><span class="n">3</span><span class="k">Verified live</span></div>
+  </div>
+
+  <section>
+    <h2>The short version</h2>
+    <p class="section-note">what the review actually turned up</p>
+
+    <p>
+      This codebase is unusually thoughtful about the <em>hard</em> parts of autonomous
+      automation. Scoring is pure and replayable, the one-atomic-action-per-tick invariant
+      is real and consistently held, and the abort/pause/shadow discard checks are
+      re-verified after every await window — that is care most services never spend.
+    </p>
+    <p>
+      The failures cluster somewhere less flattering: <strong>the safety properties the
+      documentation is proudest of are the ones that don't hold.</strong> The knob-class
+      fence that supposedly keeps an AI supervisor away from its own alarm thresholds is a
+      read filter with no write-side check. The weights documented as disabling a task kind
+      don't disable it. The cash floor that prevents the unrecoverable death spiral ships
+      set to zero. And the alarm for a dead fleet switches itself off after about six hours.
+    </p>
+    <p>
+      None of these are subtle once you look, and three of them I confirmed by running the
+      real code rather than reading it. The pattern is worth naming: each is a case where
+      a mechanism was built correctly and then <em>not wired to the thing it protects</em>.
+    </p>
+  </section>
+
+  <section>
+    <h2>Critical</h2>
+    <p class="section-note">safety or governance claims that do not hold</p>
+
+    <article class="finding crit">
+      <div class="fhead">
+        <span class="fid">01</span>
+        <h3>The knob-class fence is a read filter — nothing checks class on write</h3>
+        <span class="chip crit">Principle</span>
+      </div>
+      <span class="ref">src/server.ts:298 · src/knobs.ts:299 · src/__tests__/knobClasses.test.ts</span>
+      <p>
+        <code>knobs.ts</code> states the design plainly: alert thresholds are held "deliberately
+        out of the AI's reach", because "an agent that can widen its own alarm thresholds will
+        eventually resolve 'profit dropped' by deciding profit drops are fine." The README repeats
+        it as a three-class permission table.
+      </p>
+      <p>
+        <code>PUT /planner/knobs/:name</code> performs no class check at all, and
+        <code>KnobRepo.set</code> validates only bounds. The sole enforcement anywhere is
+        <code>GET /planner/knobs?class=policy</code> narrowing what the supervisor is
+        <em>shown</em>. There is also no authentication on any route in the service — no
+        middleware, no token check beyond the SpaceTraders credential forwarded downstream.
+      </p>
+      <p>
+        The test file written to hold this line makes the gap concrete. Its header comment reads
+        "Knob classes are the fence around the AI supervisor: it may write <code>policy</code> and
+        nothing else." It contains no test that a model or alert write is rejected. Both of its
+        write tests assert the write <em>succeeds</em> — including one titled "still lets an
+        operator write a model knob directly", which is indistinguishable from the AI doing it.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          The supervisor reads the README (or guesses a name from the digest it already receives),
+          issues <code>PUT /planner/knobs/anomaly.errorRateThreshold {"value": 1}</code>, and the
+          fleet's error alarm can never fire again. Nothing rejects it, nothing flags it — it
+          lands in the audit log as an ordinary <code>knob_changed</code> event.
+        </p>
+      </div>
+      <p>
+        Fixing this needs the write path to know <em>who</em> is calling, which means the service
+        needs real authn/authz before the class distinction can mean anything. Until then the
+        three-class model is documentation, not a control.
+      </p>
+    </article>
+
+    <article class="finding crit">
+      <div class="fhead">
+        <span class="fid">02</span>
+        <h3>Setting a task weight to zero does not disable that task kind</h3>
+        <span class="chip crit">Correctness</span>
+        <span class="chip verified">Verified live</span>
+      </div>
+      <span class="ref">src/planner.ts:322 · src/scoring.ts:54 · src/knobs.ts:101</span>
+      <p>
+        Both knob descriptions and the README promise an off switch: <code>mine.taskWeight</code>
+        — "0 disables mining entirely"; <code>contract.taskWeight</code> — "0 disables contract
+        work."
+      </p>
+      <p>
+        A zero weight makes <code>miningScore</code> return <strong>0</strong>, not
+        <code>-Infinity</code>. In <code>assignTarget</code>, an absent competitor scores
+        <code>-Infinity</code>, so zero still wins the comparison, and the planner dispatches
+        the ship.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          I ran the real <code>Planner</code> against stub clients. With
+          <code>mine.taskWeight = 0</code>, no accepted contracts, and scouting off, the
+          assignment returned <code>kind: "mine" → X1-AB-BELT</code>. With
+          <code>contract.taskWeight = 0</code> and no reachable asteroid, it returned
+          <code>kind: "contract" → C-1</code>. An operator killing mining during an incident
+          watches the ship keep mining.
+        </p>
+      </div>
+      <p>
+        <code>scoring.test.ts</code> asserts the <em>function</em> returns 0 for a zero weight.
+        Nothing tests what the planner then does with that 0, which is where the promise actually
+        lives. <code>scout.creditsPerRefresh</code> is the one weight that genuinely disables its
+        task, because it has an explicit <code>&gt; 0</code> guard — the other two need the same.
+      </p>
+    </article>
+
+    <article class="finding crit">
+      <div class="fhead">
+        <span class="fid">03</span>
+        <h3>Ship dispatch has no distributed lock, and the README under-states the risk</h3>
+        <span class="chip crit">Correctness</span>
+      </div>
+      <span class="ref">src/scheduler.ts:76 · README.md "Known limitations → Operations"</span>
+      <p>
+        The re-entrancy guard that prevents two ticks racing the same <code>ship_task</code> row
+        is an in-memory boolean on the scheduler instance. It protects against one process
+        overlapping itself. It does nothing across processes.
+      </p>
+      <p>
+        The known-limitations list acknowledges that "metrics rollups assume a single instance"
+        — a double-counted reporting number. It does not mention that the same assumption governs
+        <em>ship dispatch</em>. Two replicas both read <code>MINING_SHIP_SYMBOL</code> from env
+        and both drive it.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          Scale the deployment to two replicas. Both schedulers reach
+          <code>CONTRACT_PURCHASE</code> for the same ship in the same window and each dispatches
+          <code>purchase</code> — the agent buys twice the goods for twice the credits, and the
+          reserve-floor check that cleared the trip only ever accounted for one of them. The same
+          shape applies to <code>deliverContract</code> and <code>sell</code>.
+        </p>
+      </div>
+      <p>
+        This is the single largest gap between the documented blast radius and the real one. The
+        ceiling on damage today is enforced by the deployment being single-instance, not by the
+        design — and nothing in the code would tell you if that changed.
+      </p>
+    </article>
+
+    <article class="finding crit">
+      <div class="fhead">
+        <span class="fid">04</span>
+        <h3>The cash floor that prevents the unrecoverable failure ships disabled</h3>
+        <span class="chip crit">Fail-safe</span>
+      </div>
+      <span class="ref">src/knobs.ts:146 · src/scoring.ts:115</span>
+      <p>
+        <code>scoring.ts</code> is explicit about the stakes: "Running out of credits with no fuel
+        money is the classic SpaceTraders death spiral, and it is not recoverable in-game." The
+        floor exists, it is checked on every mining, contract and scout candidate, and the check
+        is correct.
+      </p>
+      <p>
+        <code>credit.reserveFloor</code> defaults to <code>0</code>. At zero,
+        <code>breachesReserveFloor</code> reduces to "would this take the balance negative" —
+        it blocks only work the agent already cannot afford, and reserves nothing at all. Every
+        fresh deployment runs with the guard nominally on and functionally absent until somebody
+        thinks to set it.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          A fleet on default knobs spends down to a handful of credits, takes one trip whose real
+          fuel cost exceeds the estimate (the fuel rate is a prior until a refuel transaction
+          reports a price — see finding 07's sibling problem), and strands. There is no recovery
+          path and no alarm specific to it.
+        </p>
+      </div>
+      <p>
+        A safety default should cost something to turn off, not something to turn on. Even a
+        conservative non-zero default — a few thousand credits, or a multiple of the measured
+        per-cycle fuel cost — would make the mechanism do what its own comment says it is for.
+      </p>
+    </article>
+  </section>
+
+  <section>
+    <h2>Correctness</h2>
+    <p class="section-note">the model decides on inputs that don't mean what it thinks</p>
+
+    <article class="finding high">
+      <div class="fhead">
+        <span class="fid">05</span>
+        <h3>Market freshness is tracked by two subsystems that never tell each other anything</h3>
+        <span class="chip high">Correctness</span>
+        <span class="chip verified">Verified live</span>
+      </div>
+      <span class="ref">src/scheduler.ts:304 · src/miningTask.ts:253 · src/planner.ts:427 · src/anomaly.ts:285</span>
+      <p>
+        <code>getMarket</code> is called from four places in this codebase. Mining's
+        <code>findBestMarket</code> prices <em>every</em> marketplace in the system on every
+        cycle. <code>evaluateContract</code> does the same on every contract evaluation. The
+        scout FSM prices one. And <code>MarketIntelRepo.record</code> — the table the planner
+        scores staleness from — is called from exactly one of those four.
+      </p>
+      <p>Both directions of the resulting split are broken:</p>
+      <p>
+        <strong>The planner scouts markets that were just refreshed.</strong> Mining re-prices
+        the whole system every cycle without recording any of it, so <code>market_intel</code>
+        believes those markets are aging. Staleness grows linearly and without bound, so the
+        planner eventually scores a scouting trip above real work and spends a ship on flying to
+        refresh data it already refreshed minutes ago. This is structural — it recurs forever,
+        not once.
+      </p>
+      <p>
+        <strong>The alarm never clears when scouting fixes the problem.</strong>
+        <code>checkMarketStaleness</code> reads only <code>mining_market_selected</code> events'
+        <code>marketsChecked</code> array. A <code>scout_market_refresh</code> is invisible to it.
+        A market that the scouting subsystem is successfully keeping current keeps raising
+        <code>market_stale</code> every cooldown window.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          Scouting is enabled by default at 500 credits per refresh. On a fleet where mining
+          already prices every market each cycle, every scout trip the planner schedules is
+          wasted fuel and wasted cycle time — and the anomaly it was supposed to resolve keeps
+          paging the operator regardless.
+        </p>
+      </div>
+      <p>
+        One concept, two sources of truth, neither authoritative. Recording intel wherever
+        <code>getMarket</code> is actually called, and reading the same table in the anomaly
+        check, collapses both halves.
+      </p>
+    </article>
+
+    <article class="finding high">
+      <div class="fhead">
+        <span class="fid">06</span>
+        <h3>A single observation sets a field's revenue estimate outright</h3>
+        <span class="chip high">Correctness</span>
+      </div>
+      <span class="ref">src/observations.ts:207 · src/observations.ts:250 · README.md:96</span>
+      <p>
+        The README claims recency weighting delivers adaptation "without one lucky trip swinging
+        the estimate." Decay does not provide that. <code>weightedMean</code> over a single
+        sample returns that sample exactly — there is no shrinkage toward the fleet mean, no
+        minimum sample count, and no confidence term anywhere downstream.
+      </p>
+      <p>
+        The model already computes the information needed to fix this and then discards it.
+        <code>provenance.miningSampleCount</code> and <code>waypointsWithOwnAverage</code> are
+        assembled, logged, and served over <code>GET /planner/model</code> — and never consulted
+        by any scoring path. A field with one observation and a field with forty are treated as
+        equally authoritative.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          One anomalously rich cycle at a distant field — a good survey, a temporary price spike —
+          sets <code>creditsPerCycleByWaypoint</code> high enough to beat a closer, well-measured
+          field. Because the planner always picks the argmax, it returns there, and the estimate
+          is only corrected by cycles that the estimate itself caused. There is no exploration
+          term; the correction arrives when the observation decays out, up to fourteen days later.
+        </p>
+      </div>
+      <p>
+        The provenance plumbing means this is a small change: weight a per-waypoint average toward
+        <code>fleetCreditsPerCycle</code> by sample count, and the cold-start behaviour the README
+        promises falls out for free.
+      </p>
+    </article>
+
+    <article class="finding high">
+      <div class="fhead">
+        <span class="fid">07</span>
+        <h3>Contract scores are frozen under a model that has since moved</h3>
+        <span class="chip high">Correctness</span>
+      </div>
+      <span class="ref">src/planner.ts:99 · src/planner.ts:266 · src/contractScheduler.ts:82</span>
+      <p>
+        <code>loadContext</code> carries an explicit promise: inputs are gathered once "so every
+        task kind is scored against exactly the same snapshot of the world." That holds for mining
+        and scouting. It does not hold for contracts.
+      </p>
+      <p>
+        A contract's <code>expectedProfit</code> and <code>cycleHours</code> are computed once at
+        discovery, against whatever the calibrated model believed then, and frozen into the
+        contract row. Every later comparison scores that frozen pair against mining numbers
+        computed from the <em>current</em> model. Only <code>contract.taskWeight</code> is applied
+        live — so the contract arm is half-fresh and half-stale.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          A contract discovered on a cold fleet is evaluated at the prior speed of 30 units/hour.
+          Real flights then calibrate speed to 60. Every mining score doubles; the contract's
+          score does not move. A contract that was genuinely the best available work is now
+          systematically out-competed — or, if the calibration moved the other way, keeps winning
+          on numbers the fleet has already disproved.
+        </p>
+      </div>
+    </article>
+
+    <article class="finding high">
+      <div class="fhead">
+        <span class="fid">08</span>
+        <h3>Mining's measured overhead is charged to scout and contract cycles</h3>
+        <span class="chip high">Correctness</span>
+      </div>
+      <span class="ref">src/observations.ts:193 · src/scoring.ts:102 · src/planner.ts:478</span>
+      <p>
+        <code>overheadHours</code> is derived as the residual of <em>mining</em> cycle time — the
+        module's own comment names its components: "survey + extract + cooldown + dock + sell."
+        Deriving it that way is the right call for mining, and keeps the model self-consistent.
+      </p>
+      <p>
+        That same number is then added to the scout cycle (dock, one <code>getMarket</code> call)
+        and to the contract cycle (dock, purchase, deliver, fulfil). Neither performs a survey, an
+        extraction, or a cooldown. The three task kinds are compared in credits-per-hour, and one
+        kind's fixed costs are being billed to all three.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          On a fleet where measured mining overhead lands near the README's worked example of
+          0.42h, a scout trip of ten minutes' flight is scored as though it takes thirty-five —
+          understating scouting's rate by roughly two-thirds and biasing every comparison toward
+          mining. The bias is systematic, not noise, and it grows as measured overhead grows.
+        </p>
+      </div>
+      <p>
+        Related and smaller: scouting is scored on one-way distance while mining is scored
+        round-trip. That is deliberate and documented, but it does mean the score omits the cost
+        of the ship being left wherever the scout ended, which the next assignment then pays.
+      </p>
+    </article>
+
+    <article class="finding high">
+      <div class="fhead">
+        <span class="fid">09</span>
+        <h3>A dead fleet stops alarming after about six hours</h3>
+        <span class="chip high">Detection</span>
+      </div>
+      <span class="ref">src/anomaly.ts:172 · src/anomaly.ts:234 · src/anomalyScheduler.ts:146</span>
+      <p>
+        Consider a fleet left <code>paused</code> — an operator pausing to investigate and getting
+        pulled away, which is the single most likely way this service ends up quietly doing
+        nothing. Trace what each check does as the hours pass:
+      </p>
+      <p>
+        <strong><code>ship_idle</code></strong> requires <code>armed &amp;&amp; live</code>, so it
+        is skipped entirely. <strong><code>credits_flat</code></strong> reads
+        <code>agent_credits_snapshot</code> events, which are only written while
+        <code>armed &amp;&amp; live</code> — so snapshots stop, and once the window passes the last
+        one, baseline and current resolve to the same row and the check returns null by design.
+        <strong><code>profit_drop</code></strong> does fire: rollups keep running, the latest rate
+        goes to zero against a healthy trailing average.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          After roughly six hours the trailing six-hour average has itself decayed to zero, and
+          <code>detectProfitDrop</code> hits its <code>if (avg6h &lt;= 0) return null</code> guard.
+          Every check is now silent. A fleet that has earned nothing for a day is
+          indistinguishable, to every alarm in the system, from a healthy one — and the alarm went
+          quiet precisely when the outage stopped being transient and became chronic.
+        </p>
+      </div>
+      <p>
+        The guards are individually reasonable; each avoids a real false positive. The gap is that
+        nothing asserts the positive condition — that a fleet which is <em>supposed</em> to be
+        working is in fact earning. A check on "armed-but-not-live for longer than N minutes", or
+        one on absolute rather than relative earnings, closes it.
+      </p>
+    </article>
+  </section>
+
+  <section>
+    <h2>Limitations</h2>
+    <p class="section-note">real, lower-severity, worth knowing before scaling</p>
+
+    <article class="finding med">
+      <div class="fhead">
+        <span class="fid">10</span>
+        <h3>Redeploys silently clamp tuned values, including safety ones, with no audit event</h3>
+        <span class="chip med">Auditability</span>
+      </div>
+      <span class="ref">src/db.ts:52 · src/server.ts:310</span>
+      <p>
+        <code>syncKnobDefinitions</code> clamps any stored value that no longer fits tightened
+        bounds. The reasoning is sound — better than leaving a value the write path would reject.
+        But every API-driven change writes a <code>knob_changed</code> event, and this one writes
+        nothing.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          An operator sets <code>credit.reserveFloor</code> to 500,000. A later release tightens
+          the maximum to 100,000. The floor drops by 400,000 credits on boot; the event log still
+          shows the operator's 500,000 as the last intended value. The audit trail and the running
+          configuration disagree, and nothing points at the moment they diverged.
+        </p>
+      </div>
+    </article>
+
+    <article class="finding med">
+      <div class="fhead">
+        <span class="fid">11</span>
+        <h3>A failed anomaly delivery is persisted and then never retried</h3>
+        <span class="chip med">Detection</span>
+      </div>
+      <span class="ref">src/anomalyScheduler.ts:134 · src/anomaly.ts:55</span>
+      <p>
+        Anomalies are recorded before delivery is attempted — the right order, and the README is
+        right to call it out. Three attempts run inside the tick; on failure
+        <code>incrementDeliveryAttempts</code> is called and the loop moves on.
+        <code>delivered_at</code> stays null forever. Nothing ever scans for undelivered rows.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          The webhook is down for a minute during a transient problem. All three attempts fail,
+          dedupe then suppresses re-firing for the cooldown, and by the time the cooldown expires
+          the condition has cleared. The page is lost permanently — the row is safely in Postgres,
+          which is exactly what makes the loss invisible.
+        </p>
+      </div>
+    </article>
+
+    <article class="finding med">
+      <div class="fhead">
+        <span class="fid">12</span>
+        <h3>Replan is sequential and re-runs full contract discovery once per idle ship</h3>
+        <span class="chip med">Scaling</span>
+      </div>
+      <span class="ref">src/scheduler.ts:359 · src/scheduler.ts:406 · README.md:452</span>
+      <p>
+        <code>runReplan</code> awaits <code>assignTarget</code> per ship in a plain loop, and every
+        <code>assignTarget</code> opens with <code>discoverAndEvaluateContracts</code> — which
+        fetches all contracts and, for anything unseen, prices every marketplace in the system.
+      </p>
+      <p>
+        The README says the planner and <code>listIdle()</code> "scale to N ships without further
+        changes." The scoring does. The dispatch loop does not: N idle ships produce N sequential
+        full discovery passes inside a single tick, behind a re-entrancy guard that blocks all
+        other dispatch until it finishes.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          This is the first thing that breaks when multi-ship arrives. Eight idle ships at a
+          five-second tick interval means eight redundant contract-discovery round trips before
+          the first ship moves — and the tick guard means the fleet stops progressing while it
+          happens.
+        </p>
+      </div>
+    </article>
+
+    <article class="finding med">
+      <div class="fhead">
+        <span class="fid">13</span>
+        <h3>The observation cap can silently erase a field's own average</h3>
+        <span class="chip med">Scaling</span>
+      </div>
+      <span class="ref">src/observations.ts:27 · src/observations.ts:120</span>
+      <p>
+        <code>recentMining</code> takes the 500 newest rows fleet-wide, then groups by waypoint.
+        On a busy fleet, a rarely-mined field's observations fall outside that window even though
+        they are well inside the fourteen-day age limit, and it reverts to the fleet average.
+      </p>
+      <div class="breaks">
+        <span class="label">How it fails</span>
+        <p>
+          A field measured as poor drops out of the sample, reverts to the (higher) fleet average,
+          and becomes attractive again — so the fleet re-learns the same disappointment
+          periodically. <code>waypointsWithOwnAverage</code> simply stops listing it, with no
+          signal that the omission is a cap artifact rather than a genuine absence of data.
+        </p>
+      </div>
+    </article>
+  </section>
+
+  <section>
+    <h2>Principles scorecard</h2>
+    <p class="section-note">against the practices autonomous, money-moving automation is held to</p>
+
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Principle</th>
+            <th scope="col">Verdict</th>
+            <th scope="col">Evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Human-in-the-loop / kill switch</td>
+            <td class="verdict pass">Holds</td>
+            <td>Arm/pause/abort is re-checked after every await window, on success and failure paths alike. Abort awaits the in-flight tick before returning. Shadow→live requires explicit re-arm. Genuinely well built.</td>
+          </tr>
+          <tr>
+            <td>Least privilege</td>
+            <td class="verdict fail">Fails</td>
+            <td>Finding 01. The class model is enforced on reads only, and the service has no authentication to distinguish operator from agent in the first place.</td>
+          </tr>
+          <tr>
+            <td>Fail-safe defaults</td>
+            <td class="verdict part">Partial</td>
+            <td>Cold-start priors and "no viable target → idle" both fail toward inaction, correctly. The reserve floor (04) ships at zero, and the task-weight off switches don't switch anything off (02).</td>
+          </tr>
+          <tr>
+            <td>Idempotency / crash safety</td>
+            <td class="verdict pass">Holds</td>
+            <td>Contract-assign and ship_task save share one transaction. Orphaned-accept reconciliation in <code>contractScheduler</code> handles the non-atomic accept/record boundary explicitly rather than hoping. Per-phase persistence resumes cleanly.</td>
+          </tr>
+          <tr>
+            <td>Graceful degradation</td>
+            <td class="verdict pass">Holds</td>
+            <td>Contract discovery failures are logged and ignored — contracts stay additive to mining, never a dependency. Observation writes are best-effort and can't fail a successful ship action. Upstream calls carry timeouts.</td>
+          </tr>
+          <tr>
+            <td>Auditability</td>
+            <td class="verdict part">Partial</td>
+            <td>Decision inputs and provenance are logged thoroughly enough to genuinely reconstruct a choice. Undercut by silent clamping (10) and by <code>POST /events</code> letting the supervisor write into the same digest it later reads as context.</td>
+          </tr>
+          <tr>
+            <td>Configuration vs. code</td>
+            <td class="verdict part">Partial</td>
+            <td>Knob coverage is good and the class taxonomy is the right idea. But <code>market_stale</code>'s 24h active-use window, the 500-row observation cap, and the 14-day age limit are all buried constants with operational consequences.</td>
+          </tr>
+          <tr>
+            <td>Testability</td>
+            <td class="verdict part">Partial</td>
+            <td>Real Postgres, stub upstreams, injectable clock, pure scoring — the seams are right. Coverage concentrates on happy paths: the governance fence has no negative test (01), and the planner's dispatch decision is untested at the weights where it misbehaves (02).</td>
+          </tr>
+          <tr>
+            <td>Blast-radius containment</td>
+            <td class="verdict fail">Fails</td>
+            <td>Today's ceiling comes from the deployment being single-ship and single-instance, not from the design. Finding 03 shows it disappears silently on the first horizontal scale-out, with no code-level signal.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Worth keeping</h2>
+    <p class="section-note">design decisions that earned their complexity</p>
+
+    <ul class="keeps">
+      <li>
+        <strong>Pure scoring plus logged inputs plus replay.</strong> The triad is rare and it
+        works. Better still, <code>formatReport</code> warns when a zero-override replay changes
+        any decision — it detects its own drift and says so loudly, rather than quietly producing
+        wrong answers. That instinct is the reason the rest of the audit could be done by reading.
+      </li>
+      <li>
+        <strong>One atomic action per tick.</strong> Held consistently across all three FSMs, and
+        it is what makes pause a clean operation instead of a hopeful one. The invariant is stated
+        as a safety property rather than an optimisation, which is the correct framing.
+      </li>
+      <li>
+        <strong>Discard-after-abort on both paths.</strong> The success path and the failure path
+        both re-verify liveness before mutating state. Most codebases remember the first and
+        forget the second.
+      </li>
+      <li>
+        <strong>Provenance on every calibrated value.</strong> Recording whether a number was
+        measured or assumed is the difference between a decision you can defend and one you can
+        only explain. The flaw in finding 06 is that provenance is recorded and then not
+        <em>used</em> — the hard half is already done.
+      </li>
+      <li>
+        <strong>Contract discovery folded inline rather than scheduled.</strong> The comment
+        explains the race that killed the background version. Documenting why the obvious design
+        was rejected is worth more than the code itself.
+      </li>
+    </ul>
+  </section>
+
+  <footer>
+    <p>
+      Findings 02, 03 and 05 were confirmed by executing the code or enumerating call sites,
+      not by reading alone. Finding 02 was reproduced against the real <code>Planner</code>
+      class with stubbed clients. Everything else follows from close reading and is cited to
+      file and line.
+    </p>
+  </footer>
+
+</div>
