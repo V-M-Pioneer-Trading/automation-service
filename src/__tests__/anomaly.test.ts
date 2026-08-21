@@ -2,7 +2,8 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
+import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -81,14 +82,14 @@ describe("automation-service anomaly detection (meta#15)", () => {
     agentUrl = `http://127.0.0.1:${(agent.server.address() as AddressInfo).port}`;
   });
 
-  let gateways: ReturnType<typeof createApp>[] = [];
+  let gateways: ReturnType<typeof createTestApp>[] = [];
   afterEach(async () => {
     // Stop the background schedulers FIRST, before the (async, real-HTTP-round-
     // trip) abort call — every extra await here widens the window in which a
     // still-ticking interval can fire once more and write into what's about to
     // become the next test's freshly-truncated tables.
     await Promise.all(gateways.map((g) => g.locals.stopBackgroundSchedulers?.()));
-    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => webhook.server.close(() => r())),
@@ -107,7 +108,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
           replanIntervalMs: 100_000,
         }
       : undefined;
-    const gateway = createApp(pool, clock, mining, undefined, {
+    const gateway = createTestApp(pool, clock, mining, undefined, {
       webhookUrl,
       intervalMs: opts.intervalMs ?? 15,
     });
@@ -115,7 +116,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     return gateway;
   };
 
-  const waitForAnomaly = async (gateway: ReturnType<typeof createApp>, type: string, timeoutMs = 2000) => {
+  const waitForAnomaly = async (gateway: ReturnType<typeof createTestApp>, type: string, timeoutMs = 2000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
@@ -126,7 +127,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     throw new Error(`timed out waiting for anomaly type ${type}`);
   };
 
-  const expectNoAnomaly = async (gateway: ReturnType<typeof createApp>, type: string, settleMs = 100) => {
+  const expectNoAnomaly = async (gateway: ReturnType<typeof createTestApp>, type: string, settleMs = 100) => {
     await new Promise((r) => setTimeout(r, settleMs));
     const res = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
     expect(res.body.anomalies.some((a: { type: string }) => a.type === type)).toBe(false);
@@ -138,7 +139,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
       ["MINING-1", clock.now()]
     );
     const gateway = app({ withMining: true });
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
 
     await expectNoAnomaly(gateway, "ship_idle"); // not idle yet (default threshold is 10 minutes)
 
@@ -249,7 +250,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
   it("fires earnings_stalled (reason: credits_flat) when agent credits show no net increase across the window", async () => {
     const gateway = app({ withMining: true });
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
 
     // Force ticks instead of racing the real setInterval against the fake
     // clock: forceAnomalyTick() drains any tick already in flight and then
@@ -267,7 +268,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
   it("does not fire earnings_stalled on flat credits when credits have grown", async () => {
     const gateway = app({ withMining: true });
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
 
     await gateway.locals.forceAnomalyTick(); // first snapshot, at window start
     clock.advance(2 * 60 * 60 * 1000 + 60_000);
@@ -351,7 +352,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
   }, 10_000);
 
   it("has no /anomalies/digest route when anomaly detection isn't configured", async () => {
-    const gateway = createApp(pool, clock);
+    const gateway = createTestApp(pool, clock);
     const res = await request(gateway).get("/api/automation/v1/anomalies/digest");
     expect(res.status).toBe(404);
   });

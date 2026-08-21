@@ -1,6 +1,6 @@
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -33,7 +33,7 @@ describe("automation-service metrics rollups (meta#14)", () => {
     clock = new FakeClock(new Date("2026-01-01T00:00:00Z"));
   });
 
-  let gateways: ReturnType<typeof createApp>[] = [];
+  let gateways: ReturnType<typeof createTestApp>[] = [];
   afterEach(async () => {
     // Otherwise a leaked MetricsScheduler keeps ticking against (and
     // polluting) the next test's freshly-truncated tables — see meta#15's
@@ -43,7 +43,7 @@ describe("automation-service metrics rollups (meta#14)", () => {
   });
 
   const app = (rollupIntervalMs = 15) => {
-    const gateway = createApp(pool, clock, undefined, { rollupIntervalMs });
+    const gateway = createTestApp(pool, clock, undefined, { rollupIntervalMs });
     gateways.push(gateway);
     return gateway;
   };
@@ -60,7 +60,7 @@ describe("automation-service metrics rollups (meta#14)", () => {
     );
 
   it("has no /metrics/context route when metrics isn't configured", async () => {
-    const gateway = createApp(pool, clock);
+    const gateway = createTestApp(pool, clock);
     const res = await request(gateway).get("/api/automation/v1/metrics/context");
     expect(res.status).toBe(404);
   });

@@ -1,6 +1,7 @@
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
+import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate, syncKnobDefinitions } from "../db";
 import { KNOB_DEFINITIONS } from "../knobs";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -27,7 +28,7 @@ describe("knob classes", () => {
     await syncKnobDefinitions(pool);
   });
 
-  const app = () => createApp(pool);
+  const app = () => createTestApp(pool);
 
   it("every knob declares a class, and every class is represented", () => {
     const classes = new Set(KNOB_DEFINITIONS.map((d) => d.class));
@@ -68,7 +69,7 @@ describe("knob classes", () => {
 
   it("still lets an operator write a model knob directly", async () => {
     const res = await request(app())
-      .put("/api/automation/v1/planner/knobs/travel.speedUnitsPerHourPrior")
+      .put("/api/automation/v1/planner/knobs/travel.speedUnitsPerHourPrior").set("Authorization", bearer())
       .send({ value: 45 });
     expect(res.status).toBe(200);
     expect(res.body.knob.value).toBe(45);
@@ -98,7 +99,7 @@ describe("knob classes", () => {
   });
 
   it("keeps an operator's tuned value across a redeploy", async () => {
-    await request(app()).put("/api/automation/v1/planner/knobs/mine.taskWeight").send({ value: 4 });
+    await request(app()).put("/api/automation/v1/planner/knobs/mine.taskWeight").set("Authorization", bearer()).send({ value: 4 });
     await syncKnobDefinitions(pool);
 
     const res = await request(app()).get("/api/automation/v1/planner/knobs");

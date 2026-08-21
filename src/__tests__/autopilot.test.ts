@@ -1,6 +1,7 @@
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
+import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -31,7 +32,7 @@ describe("automation-service autopilot lifecycle", () => {
     await resetDatabase(pool);
   });
 
-  const app = (clock?: Clock) => createApp(pool, clock);
+  const app = (clock?: Clock) => createTestApp(pool, clock);
 
   it("starts disarmed", async () => {
     const res = await request(app()).get("/api/automation/v1/autopilot/status");
@@ -43,7 +44,7 @@ describe("automation-service autopilot lifecycle", () => {
     const clock = new FakeClock(new Date("2026-07-17T10:00:00Z"));
     const gateway = app(clock);
 
-    const armRes = await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "secret-st-token" });
+    const armRes = await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "secret-st-token" });
     expect(armRes.status).toBe(200);
     expect(armRes.body).toEqual({ status: "armed", mode: "live" });
 
@@ -60,7 +61,7 @@ describe("automation-service autopilot lifecycle", () => {
   });
 
   it("rejects arming without a token", async () => {
-    const res = await request(app()).post("/api/automation/v1/autopilot/arm").send({});
+    const res = await request(app()).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     expect(res.status).toBe(400);
     const statusRes = await request(app()).get("/api/automation/v1/autopilot/status");
     expect(statusRes.body.status).toBe("disarmed");
@@ -68,9 +69,9 @@ describe("automation-service autopilot lifecycle", () => {
 
   it("pauses from armed and logs it", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
 
-    const res = await request(gateway).post("/api/automation/v1/autopilot/pause");
+    const res = await request(gateway).post("/api/automation/v1/autopilot/pause").set("Authorization", bearer());
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "paused", mode: "live" });
 
@@ -79,16 +80,16 @@ describe("automation-service autopilot lifecycle", () => {
   });
 
   it("rejects pausing when not armed", async () => {
-    const res = await request(app()).post("/api/automation/v1/autopilot/pause");
+    const res = await request(app()).post("/api/automation/v1/autopilot/pause").set("Authorization", bearer());
     expect(res.status).toBe(409);
     expect(res.body.error.message).toMatch(/disarmed/);
   });
 
   it("aborts from armed or paused, clearing the held token, and logs it", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
 
-    const res = await request(gateway).post("/api/automation/v1/autopilot/abort");
+    const res = await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "aborted", mode: null });
 
@@ -98,32 +99,32 @@ describe("automation-service autopilot lifecycle", () => {
 
   it("aborts from paused too", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
-    await request(gateway).post("/api/automation/v1/autopilot/pause");
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/pause").set("Authorization", bearer());
 
-    const res = await request(gateway).post("/api/automation/v1/autopilot/abort");
+    const res = await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "aborted", mode: null });
   });
 
   it("rejects aborting when disarmed", async () => {
-    const res = await request(app()).post("/api/automation/v1/autopilot/abort");
+    const res = await request(app()).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
     expect(res.status).toBe(409);
   });
 
   it("allows re-arming from paused or aborted", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
-    await request(gateway).post("/api/automation/v1/autopilot/abort");
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
 
-    const res = await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t2" });
+    const res = await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t2" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "armed", mode: "live" });
   });
 
   it("a fresh app instance (simulated restart) always starts disarmed even though prior events persisted", async () => {
     const firstRun = app();
-    await request(firstRun).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    await request(firstRun).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
 
     const restarted = app();
     const statusRes = await request(restarted).get("/api/automation/v1/autopilot/status");
@@ -137,11 +138,11 @@ describe("automation-service autopilot lifecycle", () => {
     const clock = new FakeClock(new Date("2026-07-17T10:00:00Z"));
     const gateway = app(clock);
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
     clock.advance(1000);
-    await request(gateway).post("/api/automation/v1/autopilot/pause");
+    await request(gateway).post("/api/automation/v1/autopilot/pause").set("Authorization", bearer());
     clock.advance(1000);
-    await request(gateway).post("/api/automation/v1/autopilot/abort");
+    await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
 
     const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=2");
     expect(res.body.events).toHaveLength(2);
@@ -167,10 +168,10 @@ describe("automation-service error mapping", () => {
       throw new Error("db unreachable");
     }
   }
-  const failingApp = () => createApp(new FailingPool() as unknown as Pool);
+  const failingApp = () => createTestApp(new FailingPool() as unknown as Pool);
 
   it("returns 500 instead of hanging when the event log write fails during arm", async () => {
-    const res = await request(failingApp()).post("/api/automation/v1/autopilot/arm").send({ token: "t" });
+    const res = await request(failingApp()).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
     expect(res.status).toBe(500);
     expect(res.body.error.message).toBeDefined();
   });

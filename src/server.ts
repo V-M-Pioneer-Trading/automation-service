@@ -3,6 +3,7 @@ import express from "express";
 import { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
 import { AnomalyConfig, AnomalyScheduler } from "./anomalyScheduler";
+import { AuthConfig, actorOf, createVerifier, SCOPE_FLEET_CONTROL } from "./auth";
 import { AutopilotMode, AutopilotState, InvalidTransitionError } from "./autopilotState";
 import { Clock, systemClock } from "./clock";
 import { ServiceConfig, configFromEnv } from "./config";
@@ -85,12 +86,19 @@ export interface MetricsConfig {
  */
 export function createApp(
   pool: Pool,
+  auth: AuthConfig,
   clock: Clock = systemClock,
   mining?: MiningConfig,
   metrics?: MetricsConfig,
   anomaly?: AnomalyConfig,
   corsAllowedOrigin: string = "http://localhost:3000"
 ) {
+  // Second and required, ahead of every optional: a caller cannot construct
+  // this service without deciding what it trusts. Tests use `createTestApp`,
+  // which supplies an ephemeral keypair — not a bypass.
+  const { requireScope, requireServiceSecret } = createVerifier(auth);
+  const requireControl = requireScope(SCOPE_FLEET_CONTROL);
+
   const app = express();
   // Every response here is either a live status check or reflects mutable
   // autopilot/event state — none of it is meaningfully cacheable
@@ -185,6 +193,7 @@ export function createApp(
 
   apiRouter.post(
     "/autopilot/arm",
+    requireControl,
     asyncHandler(async (req, res) => {
       const token = req.body?.token;
       if (typeof token !== "string" || token.length === 0) {
@@ -199,7 +208,7 @@ export function createApp(
       const from = state.getStatus();
       state.arm(token, mode as AutopilotMode);
       scheduler?.start();
-      await events.append("armed", { from, mode });
+      await events.append("armed", { from, mode, actor: actorOf(res) });
       res.json({ status: state.getStatus(), mode: state.getMode() });
     })
   );
@@ -213,7 +222,7 @@ export function createApp(
         // (assignTarget can now run several sequential HTTP calls for meta#11's
         // contract discovery) has actually finished, not just been told to stop.
         if (action === "abort") await scheduler?.stop();
-        await events.append(eventType, { from });
+        await events.append(eventType, { from, actor: actorOf(res) });
         res.json({ status: state.getStatus(), mode: state.getMode() });
       } catch (err) {
         if (err instanceof InvalidTransitionError) {
@@ -224,8 +233,8 @@ export function createApp(
       }
     });
 
-  apiRouter.post("/autopilot/pause", transition("pause", "paused"));
-  apiRouter.post("/autopilot/abort", transition("abort", "aborted"));
+  apiRouter.post("/autopilot/pause", requireControl, transition("pause", "paused"));
+  apiRouter.post("/autopilot/abort", requireControl, transition("abort", "aborted"));
 
   apiRouter.get(
     "/autopilot/events",
@@ -240,8 +249,14 @@ export function createApp(
   // to the "ai_" namespace so an external caller can log its own decisions but
   // can never spoof a lifecycle/planner event type (e.g. "armed", "knob_changed")
   // that the rest of this service treats as authoritative.
+  //
+  // Machine caller, so a shared secret rather than a Clerk scope — there is no
+  // human identity behind it, and Clerk stays scoped to humans. The namespace
+  // restriction below is kept as well: authentication proves *who* is calling,
+  // not that the caller should be able to forge an "armed" event.
   apiRouter.post(
     "/events",
+    requireServiceSecret(),
     asyncHandler(async (req, res) => {
       const type = req.body?.type;
       const detail = req.body?.detail;
@@ -297,6 +312,7 @@ export function createApp(
 
   apiRouter.put(
     "/planner/knobs/:name",
+    requireControl,
     asyncHandler(async (req, res) => {
       const value = req.body?.value;
       if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -311,6 +327,7 @@ export function createApp(
           name: req.params.name,
           previousValue,
           newValue: knob.value,
+          actor: actorOf(res),
         });
         scheduler?.requestReplan("knob_change");
         res.json({ knob });
@@ -331,6 +348,7 @@ export function createApp(
   if (scheduler !== null) {
     apiRouter.post(
       "/planner/replan",
+      requireControl,
       asyncHandler(async (_req, res) => {
         scheduler.requestReplan("manual");
         res.json({ requested: true });
@@ -426,6 +444,11 @@ if (require.main === module) {
       return migrate(pool).then(() =>
         createApp(
           pool,
+          {
+            clerkJwtKeyPem: config.clerkJwtKeyPem,
+            clerkIssuer: config.clerkIssuer,
+            aiServiceSecret: config.aiServiceSecret,
+          },
           systemClock,
           config,
           { rollupIntervalMs: config.metricsRollupIntervalMs },

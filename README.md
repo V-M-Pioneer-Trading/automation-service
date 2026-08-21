@@ -407,9 +407,47 @@ persisted `window_end`, so there's no gap and no double count.
 | `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
 | `METRICS_ROLLUP_INTERVAL_MS` | Rollup cadence (default `60000`) |
 | `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |
+| `CLERK_JWT_KEY` | Clerk's RS256 public key, PEM/SPKI — literal `\n` escapes are accepted |
+| `CLERK_JWT_KEY_FILE` | Path to that key instead of an inline value; `CLERK_JWT_KEY` wins if both are set. One of the two is **required** |
+| `CLERK_ISSUER` | Expected `iss`, optional — narrows misconfiguration, not a control |
+| `AI_SERVICE_SECRET` | Shared secret for `POST /events` (**required**) |
 
 Which asteroid field to mine is **not** configured — the planner chooses it.
 Tune scoring through knobs, not env vars.
+
+## Authentication
+
+Every `GET` is public. Every mutating route needs a verified Clerk session
+carrying the **`fleet:control`** scope, except `POST /events`, which is a machine
+call from ai-service and uses the `X-Service-Secret` shared secret instead —
+there is no human identity behind it, and Clerk stays scoped to humans.
+
+| | Route | Requires |
+|---|---|---|
+| public | `GET /autopilot/status`, `/autopilot/events`, `/autopilot/ships/:s` | — |
+| public | `GET /planner/knobs`, `/planner/model`, `/metrics/context`, `/anomalies/digest` | — |
+| public | `GET /health`, `/api/automation/health` | — |
+| gated | `POST /autopilot/arm`, `/pause`, `/abort` | `fleet:control` |
+| gated | `PUT /planner/knobs/:name`, `POST /planner/replan` | `fleet:control` |
+| gated | `POST /events` | `X-Service-Secret` |
+
+Verification is **networkless** — the service holds Clerk's public key and checks
+signatures itself, so there is no JWKS fetch on the hot path and no cache to go
+stale. A missing token is `401`; a valid token without the scope is `403`, since
+re-authenticating would not help.
+
+`CLERK_JWT_KEY` and `AI_SERVICE_SECRET` are **required**, with no default and no
+"auth optional" mode. A service that can start without a trust anchor is a
+service that can be deployed with authentication silently off.
+
+Mutating routes stamp `detail.actor` — the Clerk user id — onto the event they
+write, so the audit trail records who armed, paused, aborted or retuned. The id
+only: `eventLog.ts`'s rule that nothing token-shaped enters `detail` still holds.
+
+Tests run this exact code path. `src/testSupport/authTokens.ts` mints an
+ephemeral keypair per test run and signs real tokens with it; `createTestApp`
+hands the public half to `createApp`. Only the trust anchor differs — there is no
+stub verifier and no bypass flag.
 
 ---
 

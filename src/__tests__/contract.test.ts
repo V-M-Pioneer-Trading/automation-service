@@ -2,7 +2,8 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
+import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -231,9 +232,9 @@ describe("automation-service contract loop (meta#11)", () => {
     navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
   });
 
-  let gateways: ReturnType<typeof createApp>[] = [];
+  let gateways: ReturnType<typeof createTestApp>[] = [];
   afterEach(async () => {
-    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => agent.server.close(() => r())),
@@ -243,7 +244,7 @@ describe("automation-service contract loop (meta#11)", () => {
   });
 
   const app = () => {
-    const gateway = createApp(pool, clock, {
+    const gateway = createTestApp(pool, clock, {
       agentServiceUrl: agentUrl,
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
@@ -255,7 +256,7 @@ describe("automation-service contract loop (meta#11)", () => {
     return gateway;
   };
 
-  const waitForEvent = async (gateway: ReturnType<typeof createApp>, type: string, timeoutMs = 6000) => {
+  const waitForEvent = async (gateway: ReturnType<typeof createTestApp>, type: string, timeoutMs = 6000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
@@ -266,7 +267,7 @@ describe("automation-service contract loop (meta#11)", () => {
     throw new Error(`timed out waiting for event ${type}`);
   };
 
-  const waitForTaskPhase = async (gateway: ReturnType<typeof createApp>, phase: string, timeoutMs = 6000) => {
+  const waitForTaskPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, timeoutMs = 6000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
@@ -276,7 +277,7 @@ describe("automation-service contract loop (meta#11)", () => {
     throw new Error(`timed out waiting for phase ${phase}`);
   };
 
-  const waitForWaiting = async (gateway: ReturnType<typeof createApp>, timeoutMs = 3000) => {
+  const waitForWaiting = async (gateway: ReturnType<typeof createTestApp>, timeoutMs = 3000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
@@ -292,7 +293,7 @@ describe("automation-service contract loop (meta#11)", () => {
     purchasePrice = 50_000;
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     const evaluated = await waitForEvent(gateway, "contract_evaluated");
     expect(evaluated.detail.accepted).toBe(false);
@@ -305,7 +306,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("accepts a profitable contract, procures, delivers, and fulfills it without operator input", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     const evaluated = await waitForEvent(gateway, "contract_evaluated");
     expect(evaluated.detail.accepted).toBe(true);
@@ -340,7 +341,7 @@ describe("automation-service contract loop (meta#11)", () => {
     // Contract's default fixture pays 20000 total for 2 cheap units — should trounce mining's flat estimate.
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     await waitForEvent(gateway, "contract_accepted");
     // Waits until the assigned task is a contract — CONTRACT_TRAVEL_TO_MARKET
@@ -357,16 +358,16 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("resumes a contract task from its persisted phase after a restart instead of restarting it", async () => {
     const firstRun = app();
-    await request(firstRun).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(firstRun).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
     await waitForTaskPhase(firstRun, "CONTRACT_PURCHASE");
     await waitForEvent(firstRun, "contract_purchase");
     await waitForTaskPhase(firstRun, "CONTRACT_TRAVEL_TO_DESTINATION");
-    await request(firstRun).post("/api/automation/v1/autopilot/abort");
+    await request(firstRun).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
 
     const callsBeforeRestart = agent.calls.length;
 
     const restarted = app();
-    await request(restarted).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(restarted).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
     expect(task.phase).toBe("CONTRACT_TRAVEL_TO_DESTINATION"); // resumed, not reset to CONTRACT_TRAVEL_TO_MARKET
@@ -383,10 +384,10 @@ describe("automation-service contract loop (meta#11)", () => {
     // assignment resolves straight to CONTRACT_PURCHASE within a tick or two,
     // too narrow a window to reliably set these up afterward.
     const gateway = app();
-    await request(gateway).put("/api/automation/v1/planner/knobs/mine.failureRetryLimit").send({ value: 1 });
+    await request(gateway).put("/api/automation/v1/planner/knobs/mine.failureRetryLimit").set("Authorization", bearer()).send({ value: 1 });
     failPurchase = true;
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     // Pre-fix, cargoAtStake was always true for a contract task (tradeSymbol is
     // set at assignment time, not after a purchase), so this never fires and
@@ -403,7 +404,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("meta#29: an empty cargo hold at delivery time redirects to re-procure instead of delivering 0 units", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     await waitForEvent(gateway, "contract_purchase");
     expect(ship.cargo.inventory.find((i) => i.symbol === "IRON_ORE")?.units).toBe(2);
@@ -432,7 +433,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("meta#30: a crash between marking a contract assigned and saving ship_task rolls back instead of orphaning it", async () => {
     const flakyPool = makeFlakyPool(pool, (sql) => sql.includes("UPDATE ship_task"));
-    const gateway = createApp(flakyPool, clock, {
+    const gateway = createTestApp(flakyPool, clock, {
       agentServiceUrl: agentUrl,
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
@@ -442,7 +443,7 @@ describe("automation-service contract loop (meta#11)", () => {
     });
     gateways.push(gateway);
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     // First assignment attempt hits the simulated failure between the two
     // writes and rolls back — logged, not left half-applied.
@@ -460,7 +461,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("meta#31: a missing contract row surfaces a descriptive error instead of a bare null-deref", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     await waitForTaskPhase(gateway, "CONTRACT_PURCHASE"); // contract assigned, row exists
 
@@ -481,7 +482,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("meta#28: a DB write failure after a successful accept is reconciled on a later tick instead of orphaning the contract", async () => {
     const flakyPool = makeFlakyPool(pool, (sql) => sql.includes("INSERT INTO contract"));
-    const gateway = createApp(flakyPool, clock, {
+    const gateway = createTestApp(flakyPool, clock, {
       agentServiceUrl: agentUrl,
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
@@ -491,7 +492,7 @@ describe("automation-service contract loop (meta#11)", () => {
     });
     gateways.push(gateway);
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     // First tick: acceptContract succeeds upstream (contract.accepted flips to
     // true in the fixture) but the following repo.record insert is the
