@@ -20,7 +20,11 @@
 
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 import { timingSafeEqual } from "crypto";
-import { importSPKI, jwtVerify, type CryptoKey } from "jose";
+// jose v5 rather than v6 deliberately: v6 is ESM-only, and this service's Jest
+// setup runs CommonJS through ts-jest. v6 typechecked fine and then failed to
+// load at test time — `SyntaxError: Unexpected token 'export'` — which is a poor
+// trade for a dependency guarding the security boundary. v5 ships a CJS build.
+import { importSPKI, jwtVerify, type KeyLike } from "jose";
 
 /** Arm, pause, abort, replan, knob writes — everything mutating and reversible. */
 export const SCOPE_FLEET_CONTROL = "fleet:control";
@@ -117,7 +121,7 @@ export function createVerifier(config: AuthConfig): Verifier {
   // Imported once, lazily, and reused. Rejection is cached deliberately: a
   // malformed key should fail every request loudly rather than be retried per
   // call and look like an intermittent auth outage.
-  let keyPromise: Promise<CryptoKey> | null = null;
+  let keyPromise: Promise<KeyLike> | null = null;
   const key = () => {
     keyPromise ??= importSPKI(config.clerkJwtKeyPem, ALGORITHM);
     return keyPromise;

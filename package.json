@@ -17,7 +17,7 @@
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^4.21.2",
-    "jose": "^6.2.9",
+    "jose": "^5.10.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {
