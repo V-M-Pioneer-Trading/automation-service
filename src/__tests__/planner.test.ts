@@ -2,7 +2,8 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
+import { bearer, TEST_SERVICE_SECRET } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -132,10 +133,10 @@ describe("automation-service planner (meta#10)", () => {
     navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
   });
 
-  let gateways: ReturnType<typeof createApp>[] = [];
+  let gateways: ReturnType<typeof createTestApp>[] = [];
 
   afterEach(async () => {
-    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => agent.server.close(() => r())),
@@ -145,7 +146,7 @@ describe("automation-service planner (meta#10)", () => {
   });
 
   const app = () => {
-    const gateway = createApp(pool, clock, {
+    const gateway = createTestApp(pool, clock, {
       agentServiceUrl: agentUrl,
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
@@ -157,7 +158,7 @@ describe("automation-service planner (meta#10)", () => {
     return gateway;
   };
 
-  const waitForAssignment = async (gateway: ReturnType<typeof createApp>, timeoutMs = 2000) => {
+  const waitForAssignment = async (gateway: ReturnType<typeof createTestApp>, timeoutMs = 2000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
@@ -170,7 +171,7 @@ describe("automation-service planner (meta#10)", () => {
   /** An armed gateway, ready to make its first assignment. */
   const armed = async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
     return gateway;
   };
 
@@ -251,14 +252,14 @@ describe("automation-service planner (meta#10)", () => {
     const reserveFloor = listRes.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
     expect(reserveFloor).toMatchObject({ value: 0, default: 0, min: 0 });
 
-    const okRes = await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").send({ value: 1000 });
+    const okRes = await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").set("Authorization", bearer()).send({ value: 1000 });
     expect(okRes.status).toBe(200);
     expect(okRes.body.knob.value).toBe(1000);
 
-    const rangeRes = await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").send({ value: -5 });
+    const rangeRes = await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").set("Authorization", bearer()).send({ value: -5 });
     expect(rangeRes.status).toBe(400);
 
-    const unknownRes = await request(gateway).put("/api/automation/v1/planner/knobs/does.not.exist").send({ value: 1 });
+    const unknownRes = await request(gateway).put("/api/automation/v1/planner/knobs/does.not.exist").set("Authorization", bearer()).send({ value: 1 });
     expect(unknownRes.status).toBe(404);
 
     const persistedRes = await request(gateway).get("/api/automation/v1/planner/knobs");
@@ -281,16 +282,16 @@ describe("automation-service planner (meta#10)", () => {
     const gateway = app();
 
     const okRes = await request(gateway)
-      .post("/api/automation/v1/events")
+      .post("/api/automation/v1/events").set("X-Service-Secret", TEST_SERVICE_SECRET)
       .send({ type: "ai_intervention", detail: { anomalyId: "42", rationale: "raised the failure limit" } });
     expect(okRes.status).toBe(201);
 
     const spoofRes = await request(gateway)
-      .post("/api/automation/v1/events")
+      .post("/api/automation/v1/events").set("X-Service-Secret", TEST_SERVICE_SECRET)
       .send({ type: "armed", detail: {} });
     expect(spoofRes.status).toBe(400);
 
-    const missingPrefixRes = await request(gateway).post("/api/automation/v1/events").send({ type: "intervention" });
+    const missingPrefixRes = await request(gateway).post("/api/automation/v1/events").set("X-Service-Secret", TEST_SERVICE_SECRET).send({ type: "intervention" });
     expect(missingPrefixRes.status).toBe(400);
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
@@ -301,7 +302,7 @@ describe("automation-service planner (meta#10)", () => {
 
   it("assigns the reachable, highest-scoring asteroid field and logs the scoring inputs for replay", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     const task = await waitForAssignment(gateway);
     expect(task.asteroidWaypoint).toBe("X1-TEST-BELT-NEAR");
@@ -329,10 +330,10 @@ describe("automation-service planner (meta#10)", () => {
     const gateway = app();
 
     // Set the floor above what the agent can afford after any candidate's estimated fuel cost.
-    await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").send({ value: 99_999 });
+    await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").set("Authorization", bearer()).send({ value: 99_999 });
     credits = 100_000; // fuel cost > 1 credit for any reachable field, so every candidate would breach the floor
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     // Give the scheduler a few ticks to run and confirm it never assigns.
     await new Promise((r) => setTimeout(r, 200));
@@ -357,7 +358,7 @@ describe("automation-service planner (meta#10)", () => {
     fleetShouldFail = true;
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     await waitForAssignment(gateway); // first assignment happens immediately
 

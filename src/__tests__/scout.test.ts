@@ -2,7 +2,8 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
+import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -139,9 +140,9 @@ describe("automation-service market scouting loop (meta#12)", () => {
     navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
   });
 
-  let gateways: ReturnType<typeof createApp>[] = [];
+  let gateways: ReturnType<typeof createTestApp>[] = [];
   afterEach(async () => {
-    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => agent.server.close(() => r())),
@@ -151,7 +152,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
   });
 
   const app = () => {
-    const gateway = createApp(pool, clock, {
+    const gateway = createTestApp(pool, clock, {
       agentServiceUrl: agentUrl,
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
@@ -163,7 +164,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
     return gateway;
   };
 
-  const waitForEvent = async (gateway: ReturnType<typeof createApp>, type: string, timeoutMs = 6000) => {
+  const waitForEvent = async (gateway: ReturnType<typeof createTestApp>, type: string, timeoutMs = 6000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
@@ -174,7 +175,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
     throw new Error(`timed out waiting for event ${type}`);
   };
 
-  const waitForTaskPhase = async (gateway: ReturnType<typeof createApp>, phase: string, timeoutMs = 6000) => {
+  const waitForTaskPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, timeoutMs = 6000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
@@ -198,7 +199,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
     // Query both scores via a planner_assignment event: arm, wait for one decision.
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     const evt = await waitForEvent(gateway, "planner_assignment");
     // The planner chose mining (only X1-TEST-BELT exists as asteroid), not scouting.
@@ -217,7 +218,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
     // ship starts at X1-TEST-BELT (distance 10 to X1-TEST-MARKET), should be assigned scout.
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     const assignmentEvt = await waitForEvent(gateway, "planner_assignment");
     expect(assignmentEvt.detail.scoutWaypoint).toBe("X1-TEST-MARKET");
@@ -230,7 +231,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
   it("scout task travels to market, docks, calls getMarket, emits scout_market_refresh", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     // Ship is at X1-TEST-BELT (not at the market), so it needs to navigate.
     await waitForTaskPhase(gateway, "SCOUT_TRAVEL");
@@ -246,7 +247,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
   it("after scout_market_refresh, market_intel is recorded and ship is handed back to the planner", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     // Wait for navigate to fire (sets waitingUntil), THEN advance the clock so
     // the wait resolves — same pattern as the FSM test above.

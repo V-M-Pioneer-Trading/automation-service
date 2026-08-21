@@ -2,7 +2,8 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
+import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -247,13 +248,13 @@ describe("automation-service mining loop", () => {
     navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
   });
 
-  let gateways: ReturnType<typeof createApp>[] = [];
+  let gateways: ReturnType<typeof createTestApp>[] = [];
 
   afterEach(async () => {
     // Every scheduler runs a real (unref'd) setInterval; stop each one explicitly
     // so it doesn't keep firing — and hitting the now-closed stub servers or the
     // ended pool — after the test that created it has finished.
-    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => agent.server.close(() => r())),
@@ -263,7 +264,7 @@ describe("automation-service mining loop", () => {
   });
 
   const app = () => {
-    const gateway = createApp(pool, clock, {
+    const gateway = createTestApp(pool, clock, {
       agentServiceUrl: agentUrl,
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
@@ -275,7 +276,7 @@ describe("automation-service mining loop", () => {
     return gateway;
   };
 
-  const waitForPhase = async (gateway: ReturnType<typeof createApp>, phase: string, timeoutMs = 2000) => {
+  const waitForPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, timeoutMs = 2000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
@@ -285,7 +286,7 @@ describe("automation-service mining loop", () => {
     throw new Error(`timed out waiting for phase ${phase}`);
   };
 
-  const waitForWaiting = async (gateway: ReturnType<typeof createApp>, timeoutMs = 2000) => {
+  const waitForWaiting = async (gateway: ReturnType<typeof createTestApp>, timeoutMs = 2000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
@@ -300,7 +301,7 @@ describe("automation-service mining loop", () => {
   // the same phase, e.g. across consecutive EXTRACT cooldowns — waitForWaiting
   // alone would just return instantly on the still-present prior value.
   const waitForNewWait = async (
-    gateway: ReturnType<typeof createApp>,
+    gateway: ReturnType<typeof createTestApp>,
     previousWaitingUntil: string | null,
     timeoutMs = 2000
   ) => {
@@ -317,7 +318,7 @@ describe("automation-service mining loop", () => {
 
   it("runs a full mining cycle: travel, survey, extract, sell, refuel, and loops back", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     // TRAVEL_TO_ASTEROID: ship starts DOCKED elsewhere -> orbit, then navigate.
     await waitForPhase(gateway, "TRAVEL_TO_ASTEROID");
@@ -398,10 +399,10 @@ describe("automation-service mining loop", () => {
 
   it("lets the current wait finish on pause, then idles without dispatching the next action", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     await waitForWaiting(gateway); // mid navigate-to-asteroid
-    await request(gateway).post("/api/automation/v1/autopilot/pause");
+    await request(gateway).post("/api/automation/v1/autopilot/pause").set("Authorization", bearer());
 
     clock.advance(1000); // let the in-flight wait elapse
     await waitForPhase(gateway, "SURVEY"); // pause still lets this one wait resolve
@@ -410,23 +411,23 @@ describe("automation-service mining loop", () => {
     await new Promise((r) => setTimeout(r, 150)); // several scheduler ticks' worth of real time
     expect(fleet.calls.length).toBe(callsAfterResolve); // no new action dispatched while paused and idle
 
-    await request(gateway).post("/api/automation/v1/autopilot/abort");
+    await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
     const statusRes = await request(gateway).get("/api/automation/v1/autopilot/status");
     expect(statusRes.body.status).toBe("aborted");
   }, 10_000);
 
   it("resumes from the persisted phase after a restart instead of starting over", async () => {
     const firstRun = app();
-    await request(firstRun).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(firstRun).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
     await waitForWaiting(firstRun); // navigate to asteroid dispatched
     clock.advance(1000);
     await waitForPhase(firstRun, "SURVEY");
-    await request(firstRun).post("/api/automation/v1/autopilot/abort"); // simulates disarm-on-restart
+    await request(firstRun).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer()); // simulates disarm-on-restart
 
     const callsBeforeRestart = fleet.calls.length;
 
     const restarted = app(); // fresh app instance == fresh process, same DB
-    await request(restarted).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(restarted).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
     expect(task.phase).toBe("SURVEY"); // resumed, not reset to TRAVEL_TO_ASTEROID
@@ -453,9 +454,9 @@ describe("automation-service mining loop", () => {
     );
     const gateway = app();
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
     await new Promise((r) => setTimeout(r, 30)); // let the first tick start (and block on the slow getShip call)
-    await request(gateway).post("/api/automation/v1/autopilot/abort");
+    await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
 
     await new Promise((r) => setTimeout(r, 400)); // let the delayed response land and the tick finish
 
@@ -472,7 +473,7 @@ describe("automation-service mining loop", () => {
     ship = makeShip({ cargo: { units: 0, capacity: 2, inventory: [] } });
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     await waitForPhase(gateway, "TRAVEL_TO_ASTEROID");
     await waitForWaiting(gateway);

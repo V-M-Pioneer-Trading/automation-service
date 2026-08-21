@@ -2,7 +2,8 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
+import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -118,9 +119,9 @@ describe("automation-service fleet replan (meta#13)", () => {
     navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
   });
 
-  let gateways: ReturnType<typeof createApp>[] = [];
+  let gateways: ReturnType<typeof createTestApp>[] = [];
   afterEach(async () => {
-    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort")));
+    await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
       new Promise<void>((r) => agent.server.close(() => r())),
@@ -130,7 +131,7 @@ describe("automation-service fleet replan (meta#13)", () => {
   });
 
   const app = (replanIntervalMs = 300_000, schedulerIntervalMs = 15) => {
-    const gateway = createApp(pool, clock, {
+    const gateway = createTestApp(pool, clock, {
       agentServiceUrl: agentUrl,
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
@@ -142,7 +143,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     return gateway;
   };
 
-  const waitForAssignment = async (gateway: ReturnType<typeof createApp>, timeoutMs = 2000) => {
+  const waitForAssignment = async (gateway: ReturnType<typeof createTestApp>, timeoutMs = 2000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
@@ -152,13 +153,13 @@ describe("automation-service fleet replan (meta#13)", () => {
     throw new Error("timed out waiting for a planner assignment");
   };
 
-  const countReplans = async (gateway: ReturnType<typeof createApp>): Promise<number> => {
+  const countReplans = async (gateway: ReturnType<typeof createTestApp>): Promise<number> => {
     const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=1000");
     return res.body.events.filter((e: { type: string }) => e.type === "replan_executed").length;
   };
 
   const waitForReplanCount = async (
-    gateway: ReturnType<typeof createApp>,
+    gateway: ReturnType<typeof createTestApp>,
     count: number,
     timeoutMs = 2000
   ): Promise<{ type: string; detail: Record<string, unknown> }[]> => {
@@ -174,10 +175,10 @@ describe("automation-service fleet replan (meta#13)", () => {
 
   it("a manual replan request logs a replan_executed event", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
     await waitForAssignment(gateway);
 
-    const res = await request(gateway).post("/api/automation/v1/planner/replan");
+    const res = await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
     expect(res.status).toBe(200);
     expect(res.body.requested).toBe(true);
 
@@ -187,10 +188,10 @@ describe("automation-service fleet replan (meta#13)", () => {
 
   it("a knob change triggers a replan", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
     await waitForAssignment(gateway);
 
-    await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").send({ value: 500 });
+    await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").set("Authorization", bearer()).send({ value: 500 });
 
     const replans = await waitForReplanCount(gateway, 1);
     expect(replans[0].detail.reason).toBe("knob_change");
@@ -198,28 +199,28 @@ describe("automation-service fleet replan (meta#13)", () => {
 
   it("two replan requests inside the debounce window coalesce into one replan", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
     await waitForAssignment(gateway);
 
     // First trigger: runs right away (nothing has ever replanned yet).
-    await request(gateway).post("/api/automation/v1/planner/replan");
+    await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
     await waitForReplanCount(gateway, 1);
 
     // Second trigger, well inside the default 30s debounce window: must NOT
     // produce a second replan_executed while the clock hasn't moved.
-    await request(gateway).post("/api/automation/v1/planner/replan");
+    await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
     await new Promise((r) => setTimeout(r, 200));
     expect(await countReplans(gateway)).toBe(1);
 
     // Advance the clock past the debounce window and trigger again — now it runs.
     clock.advance(31_000);
-    await request(gateway).post("/api/automation/v1/planner/replan");
+    await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
     await waitForReplanCount(gateway, 2);
   }, 10_000);
 
   it("the periodic interval triggers a replan with no external trigger", async () => {
     const gateway = app(2000); // 2s replan interval for this test
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
     await waitForAssignment(gateway);
 
     expect(await countReplans(gateway)).toBe(0); // not due yet, right after arm
@@ -231,11 +232,11 @@ describe("automation-service fleet replan (meta#13)", () => {
 
   it("a ship mid-task keeps its task through a replan; only idle ships are reassigned", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
     const assigned = await waitForAssignment(gateway);
     expect(assigned.asteroidWaypoint).toBe("X1-TEST-BELT");
 
-    await request(gateway).post("/api/automation/v1/planner/replan");
+    await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
     const replans = await waitForReplanCount(gateway, 1);
     // The ship was already assigned (not idle) by the time the replan ran, so
     // the replan had no idle ships to reassign.
@@ -252,7 +253,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     // interval lets the test pin down exactly which tick a replan lands on.
     includeAsteroidField = false;
     const gateway = app(300_000, 1500);
-    await request(gateway).post("/api/automation/v1/autopilot/arm").send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
 
     // Wait for the first natural tick: it creates the ship_task row via
     // getOrCreate and calls assignTarget once through the normal per-ship path
@@ -267,7 +268,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     // run the replan, which considers the still-idle ship. With the fix, that
     // replan's own assignTarget call is tick 2's one atomic action for this
     // ship — the normal per-ship dispatch must NOT also fire for it this tick.
-    await request(gateway).post("/api/automation/v1/planner/replan");
+    await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
     const replans = await waitForReplanCount(gateway, 1, 5000);
     expect(replans[0].detail.shipsConsidered).toBe(1);
 

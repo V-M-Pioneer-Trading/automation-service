@@ -1,6 +1,6 @@
 import request from "supertest";
 import { Pool } from "pg";
-import { createApp } from "../server";
+import { createTestApp } from "../testSupport/createTestApp";
 import { createPool, migrate } from "../db";
 
 describe("automation-service health endpoint", () => {
@@ -18,7 +18,7 @@ describe("automation-service health endpoint", () => {
   it.each(["/health", "/api/automation/health"])(
     "returns 200 ok without requiring a token at %s",
     async (path) => {
-      const res = await request(createApp(pool)).get(path);
+      const res = await request(createTestApp(pool)).get(path);
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ status: "ok" });
@@ -27,7 +27,7 @@ describe("automation-service health endpoint", () => {
   );
 
   it("does not emit an ETag, so a client replaying one from an earlier response can't degrade this to a bodyless 304", async () => {
-    const res = await request(createApp(pool))
+    const res = await request(createTestApp(pool))
       .get("/health")
       .set("If-None-Match", 'W/"stale-etag-from-a-previous-poll"');
 
