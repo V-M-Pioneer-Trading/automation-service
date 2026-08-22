@@ -23,9 +23,9 @@ export async function advanceContractTask(params: {
   unitsRequired: number;
   clients: GameClients;
   clock: Clock;
-  authHeader: string;
+  spaceTradersToken: string;
 }): Promise<TickResult | null> {
-  const { task, ship, contractId, tradeSymbol, procurementMarket, destinationWaypoint, unitsRequired, clients, clock, authHeader } =
+  const { task, ship, contractId, tradeSymbol, procurementMarket, destinationWaypoint, unitsRequired, clients, clock, spaceTradersToken } =
     params;
   const now = clock.now();
 
@@ -36,15 +36,15 @@ export async function advanceContractTask(params: {
 
   switch (task.phase) {
     case "CONTRACT_TRAVEL_TO_MARKET":
-      return travelTo(task, ship, procurementMarket, clients, authHeader, "CONTRACT_PURCHASE", "contract");
+      return travelTo(task, ship, procurementMarket, clients, spaceTradersToken, "CONTRACT_PURCHASE", "contract");
     case "CONTRACT_PURCHASE":
-      return dispatchPurchase(task, ship, tradeSymbol, unitsRequired, clients, authHeader);
+      return dispatchPurchase(task, ship, tradeSymbol, unitsRequired, clients, spaceTradersToken);
     case "CONTRACT_TRAVEL_TO_DESTINATION":
-      return travelTo(task, ship, destinationWaypoint, clients, authHeader, "CONTRACT_DELIVER", "contract");
+      return travelTo(task, ship, destinationWaypoint, clients, spaceTradersToken, "CONTRACT_DELIVER", "contract");
     case "CONTRACT_DELIVER":
-      return dispatchDeliver(task, ship, contractId, tradeSymbol, unitsRequired, clients, authHeader);
+      return dispatchDeliver(task, ship, contractId, tradeSymbol, unitsRequired, clients, spaceTradersToken);
     case "CONTRACT_FULFILL":
-      return dispatchFulfill(task, contractId, clients, authHeader);
+      return dispatchFulfill(task, contractId, clients, spaceTradersToken);
     default:
       return null; // a mining phase reached here would be a caller bug — nothing safe to do but wait
   }
@@ -70,10 +70,10 @@ async function dispatchPurchase(
   tradeSymbol: string,
   unitsRequired: number,
   clients: GameClients,
-  authHeader: string
+  spaceTradersToken: string
 ): Promise<TickResult> {
   if (ship.nav.status !== "DOCKED") {
-    return dock(task, clients, authHeader);
+    return dock(task, clients, spaceTradersToken);
   }
   const remaining = unitsRequired - task.unitsDelivered - ship.cargo.units;
   const units = Math.min(remaining, ship.cargo.capacity - ship.cargo.units);
@@ -85,7 +85,7 @@ async function dispatchPurchase(
       detail: { shipSymbol: task.shipSymbol, reason: "cargo already full" },
     };
   }
-  const res = await clients.purchase(task.shipSymbol, tradeSymbol, units, authHeader);
+  const res = await clients.purchase(task.shipSymbol, tradeSymbol, units, spaceTradersToken);
   return {
     task: { ...withPhase(task, "CONTRACT_TRAVEL_TO_DESTINATION"), tradeSymbol },
     event: "contract_purchase",
@@ -100,10 +100,10 @@ async function dispatchDeliver(
   tradeSymbol: string,
   unitsRequired: number,
   clients: GameClients,
-  authHeader: string
+  spaceTradersToken: string
 ): Promise<TickResult> {
   if (ship.nav.status !== "DOCKED") {
-    return dock(task, clients, authHeader);
+    return dock(task, clients, spaceTradersToken);
   }
   const held = ship.cargo.inventory.find((i) => i.symbol === tradeSymbol)?.units ?? 0;
   const units = Math.min(held, unitsRequired - task.unitsDelivered);
@@ -118,7 +118,7 @@ async function dispatchDeliver(
       detail: { shipSymbol: task.shipSymbol, contractId, tradeSymbol, reason: "cargo hold has none of the contract good" },
     };
   }
-  await clients.deliverContract(contractId, task.shipSymbol, tradeSymbol, units, authHeader);
+  await clients.deliverContract(contractId, task.shipSymbol, tradeSymbol, units, spaceTradersToken);
 
   const unitsDelivered = task.unitsDelivered + units;
   const done = unitsDelivered >= unitsRequired;
@@ -129,8 +129,8 @@ async function dispatchDeliver(
   };
 }
 
-async function dispatchFulfill(task: ShipTask, contractId: string, clients: GameClients, authHeader: string): Promise<TickResult> {
-  await clients.fulfillContract(contractId, authHeader);
+async function dispatchFulfill(task: ShipTask, contractId: string, clients: GameClients, spaceTradersToken: string): Promise<TickResult> {
+  await clients.fulfillContract(contractId, spaceTradersToken);
   return {
     task,
     event: "contract_fulfilled",
@@ -138,7 +138,7 @@ async function dispatchFulfill(task: ShipTask, contractId: string, clients: Game
   };
 }
 
-async function dock(task: ShipTask, clients: GameClients, authHeader: string): Promise<TickResult> {
-  await clients.dock(task.shipSymbol, authHeader);
+async function dock(task: ShipTask, clients: GameClients, spaceTradersToken: string): Promise<TickResult> {
+  await clients.dock(task.shipSymbol, spaceTradersToken);
   return { task, event: "contract_dock", detail: { shipSymbol: task.shipSymbol } };
 }

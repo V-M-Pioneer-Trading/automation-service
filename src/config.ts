@@ -1,4 +1,6 @@
 import { readFileSync } from "fs";
+import { SCOPE_FLEET_CONTROL } from "./auth";
+import { createClerkM2MTokenSource, createLocalM2MTokenSource, M2MTokenSource } from "./m2mToken";
 
 export interface ServiceConfig {
   databaseUrl: string;
@@ -67,6 +69,31 @@ const requireClerkJwtKey = (): string => {
   }
 
   throw new Error("CLERK_JWT_KEY or CLERK_JWT_KEY_FILE must be set");
+};
+
+/**
+ * Same local/production split as `requireClerkJwtKey`, mirrored for the
+ * *outbound* side (auth-design.md decision 19): production passes a real
+ * Clerk Machine Secret Key inline (`CLERK_M2M_SECRET_KEY`); local dev points
+ * at the committed dev-keys private half instead (`DEV_M2M_SIGNING_KEY_FILE`),
+ * so `docker compose up` still needs no Clerk account. Neither has a default
+ * — a missing configuration here should be a loud startup failure, not a
+ * quiet 401 on every mining tick discovered days later.
+ */
+export const resolveM2MTokenSource = (): M2MTokenSource => {
+  const secretKey = process.env.CLERK_M2M_SECRET_KEY;
+  if (secretKey !== undefined && secretKey !== "") {
+    return createClerkM2MTokenSource(secretKey, { scope: SCOPE_FLEET_CONTROL });
+  }
+
+  const path = process.env.DEV_M2M_SIGNING_KEY_FILE;
+  if (path !== undefined && path !== "") {
+    const pem = readFileSync(path, "utf8").trim();
+    if (pem === "") throw new Error(`DEV_M2M_SIGNING_KEY_FILE (${path}) is empty`);
+    return createLocalM2MTokenSource(pem, { scope: SCOPE_FLEET_CONTROL });
+  }
+
+  throw new Error("CLERK_M2M_SECRET_KEY or DEV_M2M_SIGNING_KEY_FILE must be set");
 };
 
 const requireEnv = (name: string): string => {

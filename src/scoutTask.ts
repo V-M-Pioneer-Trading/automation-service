@@ -15,9 +15,9 @@ export async function advanceScoutTask(params: {
   scoutWaypoint: string;
   clients: GameClients;
   clock: Clock;
-  authHeader: string;
+  spaceTradersToken: string;
 }): Promise<TickResult | null> {
-  const { task, ship, scoutWaypoint, clients, clock, authHeader } = params;
+  const { task, ship, scoutWaypoint, clients, clock, spaceTradersToken } = params;
   const now = clock.now();
 
   if (task.waitingUntil !== null) {
@@ -32,9 +32,9 @@ export async function advanceScoutTask(params: {
 
   switch (task.phase) {
     case "SCOUT_TRAVEL":
-      return travelTo(task, ship, scoutWaypoint, clients, authHeader, "SCOUT_REFRESH", "scout");
+      return travelTo(task, ship, scoutWaypoint, clients, spaceTradersToken, "SCOUT_REFRESH", "scout");
     case "SCOUT_REFRESH":
-      return dispatchRefresh(task, ship, scoutWaypoint, clients, authHeader);
+      return dispatchRefresh(task, ship, scoutWaypoint, clients, spaceTradersToken);
     default:
       return null; // a mining or contract phase reached here would be a caller bug
   }
@@ -45,13 +45,13 @@ async function dispatchRefresh(
   ship: ShipSnapshot,
   scoutWaypoint: string,
   clients: GameClients,
-  authHeader: string
+  spaceTradersToken: string
 ): Promise<TickResult> {
   if (ship.nav.status !== "DOCKED") {
-    await clients.dock(task.shipSymbol, authHeader);
+    await clients.dock(task.shipSymbol, spaceTradersToken);
     return { task, event: "scout_dock", detail: { shipSymbol: task.shipSymbol } };
   }
-  const market = await clients.getMarket(scoutWaypoint, authHeader);
+  const market = await clients.getMarket(scoutWaypoint, spaceTradersToken);
   return {
     task,
     event: "scout_market_refresh",

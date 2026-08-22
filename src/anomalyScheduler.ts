@@ -147,7 +147,7 @@ export class AnomalyScheduler {
     const token = this.state.getToken();
     if (token === null) return;
     try {
-      const agent = await this.gameClients.getAgent(`Bearer ${token}`);
+      const agent = await this.gameClients.getAgent(token);
       // stop() may have landed during that (real, potentially slow) HTTP call —
       // re-check before writing, so a leaked in-flight tick can't still persist
       // a snapshot after the scheduler that owns it was told to stop.

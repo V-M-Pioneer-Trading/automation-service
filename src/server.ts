@@ -1,4 +1,5 @@
 import cors from "cors";
+import { generateKeyPairSync } from "crypto";
 import express from "express";
 import { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
@@ -6,13 +7,14 @@ import { AnomalyConfig, AnomalyScheduler } from "./anomalyScheduler";
 import { AuthConfig, actorOf, createVerifier, SCOPE_FLEET_CONTROL } from "./auth";
 import { AutopilotMode, AutopilotState, InvalidTransitionError } from "./autopilotState";
 import { Clock, systemClock } from "./clock";
-import { ServiceConfig, configFromEnv } from "./config";
+import { ServiceConfig, configFromEnv, resolveM2MTokenSource } from "./config";
 import { ContractRepo } from "./contractRepo";
 import { createPool, migrate } from "./db";
 import { MarketIntelRepo } from "./marketIntelRepo";
 import { EventLog } from "./eventLog";
 import { createGameClients, UpstreamCallError } from "./gameClients";
 import { KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
+import { createClerkM2MTokenSource, createLocalM2MTokenSource, M2MTokenSource } from "./m2mToken";
 import { MetricsRepo } from "./metrics";
 import { MetricsScheduler } from "./metricsScheduler";
 import { ObservationRepo } from "./observations";
@@ -62,6 +64,27 @@ const clampLimit = (raw: unknown, fallback: number, max: number): number => {
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
 };
 
+/**
+ * Safety net for a direct `createApp` caller that wires up `mining` without
+ * also supplying `authTokenSource` — the real entrypoint and `createTestApp`
+ * both always supply one explicitly, so this only ever fires as a fallback.
+ * A throwaway keypair generated once per process: gameClients' calls would
+ * still 401 against a real agent/fleet-service (this signs nothing production
+ * trusts), so this fails safe rather than open.
+ */
+let fallback: M2MTokenSource | null = null;
+const fallbackAuthTokenSource = (): M2MTokenSource => {
+  if (fallback === null) {
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    fallback = createLocalM2MTokenSource(privateKey, { scope: SCOPE_FLEET_CONTROL });
+  }
+  return fallback;
+};
+
 export interface MiningConfig {
   navigationServiceUrl: string;
   agentServiceUrl: string;
@@ -83,6 +106,12 @@ export interface MetricsConfig {
  * timer they then have to account for. anomaly: optional likewise; requires a
  * webhook URL to be configured, so a deployment that hasn't set one up yet
  * doesn't get anomaly checks silently trying (and failing) to deliver anywhere.
+ * authTokenSource: only meaningful alongside `mining` — it's what gameClients
+ * presents as `Authorization` on every call to agent/fleet-service (decision
+ * 19). Optional so a direct `createApp` caller that never wires up `mining`
+ * doesn't also have to think about it; falls back to a throwaway local
+ * signer when `mining` is set but this isn't — the real entrypoint below and
+ * `createTestApp` both always supply one explicitly.
  */
 export function createApp(
   pool: Pool,
@@ -91,7 +120,8 @@ export function createApp(
   mining?: MiningConfig,
   metrics?: MetricsConfig,
   anomaly?: AnomalyConfig,
-  corsAllowedOrigin: string = "http://localhost:3000"
+  corsAllowedOrigin: string = "http://localhost:3000",
+  authTokenSource?: M2MTokenSource
 ) {
   // Second and required, ahead of every optional: a caller cannot construct
   // this service without deciding what it trusts. Tests use `createTestApp`,
@@ -121,7 +151,10 @@ export function createApp(
   const contractRepo = new ContractRepo(pool, clock);
 
   const observationRepo = new ObservationRepo(pool, clock);
-  const gameClients = mining !== undefined ? createGameClients(mining) : null;
+  const gameClients =
+    mining !== undefined
+      ? createGameClients({ ...mining, authTokenSource: authTokenSource ?? fallbackAuthTokenSource() })
+      : null;
   const planner = gameClients !== null ? new Planner(gameClients, knobs, observationRepo) : null;
   const marketIntelRepo = new MarketIntelRepo(pool, clock);
 
@@ -453,7 +486,8 @@ if (require.main === module) {
           config,
           { rollupIntervalMs: config.metricsRollupIntervalMs },
           anomalyConfig,
-          config.corsAllowedOrigin
+          config.corsAllowedOrigin,
+          resolveM2MTokenSource()
         ).listen(port, () => {
           console.log(`automation-service listening on http://localhost:${port}`);
         })
