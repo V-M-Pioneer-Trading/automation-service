@@ -98,10 +98,10 @@ export class Planner {
    * and one calibration, and so every task kind is scored against exactly the
    * same snapshot of the world.
    */
-  private async loadContext(systemSymbol: string, authHeader: string): Promise<DecisionContext> {
+  private async loadContext(systemSymbol: string, spaceTradersToken: string): Promise<DecisionContext> {
     const [waypoints, agent, knobs] = await Promise.all([
-      this.clients.getSystemWaypoints(systemSymbol, authHeader),
-      this.clients.getAgent(authHeader),
+      this.clients.getSystemWaypoints(systemSymbol, spaceTradersToken),
+      this.clients.getAgent(spaceTradersToken),
       this.knobs.getValues(),
     ]);
 
@@ -242,16 +242,16 @@ export class Planner {
   async assignTarget(params: {
     ship: ShipSnapshot;
     systemSymbol: string;
-    authHeader: string;
+    spaceTradersToken: string;
     acceptedContracts: ContractRecord[];
     /** Market freshness snapshot — drives scout staleness scoring. */
     marketIntel: MarketIntel[];
     /** Decision time — needed to compute market staleness. */
     now: Date;
   }): Promise<TargetAssignment> {
-    const { ship, systemSymbol, authHeader, acceptedContracts, marketIntel, now } = params;
+    const { ship, systemSymbol, spaceTradersToken, acceptedContracts, marketIntel, now } = params;
 
-    const context = await this.loadContext(systemSymbol, authHeader);
+    const context = await this.loadContext(systemSymbol, spaceTradersToken);
     const { knobs, model, routeWaypoints, credits } = context;
     const miningResult = this.scoreMining(ship, systemSymbol, context);
 
@@ -404,9 +404,9 @@ export class Planner {
     contract: Contract;
     ship: ShipSnapshot;
     systemSymbol: string;
-    authHeader: string;
+    spaceTradersToken: string;
   }): Promise<ContractEvaluation> {
-    const { contract, ship, systemSymbol, authHeader } = params;
+    const { contract, ship, systemSymbol, spaceTradersToken } = params;
     const deliverable = contract.terms.deliver[0];
     if (deliverable === undefined) {
       return {
@@ -417,14 +417,14 @@ export class Planner {
       };
     }
 
-    const context = await this.loadContext(systemSymbol, authHeader);
+    const context = await this.loadContext(systemSymbol, spaceTradersToken);
     const { model, routeWaypoints } = context;
     const marketplaces = context.waypoints.filter(isMarketplace);
 
     // Independent per-marketplace lookups, and this sits on the critical
     // ship-dispatch path — a system with many marketplaces shouldn't pay for
     // them one at a time.
-    const markets = await Promise.all(marketplaces.map((w) => this.clients.getMarket(w.symbol, authHeader)));
+    const markets = await Promise.all(marketplaces.map((w) => this.clients.getMarket(w.symbol, spaceTradersToken)));
     let cheapest: { waypoint: string; price: number } | null = null;
     for (let i = 0; i < marketplaces.length; i++) {
       const good = markets[i].tradeGoods?.find((g) => g.symbol === deliverable.tradeSymbol);

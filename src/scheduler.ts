@@ -225,9 +225,9 @@ export class MiningScheduler {
 
     const token = this.state.getToken();
     if (token === null) return; // disarmed between the status check above and here
-    const authHeader = `Bearer ${token}`;
+    const spaceTradersToken = token;
 
-    const ship = await this.clients.getShip(this.config.shipSymbol, authHeader);
+    const ship = await this.clients.getShip(this.config.shipSymbol, spaceTradersToken);
 
     let result: TickResult | null;
     try {
@@ -253,7 +253,7 @@ export class MiningScheduler {
               unitsRequired: contractRecord!.unitsRequired,
               clients: this.clients,
               clock: this.clock,
-              authHeader,
+              spaceTradersToken,
             })
           : task.taskKind === "scout"
             ? await advanceScoutTask({
@@ -262,7 +262,7 @@ export class MiningScheduler {
                 scoutWaypoint: task.asteroidWaypoint!, // reused: the planner's assigned target
                 clients: this.clients,
                 clock: this.clock,
-                authHeader,
+                spaceTradersToken,
               })
             : await advanceMiningTask({
                 task,
@@ -271,7 +271,7 @@ export class MiningScheduler {
                 asteroidWaypoint: task.asteroidWaypoint!,
                 clients: this.clients,
                 clock: this.clock,
-                authHeader,
+                spaceTradersToken,
               });
     } catch (err) {
       await this.handleTickFailure(task, err);
@@ -367,17 +367,17 @@ export class MiningScheduler {
   private async runShadowCycle(): Promise<void> {
     const token = this.state.getToken();
     if (token === null) return; // disarmed between the status check above and here
-    const authHeader = `Bearer ${token}`;
+    const spaceTradersToken = token;
 
     const [ship, acceptedContracts, marketIntel] = await Promise.all([
-      this.clients.getShip(this.config.shipSymbol, authHeader),
+      this.clients.getShip(this.config.shipSymbol, spaceTradersToken),
       this.contracts.listAccepted(),
       this.marketIntel.getAll(),
     ]);
     const assignment = await this.planner.assignTarget({
       ship,
       systemSymbol: ship.nav.systemSymbol,
-      authHeader,
+      spaceTradersToken,
       acceptedContracts,
       marketIntel,
       now: this.clock.now(),
@@ -394,7 +394,7 @@ export class MiningScheduler {
   private async assignTarget(task: ShipTask): Promise<void> {
     const token = this.state.getToken();
     if (token === null) return; // disarmed between the status check above and here
-    const authHeader = `Bearer ${token}`;
+    const spaceTradersToken = token;
 
     // Catch up on any contract SpaceTraders has on offer that this agent
     // hasn't seen yet before scoring — otherwise a fresh, higher-scoring
@@ -410,21 +410,21 @@ export class MiningScheduler {
         knobs: this.knobs,
         planner: this.planner,
         shipSymbol: task.shipSymbol,
-        authHeader,
+        spaceTradersToken,
       });
     } catch (err) {
       await this.events.append("contract_discovery_error", { message: String(err) });
     }
 
     const [ship, acceptedContracts, marketIntel] = await Promise.all([
-      this.clients.getShip(task.shipSymbol, authHeader),
+      this.clients.getShip(task.shipSymbol, spaceTradersToken),
       this.contracts.listAccepted(),
       this.marketIntel.getAll(),
     ]);
     const assignment = await this.planner.assignTarget({
       ship,
       systemSymbol: ship.nav.systemSymbol,
-      authHeader,
+      spaceTradersToken,
       acceptedContracts,
       marketIntel,
       now: this.clock.now(),

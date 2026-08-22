@@ -28,11 +28,11 @@ export async function discoverAndEvaluateContracts(params: {
   knobs: KnobRepo;
   planner: Planner;
   shipSymbol: string;
-  authHeader: string;
+  spaceTradersToken: string;
 }): Promise<void> {
-  const { repo, events, clients, knobs, planner, shipSymbol, authHeader } = params;
+  const { repo, events, clients, knobs, planner, shipSymbol, spaceTradersToken } = params;
 
-  const [contracts, known] = await Promise.all([clients.getContracts(authHeader), repo.knownIds()]);
+  const [contracts, known] = await Promise.all([clients.getContracts(spaceTradersToken), repo.knownIds()]);
 
   // Contracts SpaceTraders already shows as accepted but this agent has no
   // local row for (meta#28): a prior run's acceptContract call succeeded but
@@ -47,7 +47,7 @@ export async function discoverAndEvaluateContracts(params: {
   if (orphanedAccepted.length === 0 && unseen.length === 0) return;
 
   const [ship, minProfitThreshold] = await Promise.all([
-    clients.getShip(shipSymbol, authHeader),
+    clients.getShip(shipSymbol, spaceTradersToken),
     knobs.get("contract.minProfitThreshold"),
   ]);
 
@@ -55,7 +55,7 @@ export async function discoverAndEvaluateContracts(params: {
     orphanedAccepted.map(async (contract) => {
       const deliverable = contract.terms.deliver[0];
       if (deliverable === undefined) return; // nothing to reconcile without a deliverable to track
-      const evaluation = await planner.evaluateContract({ contract, ship, systemSymbol: ship.nav.systemSymbol, authHeader });
+      const evaluation = await planner.evaluateContract({ contract, ship, systemSymbol: ship.nav.systemSymbol, spaceTradersToken });
       await repo.record({
         contractId: contract.id,
         tradeSymbol: deliverable.tradeSymbol,
@@ -79,7 +79,7 @@ export async function discoverAndEvaluateContracts(params: {
   // rather than paying U sequential evaluation round-trips.
   await Promise.all(
     unseen.map(async (contract) => {
-      const evaluation = await planner.evaluateContract({ contract, ship, systemSymbol: ship.nav.systemSymbol, authHeader });
+      const evaluation = await planner.evaluateContract({ contract, ship, systemSymbol: ship.nav.systemSymbol, spaceTradersToken });
       const profitable = evaluation.procurementMarket !== null && evaluation.expectedProfit > minProfitThreshold;
       const deliverable = contract.terms.deliver[0];
 
@@ -100,7 +100,7 @@ export async function discoverAndEvaluateContracts(params: {
         return;
       }
 
-      await clients.acceptContract(contract.id, authHeader);
+      await clients.acceptContract(contract.id, spaceTradersToken);
       await repo.record({
         contractId: contract.id,
         tradeSymbol: deliverable.tradeSymbol,
