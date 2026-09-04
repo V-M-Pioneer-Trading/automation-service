@@ -277,20 +277,58 @@ describe("automation-service anomaly detection (meta#15)", () => {
     await expectNoAnomaly(gateway, "earnings_stalled", 0); // state is already settled, no wait needed
   }, 10_000);
 
-  it("fires market_stale for a market not repriced within the staleness window, while active markets stay quiet", async () => {
+  it("fires market_stale for an in-use market no ship has read in person within the window, while fresh ones stay quiet", async () => {
+    // Both markets were priced (from afar) for a sell decision just now, so
+    // both are "in active use". What separates them is market_intel: when a
+    // ship of ours last read each one while docked there — the only read
+    // SpaceTraders answers with actual trade goods.
     await pool.query(
       `INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, 'mining_market_selected', $2)`,
-      [new Date(clock.now().getTime() - 45 * 60 * 1000), JSON.stringify({ market: "X1-TEST-STALE", marketsChecked: ["X1-TEST-STALE"] })]
+      [clock.now(), JSON.stringify({ market: "X1-TEST-FRESH", marketsChecked: ["X1-TEST-STALE", "X1-TEST-FRESH", "X1-TEST-NEVER"] })]
     );
-    await pool.query(
-      `INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, 'mining_market_selected', $2)`,
-      [clock.now(), JSON.stringify({ market: "X1-TEST-FRESH", marketsChecked: ["X1-TEST-FRESH"] })]
-    );
+    await pool.query(`INSERT INTO market_intel (waypoint, last_refreshed_at) VALUES ($1, $2), ($3, $4)`, [
+      "X1-TEST-STALE",
+      new Date(clock.now().getTime() - 45 * 60 * 1000),
+      "X1-TEST-FRESH",
+      clock.now(),
+    ]);
     const gateway = app();
-    const anomaly = await waitForAnomaly(gateway, "market_stale");
-    expect(anomaly.detail.market).toBe("X1-TEST-STALE");
+    // Anomalies are persisted one at a time, each followed by its webhook
+    // delivery, so wait for both stale markets rather than the first to land.
+    const deadline = Date.now() + 2000;
+    let flagged: { detail: { market: string; staleMinutes: number | null; lastRefreshedAt: string | null } }[] = [];
+    while (Date.now() < deadline && flagged.length < 2) {
+      const digest = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
+      flagged = digest.body.anomalies.filter((a: { type: string }) => a.type === "market_stale");
+      if (flagged.length < 2) await new Promise((r) => setTimeout(r, 10));
+    }
+    await new Promise((r) => setTimeout(r, 50)); // a few more ticks: FRESH must stay unflagged
     const digest = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
-    expect(digest.body.anomalies.some((a: { detail: { market?: string } }) => a.detail.market === "X1-TEST-FRESH")).toBe(false);
+    flagged = digest.body.anomalies.filter((a: { type: string }) => a.type === "market_stale");
+    const byMarket = Object.fromEntries(flagged.map((a) => [a.detail.market, a.detail]));
+    expect(byMarket["X1-TEST-STALE"].staleMinutes).toBeCloseTo(45);
+    // Never read in person at all: as stale as it gets, reported without a number to be honest about it.
+    expect(byMarket["X1-TEST-NEVER"]).toMatchObject({ staleMinutes: null, lastRefreshedAt: null });
+    expect(byMarket["X1-TEST-FRESH"]).toBeUndefined();
+  }, 10_000);
+
+  it("does not fire ship_idle for a ship inside a long transit, but does once the wait has elapsed with no progress", async () => {
+    // A 30-minute flight is longer than the 10-minute idle threshold. Pre-fix,
+    // the check only looked at updated_at, so every long transit paged.
+    await pool.query(
+      `INSERT INTO ship_task (ship_symbol, phase, asteroid_waypoint, waiting_until, updated_at) VALUES ($1, 'TRAVEL_TO_ASTEROID', 'X1-BELT', $2, $3)`,
+      ["MINING-1", new Date(clock.now().getTime() + 30 * 60 * 1000), clock.now()]
+    );
+    const gateway = app({ withMining: true });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+
+    clock.advance(20 * 60 * 1000); // twenty minutes into the flight
+    await expectNoAnomaly(gateway, "ship_idle");
+
+    clock.advance(21 * 60 * 1000); // the flight ended 11 minutes ago and nothing has moved since
+    const anomaly = await waitForAnomaly(gateway, "ship_idle");
+    expect(anomaly.detail.idleMinutes).toBeGreaterThan(10);
+    expect(anomaly.detail.idleMinutes).toBeLessThan(12);
   }, 10_000);
 
   it("persists an anomaly before delivering it, and retries the webhook with backoff on failure before succeeding", async () => {

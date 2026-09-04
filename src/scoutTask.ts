@@ -1,60 +1,43 @@
-import { Clock } from "./clock";
-import { GameClients, ShipSnapshot } from "./gameClients";
-import { TickResult, travelTo, withPhase } from "./miningTask";
-import { ShipTask } from "./shipTaskRepo";
+import { idleTask } from "./shipTaskRepo";
+import { dockIfNeeded, refuelIfNeeded, requireTarget, resolveWaitIfElapsed, TaskContext, TickResult, travelTo } from "./taskFsm";
 
 /**
- * Advances one ship's scouting FSM by exactly one atomic action per call (meta#12).
- * Two phases: travel to the target market, then dock and call getMarket to refresh
- * the intel cache. Travel reuses miningTask's travelTo helper — behavior is identical
- * regardless of what the ship is traveling for.
+ * SCOUT_TRAVEL → SCOUT_REFRESH → idle
+ *
+ * Fly to the target market, dock, and read its prices — SpaceTraders only
+ * reports trade goods to a ship that is physically there, which is what makes
+ * this a refresh rather than a cache read. The scout target rides in
+ * `task.asteroidWaypoint`, the column every task kind uses for "where the
+ * planner sent me".
  */
-export async function advanceScoutTask(params: {
-  task: ShipTask;
-  ship: ShipSnapshot;
-  scoutWaypoint: string;
-  clients: GameClients;
-  clock: Clock;
-  authHeader: string;
-}): Promise<TickResult | null> {
-  const { task, ship, scoutWaypoint, clients, clock, authHeader } = params;
-  const now = clock.now();
+export async function advanceScoutTask(ctx: TaskContext): Promise<TickResult | null> {
+  const waiting = resolveWaitIfElapsed(ctx, "scout");
+  if (waiting !== undefined) return waiting;
 
-  if (task.waitingUntil !== null) {
-    if (now < task.waitingUntil) return null;
-    const next: ShipTask["phase"] = task.phase === "SCOUT_TRAVEL" ? "SCOUT_REFRESH" : task.phase;
-    return {
-      task: withPhase(task, next),
-      event: "scout_wait_resolved",
-      detail: { shipSymbol: task.shipSymbol, from: task.phase, to: next },
-    };
-  }
-
-  switch (task.phase) {
+  const market = requireTarget(ctx.task.asteroidWaypoint, "scout target");
+  switch (ctx.task.phase) {
     case "SCOUT_TRAVEL":
-      return travelTo(task, ship, scoutWaypoint, clients, authHeader, "SCOUT_REFRESH", "scout");
+      return travelTo(ctx, market, "SCOUT_REFRESH", "scout");
     case "SCOUT_REFRESH":
-      return dispatchRefresh(task, ship, scoutWaypoint, clients, authHeader);
+      return dispatchRefresh(ctx, market);
     default:
-      return null; // a mining or contract phase reached here would be a caller bug
+      throw new Error(`scout task cannot advance from phase ${ctx.task.phase}`);
   }
 }
 
-async function dispatchRefresh(
-  task: ShipTask,
-  ship: ShipSnapshot,
-  scoutWaypoint: string,
-  clients: GameClients,
-  authHeader: string
-): Promise<TickResult> {
-  if (ship.nav.status !== "DOCKED") {
-    await clients.dock(task.shipSymbol, authHeader);
-    return { task, event: "scout_dock", detail: { shipSymbol: task.shipSymbol } };
-  }
-  const market = await clients.getMarket(scoutWaypoint, authHeader);
+async function dispatchRefresh(ctx: TaskContext, market: string): Promise<TickResult> {
+  const { task, clients, authHeader } = ctx;
+  const docking = await dockIfNeeded(ctx, "scout");
+  if (docking !== null) return docking;
+  // Already docked at a marketplace: the cheapest possible moment to top up.
+  const refuel = await refuelIfNeeded(ctx, "scout");
+  if (refuel !== null) return refuel;
+
+  const data = await clients.getMarket(market, authHeader);
   return {
-    task,
+    task: idleTask(task),
     event: "scout_market_refresh",
-    detail: { shipSymbol: task.shipSymbol, waypoint: scoutWaypoint, tradeGoodsCount: market.tradeGoods?.length ?? 0 },
+    detail: { shipSymbol: task.shipSymbol, waypoint: market, tradeGoodsCount: data.tradeGoods?.length ?? 0 },
+    observations: { marketsRefreshed: [market] },
   };
 }

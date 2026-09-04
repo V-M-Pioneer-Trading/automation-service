@@ -42,8 +42,11 @@ That's the whole model. It lives in [`src/scoring.ts`](src/scoring.ts) as pure
 functions with no I/O, which is what lets it be unit-tested directly and
 re-run over history (see [Replaying decisions](#replaying-decisions)).
 
-Two rules apply before any of it matters:
+Three rules apply before any of it matters:
 
+- **Nothing that earns nothing.** A score at or below zero is not a candidate.
+  That is what makes `mine.taskWeight = 0` an off switch rather than a
+  demotion, and what keeps a contract that can only lose money on the ground.
 - **Cash floor.** Work whose estimated cost would drop credits below
   `credit.reserveFloor` is removed from consideration, not scored against. If
   everything reachable would breach it, the ship deliberately idles. Running out
@@ -90,7 +93,7 @@ own history** ([`src/observations.ts`](src/observations.ts)):
 | Credits per mining cycle, **per field** | Every completed cycle: what it sold, at which field |
 | Ship speed | Real flights — the game reports both endpoints' coordinates and both timestamps |
 | Fixed cycle overhead | Measured cycle time minus the travel that cycle's distance accounts for |
-| Fuel credits per unit distance | Real refuel purchases, against the distance they paid for |
+| Fuel credits per unit distance | Real refuel purchases: credits paid per unit bought, and a unit of fuel is a unit of distance in cruise flight |
 
 Older observations count for less, on a half-life set by
 `observation.halfLifeHours` — so a field that has got better recently outweighs
@@ -206,6 +209,12 @@ resolve one elapsed wait, or get one planner assignment. Never two. That
 granularity is a safety property, not an optimisation: it's what lets *pause*
 take effect cleanly between actions instead of killing something mid-flight.
 
+The three machines share their travel, docking and refuelling steps
+([`src/taskFsm.ts`](src/taskFsm.ts)), and every one of them **refuels at every
+marketplace it docks at** — the sell market, the procurement market, the
+scouted market. No task hands a ship back to the planner too dry to reach
+anything.
+
 ### Mining
 
 ```
@@ -225,9 +234,13 @@ gets smarter.
 ### Contracts
 
 ```
-CONTRACT_TRAVEL_TO_MARKET → CONTRACT_PURCHASE → CONTRACT_TRAVEL_TO_DESTINATION
-  → CONTRACT_DELIVER → CONTRACT_FULFILL
+CONTRACT_TRAVEL_TO_MARKET → (refuel) → CONTRACT_PURCHASE → CONTRACT_TRAVEL_TO_DESTINATION
+  → CONTRACT_DELIVER → CONTRACT_FULFILL → done
 ```
+
+Each trip buys as much of the contract's good as the hold has room for, counting
+only that good toward what's still owed, and loops back to the market while
+units remain.
 
 Right before every assignment decision, any contract not yet seen is discovered
 and evaluated: cheapest in-system market selling the deliverable, fuel-aware
@@ -243,7 +256,7 @@ contracts are additive, never a dependency.
 ### Scouting
 
 ```
-SCOUT_TRAVEL → SCOUT_REFRESH
+SCOUT_TRAVEL → SCOUT_REFRESH (dock, refuel, read the market) → done
 ```
 
 Market prices age, and a planner deciding on stale prices decides blind.
@@ -252,6 +265,15 @@ grows linearly with staleness and drops to zero the moment it's refreshed, so
 the planner rotates through markets on its own — no cooldown or round-robin
 needed. A market never seen is treated as ten thresholds stale: high priority,
 but finite.
+
+**Freshness is one store**, `market_intel`, written whenever a ship of ours
+reads a market *while docked there* — a scout's refresh, or a miner pricing the
+market it is about to sell at. SpaceTraders only reports trade goods to a ship
+that is present, so that is the only read that actually refreshes anything;
+the sell leg's comparison of every market from afar is a cache read and doesn't
+count. The planner scouts against this store and the `market_stale` alert
+reads it too, so a market the miner just sold at is fresh to both, and neither
+can call stale what the other calls fresh.
 
 ### When a target keeps failing
 
@@ -299,11 +321,11 @@ armed — a broken ship stays worth reporting while an operator investigates.
 
 | Check | Fires when |
 |---|---|
-| `ship_idle` | A ship's task hasn't changed phase in N minutes (while armed and live) |
+| `ship_idle` | A ship's task hasn't progressed in N minutes (while armed and live). Time inside a flight or cooldown it was told to wait out doesn't count, so a long transit never pages |
 | `earnings_stalled` | The money stopped: the hourly rate collapsed against its own history, **or** credits show no net increase across a window |
 | `consecutive_failures` | One ship accumulates N consecutive failures |
 | `error_rate` | The error fraction of recent mining events exceeds a threshold |
-| `market_stale` | A market in active use hasn't been repriced in N minutes |
+| `market_stale` | A market the sell leg priced in the last 24h hasn't been read in person by a ship within N minutes (or ever) |
 
 `earnings_stalled` covers what used to be two separate checks (`profit_drop`
 and `credits_flat`). They're two ways of measuring one thing — a fleet that
@@ -356,7 +378,7 @@ All routes are under `/api/automation/v1`. `/health` is unversioned.
 
 | | |
 |---|---|
-| `POST /autopilot/arm` | `{ token, mode? }` — `mode` is `"live"` (default) or `"shadow"`. Holds the token **in memory only**; a restart always disarms. Valid from any status. |
+| `POST /autopilot/arm` | `{ token, mode? }` — `mode` is `"live"` (default) or `"shadow"`. Holds the token **in memory only**; a restart always disarms. Valid from any status, including after an abort. |
 | `POST /autopilot/pause` | Lets an already-dispatched wait finish and be recorded, then stops dispatching. Armed only. |
 | `POST /autopilot/abort` | Clears the token and stops immediately. An action already in flight can't be un-sent, so its result is discarded and marked, not silently applied. |
 | `GET /autopilot/status` | Current status and mode (`mode` is `null` whenever no token is held). |
@@ -413,7 +435,9 @@ persisted `window_end`, so there's no gap and no double count.
 | `AI_SERVICE_SECRET` | Shared secret for `POST /events` (**required**) |
 
 Which asteroid field to mine is **not** configured — the planner chooses it.
-Tune scoring through knobs, not env vars.
+Tune scoring through knobs, not env vars. Every `*_MS` value and `PORT` must
+be a positive number; a malformed one refuses to start rather than turning
+into a timer that fires every millisecond.
 
 ## Authentication
 
@@ -478,6 +502,22 @@ it disabled, so a third bidder doesn't quietly change what they're asserting.
 
 [`src/scoring.ts`](src/scoring.ts) has no I/O and is tested directly — start
 there if you want to understand or change what the autopilot optimises for.
+The task state machines ([`src/taskFsm.ts`](src/taskFsm.ts) and the three
+`*Task.ts` files) have no database access either: they take a ship and a task
+and return the next task, and `taskFsm.test.ts` drives them with a fake game
+client, no Postgres and no stub servers.
+
+A map of the rest:
+
+| File | Owns |
+|---|---|
+| `scheduler.ts` | `FleetScheduler` — the tick: replan, assign, advance one task, persist |
+| `planner.ts` | Scoring every kind of work against one snapshot of the world |
+| `contractDiscovery.ts` | Seeing, evaluating and accepting contracts, inline before each decision |
+| `observations.ts` | What the fleet has measured, and the calibrated model built from it |
+| `anomaly.ts`, `anomalyScheduler.ts` | The health checks; persisting, deduping and delivering what they find |
+| `intervalLoop.ts` | The one guarded interval every scheduler runs on: one tick at a time, draining stop, restartable |
+| `knobs.ts` | `KNOB_DEFINITIONS` — also the source of the `KnobName` type, so a mistyped knob is a compile error |
 
 ---
 
@@ -493,27 +533,27 @@ Everything the implementation deliberately doesn't do yet, in one place.
 - **One system.** Every candidate must be in the ship's current system.
 - **Contracts evaluate only their first deliverable.** Multi-good contracts
   aren't supported.
-- **Contract purchase quantity** assumes the whole hold belongs to the
-  contract's good. True for a ship that arrives empty (mining always sells out
-  first), wrong if a ship ever carried something unrelated into a contract task.
+- **Shadow mode doesn't discover contracts.** Accepting one is a real mutation,
+  so a shadow preview scores only contracts already accepted; live mode would
+  also have evaluated anything new on offer.
 
 **Model**
 
-- **Fuel cost is usually a prior.** It's only measured when a refuel response
-  reports a transaction price; otherwise `fuel.creditsPerUnitDistancePrior`
-  stands. It affects the reserve-floor safety margin, not scoring order.
-- **A fuel observation assumes the cycle started on a full tank**, since it
-  divides the refuel price by the distance flown that cycle. True from the
-  second cycle onward (every cycle ends by refuelling), but a ship's first
-  cycle after arming can start part-full and will overstate the cost per unit
-  distance. The error is conservative — it widens the cash safety margin — and
-  decays out as later cycles are observed.
+- **Fuel cost is measured only from refuels that report their transaction**
+  (units and price). A response without one still refuels the ship and teaches
+  nothing; `fuel.creditsPerUnitDistancePrior` stands until one does. It affects
+  the reserve-floor safety margin, not scoring order.
+- **Fuel units are taken to equal distance**, which holds in cruise flight, the
+  mode every navigate here uses. A fleet flown in burn or drift would measure
+  fuel cost per unit of distance wrongly by a constant factor.
 - **Routing is really a reachability check.** Every waypoint is directly
   reachable from every other and legs cost Euclidean distance, so the direct hop
   is always shortest — the search only does interesting work when the direct hop
   is out of fuel range.
 - **Fuel stations are inferred** from the `MARKETPLACE` trait, without
-  confirming the market actually stocks fuel.
+  confirming the market actually stocks fuel. Routing and the refuel-at-every-
+  market rule both lean on it: a marketplace that doesn't sell fuel makes the
+  refuel there fail, which counts against the task's retry budget.
 - **The mining sell leg has no route-cost awareness.** "Best market" means best
   price in the same system, not best price net of getting there.
 - **A field's revenue is measured, not predicted.** The model learns what a

@@ -1,88 +1,67 @@
-import { Clock } from "./clock";
-import { GameClients, ShipSnapshot } from "./gameClients";
-import { TickResult, travelTo, withPhase } from "./miningTask";
-import { ShipTask } from "./shipTaskRepo";
+import { ContractRecord } from "./contractRepo";
+import { idleTask } from "./shipTaskRepo";
+import {
+  dockIfNeeded,
+  refuelIfNeeded,
+  requireTarget,
+  resolveWaitIfElapsed,
+  TaskContext,
+  TickResult,
+  travelTo,
+  withPhase,
+} from "./taskFsm";
 
 /**
- * Advances one ship's contract FSM by exactly one atomic action per call, same
- * granularity guarantee as advanceMiningTask (meta#9). Travel/dock steps reuse
- * miningTask.ts's helpers — a ship traveling for a contract behaves identically
- * to one traveling to mine, only the destination and what happens on arrival differ.
+ * CONTRACT_TRAVEL_TO_MARKET → CONTRACT_PURCHASE → CONTRACT_TRAVEL_TO_DESTINATION
+ *   → CONTRACT_DELIVER → CONTRACT_FULFILL → idle
  *
- * v1 simplification: assumes a single deliverable per contract and buys/delivers
- * up to cargo capacity per round trip, looping back through CONTRACT_TRAVEL_TO_MARKET
- * if more units are still needed after a delivery — see README.
+ * Buys and delivers up to cargo capacity per round trip, looping back through
+ * CONTRACT_TRAVEL_TO_MARKET while units are still owed. Only the contract's
+ * first deliverable is worked — see README.
  */
-export async function advanceContractTask(params: {
-  task: ShipTask;
-  ship: ShipSnapshot;
-  contractId: string;
-  tradeSymbol: string;
-  procurementMarket: string;
-  destinationWaypoint: string;
-  unitsRequired: number;
-  clients: GameClients;
-  clock: Clock;
-  authHeader: string;
-}): Promise<TickResult | null> {
-  const { task, ship, contractId, tradeSymbol, procurementMarket, destinationWaypoint, unitsRequired, clients, clock, authHeader } =
-    params;
-  const now = clock.now();
+export async function advanceContractTask(ctx: TaskContext & { contract: ContractRecord }): Promise<TickResult | null> {
+  const waiting = resolveWaitIfElapsed(ctx, "contract");
+  if (waiting !== undefined) return waiting;
 
-  if (task.waitingUntil !== null) {
-    if (now < task.waitingUntil) return null; // still waiting
-    return resolveWait(task);
-  }
-
-  switch (task.phase) {
+  const { contract } = ctx;
+  switch (ctx.task.phase) {
     case "CONTRACT_TRAVEL_TO_MARKET":
-      return travelTo(task, ship, procurementMarket, clients, authHeader, "CONTRACT_PURCHASE", "contract");
+      return travelTo(ctx, requireTarget(contract.procurementMarket, "procurementMarket"), "CONTRACT_PURCHASE", "contract");
     case "CONTRACT_PURCHASE":
-      return dispatchPurchase(task, ship, tradeSymbol, unitsRequired, clients, authHeader);
+      return dispatchPurchase(ctx, contract);
     case "CONTRACT_TRAVEL_TO_DESTINATION":
-      return travelTo(task, ship, destinationWaypoint, clients, authHeader, "CONTRACT_DELIVER", "contract");
+      return travelTo(ctx, contract.destinationWaypoint, "CONTRACT_DELIVER", "contract");
     case "CONTRACT_DELIVER":
-      return dispatchDeliver(task, ship, contractId, tradeSymbol, unitsRequired, clients, authHeader);
+      return dispatchDeliver(ctx, contract);
     case "CONTRACT_FULFILL":
-      return dispatchFulfill(task, contractId, clients, authHeader);
+      return dispatchFulfill(ctx, contract);
     default:
-      return null; // a mining phase reached here would be a caller bug — nothing safe to do but wait
+      throw new Error(`contract task cannot advance from phase ${ctx.task.phase}`);
   }
 }
 
-function resolveWait(task: ShipTask): TickResult {
-  const next: ShipTask["phase"] =
-    task.phase === "CONTRACT_TRAVEL_TO_MARKET"
-      ? "CONTRACT_PURCHASE"
-      : task.phase === "CONTRACT_TRAVEL_TO_DESTINATION"
-        ? "CONTRACT_DELIVER"
-        : task.phase; // CONTRACT_PURCHASE/DELIVER/FULFILL never wait themselves
-  return {
-    task: withPhase(task, next),
-    event: "contract_wait_resolved",
-    detail: { shipSymbol: task.shipSymbol, from: task.phase, to: next },
-  };
-}
+const heldUnits = (ctx: TaskContext, tradeSymbol: string): number =>
+  ctx.ship.cargo.inventory.find((i) => i.symbol === tradeSymbol)?.units ?? 0;
 
-async function dispatchPurchase(
-  task: ShipTask,
-  ship: ShipSnapshot,
-  tradeSymbol: string,
-  unitsRequired: number,
-  clients: GameClients,
-  authHeader: string
-): Promise<TickResult> {
-  if (ship.nav.status !== "DOCKED") {
-    return dock(task, clients, authHeader);
-  }
-  const remaining = unitsRequired - task.unitsDelivered - ship.cargo.units;
-  const units = Math.min(remaining, ship.cargo.capacity - ship.cargo.units);
+async function dispatchPurchase(ctx: TaskContext, contract: ContractRecord): Promise<TickResult> {
+  const { task, ship, clients, authHeader } = ctx;
+  const docking = await dockIfNeeded(ctx, "contract");
+  if (docking !== null) return docking;
+  // The procurement market is the one guaranteed fuel stop on this loop; leave
+  // it full so the delivery leg can't strand the ship somewhere without fuel.
+  const refuel = await refuelIfNeeded(ctx, "contract");
+  if (refuel !== null) return refuel;
+
+  const { tradeSymbol } = contract;
+  // Only the contract's own good counts toward what's owed; unrelated cargo
+  // merely takes up room in the hold.
+  const owed = contract.unitsRequired - task.unitsDelivered - heldUnits(ctx, tradeSymbol);
+  const units = Math.min(owed, ship.cargo.capacity - ship.cargo.units);
   if (units <= 0) {
-    // Cargo already holds everything this trip can carry toward the contract.
     return {
       task: { ...withPhase(task, "CONTRACT_TRAVEL_TO_DESTINATION"), tradeSymbol },
       event: "contract_purchase_skipped",
-      detail: { shipSymbol: task.shipSymbol, reason: "cargo already full" },
+      detail: { shipSymbol: task.shipSymbol, reason: owed <= 0 ? "cargo already holds what's owed" : "cargo full" },
     };
   }
   const res = await clients.purchase(task.shipSymbol, tradeSymbol, units, authHeader);
@@ -93,20 +72,13 @@ async function dispatchPurchase(
   };
 }
 
-async function dispatchDeliver(
-  task: ShipTask,
-  ship: ShipSnapshot,
-  contractId: string,
-  tradeSymbol: string,
-  unitsRequired: number,
-  clients: GameClients,
-  authHeader: string
-): Promise<TickResult> {
-  if (ship.nav.status !== "DOCKED") {
-    return dock(task, clients, authHeader);
-  }
-  const held = ship.cargo.inventory.find((i) => i.symbol === tradeSymbol)?.units ?? 0;
-  const units = Math.min(held, unitsRequired - task.unitsDelivered);
+async function dispatchDeliver(ctx: TaskContext, contract: ContractRecord): Promise<TickResult> {
+  const { task, clients, authHeader } = ctx;
+  const docking = await dockIfNeeded(ctx, "contract");
+  if (docking !== null) return docking;
+
+  const { contractId, tradeSymbol, unitsRequired } = contract;
+  const units = Math.min(heldUnits(ctx, tradeSymbol), unitsRequired - task.unitsDelivered);
   if (units <= 0) {
     // Cargo hold has none of the contract good (sold off-target, or a
     // different good was extracted) — dispatching deliver with 0 units would
@@ -129,16 +101,14 @@ async function dispatchDeliver(
   };
 }
 
-async function dispatchFulfill(task: ShipTask, contractId: string, clients: GameClients, authHeader: string): Promise<TickResult> {
-  await clients.fulfillContract(contractId, authHeader);
+async function dispatchFulfill(ctx: TaskContext, contract: ContractRecord): Promise<TickResult> {
+  const { task, clients, authHeader } = ctx;
+  await clients.fulfillContract(contract.contractId, authHeader);
+  // Idle hands the ship back to the planner on its very next tick — mining, or
+  // the next accepted contract, whichever scores higher.
   return {
-    task,
+    task: idleTask(task),
     event: "contract_fulfilled",
-    detail: { shipSymbol: task.shipSymbol, contractId },
+    detail: { shipSymbol: task.shipSymbol, contractId: contract.contractId },
   };
-}
-
-async function dock(task: ShipTask, clients: GameClients, authHeader: string): Promise<TickResult> {
-  await clients.dock(task.shipSymbol, authHeader);
-  return { task, event: "contract_dock", detail: { shipSymbol: task.shipSymbol } };
 }

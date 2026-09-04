@@ -10,19 +10,24 @@ export type ContractPhase =
   | "CONTRACT_DELIVER"
   | "CONTRACT_FULFILL";
 export type ScoutPhase = "SCOUT_TRAVEL" | "SCOUT_REFRESH";
+export type TaskPhase = MiningPhase | ContractPhase | ScoutPhase;
 export type TaskKind = "mining" | "contract" | "scout";
 
 export interface ShipTask {
   shipSymbol: string;
   taskKind: TaskKind;
-  phase: MiningPhase | ContractPhase | ScoutPhase;
+  phase: TaskPhase;
   waitingUntil: Date | null;
   survey: SurveyData | null;
   /** Mining: the extracted good. Contract: the deliverable good. */
   tradeSymbol: string | null;
   /** Mining: the sell market. Contract: the procurement market. */
   marketWaypoint: string | null;
-  /** Null whenever the ship needs a fresh assignment from the planner: a brand new task, or the moment a cycle completes. */
+  /**
+   * Where the planner sent the ship: an asteroid field to mine, or a market to
+   * scout. Null whenever the ship needs a fresh assignment — a brand new task,
+   * or the moment its last one completed. See `isIdle`.
+   */
   asteroidWaypoint: string | null;
   /** Consecutive tick failures against the current target; resets on any successful tick. */
   failureCount: number;
@@ -45,6 +50,35 @@ export interface ShipTask {
   updatedAt: Date;
 }
 
+/** A ship with no assigned target — the only kind the planner (and a replan) will touch. */
+export const isIdle = (task: ShipTask): boolean => task.asteroidWaypoint === null && task.contractId === null;
+
+/**
+ * The blank slate a ship returns to whenever it needs a fresh planner
+ * assignment: every completed task, every abandoned one, and the base every
+ * new assignment is written on top of. Resets the cycle tallies too — a new
+ * assignment starts a new cycle, and carrying the previous one's revenue
+ * forward would corrupt the observation written when this one completes.
+ */
+export const idleTask = (task: ShipTask): ShipTask => ({
+  ...task,
+  taskKind: "mining",
+  phase: "TRAVEL_TO_ASTEROID",
+  waitingUntil: null,
+  survey: null,
+  tradeSymbol: null,
+  marketWaypoint: null,
+  asteroidWaypoint: null,
+  contractId: null,
+  destinationWaypoint: null,
+  unitsDelivered: 0,
+  failureCount: 0,
+  cycleStartedAt: null,
+  cycleRevenue: 0,
+  cycleTravelDistance: 0,
+  cycleUnitsExtracted: 0,
+});
+
 const TASK_COLUMNS = `ship_symbol, task_kind, phase, waiting_until, survey, trade_symbol, market_waypoint,
        asteroid_waypoint, failure_count, contract_id, destination_waypoint, units_delivered,
        cycle_started_at, cycle_revenue, cycle_travel_distance, cycle_units_extracted, updated_at`;
@@ -52,7 +86,7 @@ const TASK_COLUMNS = `ship_symbol, task_kind, phase, waiting_until, survey, trad
 function rowToTask(row: {
   ship_symbol: string;
   task_kind: TaskKind;
-  phase: MiningPhase | ContractPhase | ScoutPhase;
+  phase: TaskPhase;
   waiting_until: Date | null;
   survey: SurveyData | null;
   trade_symbol: string | null;
@@ -91,8 +125,8 @@ function rowToTask(row: {
 
 export class ShipTaskRepo {
   // Pool | PoolClient (not just Pool) so callers can pass a transaction's
-  // checked-out client (see db.ts's withTransaction) to make this write part
-  // of a larger atomic transaction.
+  // checked-out client (see transaction.ts) to make this write part of a
+  // larger atomic transaction.
   constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
   async getOrCreate(shipSymbol: string): Promise<ShipTask> {

@@ -352,6 +352,21 @@ describe("automation-service planner (meta#10)", () => {
     expect(allBreach).toBe(true);
   });
 
+  it("idles rather than mining when mine.taskWeight is 0, so the knob really is an off switch", async () => {
+    const gateway = app();
+    await request(gateway).put("/api/automation/v1/planner/knobs/mine.taskWeight").set("Authorization", bearer()).send({ value: 0 });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Pre-fix a zero-weight field scored 0, which still beat "nothing else on
+    // offer" and got assigned — the weight demoted mining instead of disabling it.
+    const task = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
+    expect(task.asteroidWaypoint).toBeNull();
+    const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
+    expect(eventsRes.body.events.map((e: { type: string }) => e.type)).toContain("planner_no_viable_target");
+  });
+
   it("reassigns away from a target after it fails repeatedly, without a separate periodic planner sweep", async () => {
     // Every fleet-service call errors, so the ship can never progress past dispatching
     // orbit/navigate against its assigned target.

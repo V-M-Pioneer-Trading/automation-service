@@ -1,14 +1,14 @@
 import { readFileSync } from "fs";
 
 export interface ServiceConfig {
+  port: number;
   databaseUrl: string;
   navigationServiceUrl: string;
   agentServiceUrl: string;
   fleetServiceUrl: string;
-  // Tracer-bullet simplification (meta#9, still true post-meta#10): the mining
-  // loop drives one pre-configured ship. Which asteroid field it mines is now
-  // chosen dynamically by the planner (meta#10); fleet-wide multi-ship
-  // dispatch is still future work.
+  // Tracer-bullet simplification (meta#9, still true post-meta#10): the task
+  // loop drives one pre-configured ship. What that ship does is chosen by the
+  // planner; fleet-wide multi-ship dispatch is still future work.
   miningShipSymbol: string;
   // How often the scheduler checks whether a ship's current wait has elapsed.
   // Real deploys want seconds; tests want this near-instant.
@@ -77,17 +77,33 @@ const requireEnv = (name: string): string => {
   return value;
 };
 
+/**
+ * A positive number, or the fallback when unset. Anything else is refused at
+ * boot: `Number("5s")` is `NaN`, and `setInterval(fn, NaN)` fires every
+ * millisecond, which is a far worse failure than not starting.
+ */
+const positiveNumberEnv = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive number, got "${raw}"`);
+  }
+  return value;
+};
+
 export const configFromEnv = (): ServiceConfig => ({
+  port: positiveNumberEnv("PORT", 3003),
   databaseUrl: requireEnv("DATABASE_URL"),
   navigationServiceUrl: requireEnv("NAVIGATION_SERVICE_URL"),
   agentServiceUrl: requireEnv("AGENT_SERVICE_URL"),
   fleetServiceUrl: requireEnv("FLEET_SERVICE_URL"),
   miningShipSymbol: requireEnv("MINING_SHIP_SYMBOL"),
-  schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 5000),
-  replanIntervalMs: Number(process.env.REPLAN_INTERVAL_MS ?? 300_000),
-  metricsRollupIntervalMs: Number(process.env.METRICS_ROLLUP_INTERVAL_MS ?? 60_000),
+  schedulerIntervalMs: positiveNumberEnv("SCHEDULER_INTERVAL_MS", 5000),
+  replanIntervalMs: positiveNumberEnv("REPLAN_INTERVAL_MS", 300_000),
+  metricsRollupIntervalMs: positiveNumberEnv("METRICS_ROLLUP_INTERVAL_MS", 60_000),
   anomalyWebhookUrl: process.env.ANOMALY_WEBHOOK_URL ?? null,
-  anomalyIntervalMs: Number(process.env.ANOMALY_INTERVAL_MS ?? 60_000),
+  anomalyIntervalMs: positiveNumberEnv("ANOMALY_INTERVAL_MS", 60_000),
   corsAllowedOrigin: process.env.CORS_ALLOWED_ORIGIN ?? "http://localhost:3000",
   clerkJwtKeyPem: requireClerkJwtKey(),
   clerkIssuer: process.env.CLERK_ISSUER ?? null,

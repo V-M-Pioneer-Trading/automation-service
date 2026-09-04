@@ -8,6 +8,9 @@ export interface EventLogEntry {
   detail: Record<string, unknown>;
 }
 
+const ENTRY_SELECT = "SELECT id, occurred_at, type, detail FROM event_log";
+const NEWEST_FIRST = "ORDER BY occurred_at DESC, id DESC";
+
 /**
  * Append-only audit trail of autopilot lifecycle events. Never pass a token or
  * anything token-shaped as `detail` — this is the one thing in the system that
@@ -25,25 +28,18 @@ export class EventLog {
   }
 
   async list(limit = 100): Promise<EventLogEntry[]> {
-    const { rows } = await this.pool.query(
-      "SELECT id, occurred_at, type, detail FROM event_log ORDER BY occurred_at DESC, id DESC LIMIT $1",
-      [limit]
-    );
+    const { rows } = await this.pool.query(`${ENTRY_SELECT} ${NEWEST_FIRST} LIMIT $1`, [limit]);
     return rows.map(rowToEntry);
   }
 
-  /** Events at or after `since`, newest first, optionally restricted to `types`. Used by the meta#15 anomaly checks and digest. */
+  /** Events at or after `since`, newest first, optionally restricted to `types`. */
   async listSince(since: Date, limit: number, types?: string[]): Promise<EventLogEntry[]> {
-    const { rows } =
-      types === undefined
-        ? await this.pool.query(
-            "SELECT id, occurred_at, type, detail FROM event_log WHERE occurred_at >= $1 ORDER BY occurred_at DESC, id DESC LIMIT $2",
-            [since, limit]
-          )
-        : await this.pool.query(
-            "SELECT id, occurred_at, type, detail FROM event_log WHERE occurred_at >= $1 AND type = ANY($2) ORDER BY occurred_at DESC, id DESC LIMIT $3",
-            [since, types, limit]
-          );
+    const { rows } = await this.pool.query(
+      `${ENTRY_SELECT}
+       WHERE occurred_at >= $1 AND ($2::text[] IS NULL OR type = ANY($2::text[]))
+       ${NEWEST_FIRST} LIMIT $3`,
+      [since, types ?? null, limit]
+    );
     return rows.map(rowToEntry);
   }
 }

@@ -194,20 +194,13 @@ export function createGameClients(config: {
     // calibrate fuel cost (observations.ts) — a refuel that reports no price
     // still refuels the ship, it just teaches us nothing.
     refuel: (shipSymbol: string, authHeader: string) =>
-      fleetAction<{ data?: { transaction?: { totalPrice?: number } } }>(shipSymbol, "refuel", authHeader),
+      fleetAction<{ data?: { transaction?: { units?: number; totalPrice?: number } } }>(shipSymbol, "refuel", authHeader),
 
     purchase: (shipSymbol: string, tradeSymbol: string, units: number, authHeader: string) =>
       agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "purchase", authHeader, {
         symbol: tradeSymbol,
         units,
       }),
-
-    purchaseShip: (shipType: string, waypointSymbol: string, authHeader: string) =>
-      callJson<{ data: { ship: ShipSnapshot; transaction: { price: number } } }>(
-        `${config.agentServiceUrl}/ships/purchase`,
-        authHeader,
-        { method: "POST", body: JSON.stringify({ shipType, waypointSymbol }) }
-      ),
 
     deliverContract: (
       contractId: string,
