@@ -14,8 +14,13 @@ export async function withTransaction<T>(pool: Pool, fn: (client: PoolClient) =>
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Ignore rollback errors so we don't mask the original failure.
+    }
     throw err;
+  }
   } finally {
     client.release();
   }
