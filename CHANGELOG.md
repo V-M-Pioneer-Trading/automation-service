@@ -1,8 +1,9 @@
 # Changelog
 
 How this service got here. The [README](README.md) describes what it does
-*now*; this file is the provenance — which `meta` issue introduced each piece,
-and which decisions were later reversed.
+*now*, [CLAUDE.md](CLAUDE.md) describes how the code is put together, and this
+file is the provenance — which `meta` issue introduced each piece, and which
+decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 

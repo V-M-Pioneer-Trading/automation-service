@@ -1,7 +1,7 @@
 {
   "name": "automation-service",
   "version": "1.0.0",
-  "description": "Autopilot lifecycle (arm/pause/abort) and append-only event log for the SpaceTraders fleet",
+  "description": "The SpaceTraders fleet autopilot: scores mining, contracts and scouting in credits per hour, drives ships through resumable task loops, calibrates its model from what the fleet has flown, and watches for trouble",
   "main": "dist/server.js",
   "engines": {
     "node": ">=18"
