@@ -1,62 +1,11 @@
-import { Pool, PoolClient } from "pg";
-import { KNOB_DEFINITIONS } from "./knobs";
+import { Pool } from "pg";
+import { syncKnobDefinitions } from "./knobs";
 
 export function createPool(databaseUrl: string): Pool {
   return new Pool({ connectionString: databaseUrl });
 }
 
-/**
- * Runs fn against a single checked-out client inside a BEGIN/COMMIT block,
- * rolling back on any error. Callers pass the client into repo methods (which
- * accept Pool | PoolClient) so multiple writes across different repos land in
- * one transaction instead of as separate autocommitted statements (meta#30).
- */
-export async function withTransaction<T>(pool: Pool, fn: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await fn(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
-/**
- * Brings the `knob` table in line with KNOB_DEFINITIONS.
- *
- * An operator's *tuned value* always survives a redeploy — that's the whole
- * point of storing it — but everything else about a knob (its class, bounds,
- * default) is code, and code wins. A knob dropped from the definitions is
- * deleted rather than left behind: an orphan row would still appear in the API
- * and in the AI supervisor's tool list, offering a lever wired to nothing.
- *
- * A tuned value that no longer fits newly-tightened bounds is clamped, not
- * discarded, so a redeploy can never leave a value the write path itself would
- * reject.
- */
-export async function syncKnobDefinitions(pool: Pool): Promise<void> {
-  for (const def of KNOB_DEFINITIONS) {
-    await pool.query(
-      `INSERT INTO knob (name, knob_class, value, default_value, min_value, max_value)
-       VALUES ($1, $2, $3, $3, $4, $5)
-       ON CONFLICT (name) DO UPDATE SET
-         knob_class = EXCLUDED.knob_class,
-         default_value = EXCLUDED.default_value,
-         min_value = EXCLUDED.min_value,
-         max_value = EXCLUDED.max_value,
-         value = LEAST(GREATEST(knob.value, EXCLUDED.min_value), EXCLUDED.max_value)`,
-      [def.name, def.class, def.default, def.min, def.max]
-    );
-  }
-  await pool.query(`DELETE FROM knob WHERE name <> ALL($1::text[])`, [KNOB_DEFINITIONS.map((d) => d.name)]);
-}
-
-/** Idempotent so it can run on every boot; no separate migration runner for one table yet. */
+/** Idempotent so it can run on every boot; no separate migration runner yet. */
 export async function migrate(pool: Pool): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS event_log (
@@ -175,10 +124,10 @@ export async function migrate(pool: Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS anomaly_detected_at_idx ON anomaly (detected_at DESC)
   `);
 
-  // Market scouting: one row per marketplace, tracking the last time this
-  // automation-service called getMarket while a ship was docked there.
-  // Freshness decays over time; the planner scores scouting tasks higher as
-  // staleness grows to keep price data current (see README).
+  // Market freshness: one row per marketplace, the last time a ship of ours
+  // read its prices while docked there — the only read SpaceTraders answers
+  // with trade goods. Read by the planner (scouting value grows with
+  // staleness) and by the market_stale anomaly check (see marketIntelRepo.ts).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS market_intel (
       waypoint TEXT PRIMARY KEY,
@@ -213,10 +162,11 @@ export async function migrate(pool: Pool): Promise<void> {
   `);
 
   // Two things are learned from moving a ship, and both are recorded here:
-  // how long a flight of known distance took (hours), and what refuelling after
-  // a known distance cost (fuel_credits). A row carries whichever it observed —
-  // a flight has no price attached, a refuel has no duration — so both columns
-  // are nullable and each calibration reads only the rows that inform it.
+  // how long a flight of known distance took (hours), and what a refuel of so
+  // many units cost (fuel_credits, with `distance` holding the units bought —
+  // the distance they cover in cruise flight). A row carries whichever it
+  // observed, so both columns are nullable and each calibration reads only
+  // the rows that inform it.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS travel_observation (
       id BIGSERIAL PRIMARY KEY,

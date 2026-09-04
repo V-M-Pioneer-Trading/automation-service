@@ -26,7 +26,7 @@ export class MetricsRepo {
       `SELECT
          COALESCE(SUM(CASE WHEN type = 'mining_sell' THEN (detail->>'totalPrice')::double precision ELSE 0 END), 0) AS revenue,
          COALESCE(SUM(CASE WHEN type = 'mining_extract' THEN (detail->>'units')::double precision ELSE 0 END), 0) AS extraction_units,
-         COUNT(*) FILTER (WHERE type LIKE 'mining_%') AS total_mining_events,
+         COUNT(*) FILTER (WHERE type LIKE 'mining\_%') AS total_mining_events,
          COUNT(*) FILTER (WHERE type IN ('mining_tick_error', 'mining_task_failed')) AS error_events
        FROM event_log
        WHERE occurred_at >= $1 AND occurred_at < $2`,

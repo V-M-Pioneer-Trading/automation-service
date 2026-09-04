@@ -3,22 +3,39 @@
 The autopilot. Decides what each ship should do next, drives it there, watches
 for trouble, and records everything it did and why.
 
-This service never calls SpaceTraders directly — every read and every ship
-action goes through navigation-service, agent-service, and fleet-service.
+It never calls SpaceTraders directly. Every read and every ship action goes
+through the three game-facing services, and everything it learns or decides
+is written to its own Postgres.
+
+```mermaid
+flowchart LR
+    UI[command-interface<br/>operator UI] -->|arm / pause / abort<br/>knobs, replan| AS
+    AI[ai-service<br/>AI supervisor] -->|reads digest & policy knobs<br/>writes policy knobs, ai_* events| AS
+    AS[automation-service] -->|ship state, agent, contracts,<br/>buy / sell| AG[agent-service]
+    AS -->|orbit, dock, navigate,<br/>survey, extract, refuel, deliver| FL[fleet-service]
+    AS -->|waypoints, markets| NAV[navigation-service]
+    AS -.->|every outbound call carries two headers:<br/>its own Clerk M2M token, and<br/>the armed SpaceTraders token| AG
+    AS --- DB[(Postgres<br/>tasks, knobs, events,<br/>observations, anomalies)]
+    AS -->|anomaly webhook| WH[operator webhook]
+    AG & FL & NAV --> ST[(SpaceTraders API)]
+```
 
 **New here?** Read [How it decides](#how-it-decides) first. It's the part that
-matters, and it's shorter than it looks.
+matters, and it's shorter than it looks. Implementation notes for contributors
+and coding agents live in [CLAUDE.md](CLAUDE.md).
 
 - [How it decides](#how-it-decides)
 - [What the fleet has learned](#what-the-fleet-has-learned)
 - [Knobs](#knobs)
 - [The work loops](#the-work-loops)
+- [Autopilot lifecycle](#autopilot-lifecycle)
 - [Replan](#replan)
 - [Shadow mode](#shadow-mode)
 - [Watching for trouble](#watching-for-trouble)
 - [Replaying decisions](#replaying-decisions)
 - [API](#api)
 - [Configuration](#configuration)
+- [Authentication](#authentication)
 - [Developing](#developing)
 - [Known limitations](#known-limitations)
 
@@ -28,7 +45,7 @@ matters, and it's shorter than it looks.
 
 Three kinds of work compete for every ship: **mine** an asteroid field, **run**
 a contract, **scout** a market to refresh its prices. They're compared in one
-currency — **expected credits per hour** — and the highest number wins.
+currency, **expected credits per hour**, and the highest number wins.
 
 ```
 mining     score = (credits this field earns per cycle × mine weight) / cycle hours
@@ -42,18 +59,28 @@ That's the whole model. It lives in [`src/scoring.ts`](src/scoring.ts) as pure
 functions with no I/O, which is what lets it be unit-tested directly and
 re-run over history (see [Replaying decisions](#replaying-decisions)).
 
-Two rules apply before any of it matters:
+Three rules apply before any of it matters:
 
-- **Cash floor.** Work whose estimated cost would drop credits below
-  `credit.reserveFloor` is removed from consideration, not scored against. If
-  everything reachable would breach it, the ship deliberately idles. Running out
-  of money for fuel is not recoverable in SpaceTraders.
-- **Reachability.** A target the ship can't route to isn't a candidate. Routing
-  is fuel-aware: a leg longer than the tank is impossible, and an intermediate
-  stop must have a fuel station. See [`src/routeCost.ts`](src/routeCost.ts) —
-  and note the honest caveat there, that since every waypoint is directly
-  reachable from every other, this search is mostly answering *"can we get
-  there"* rather than *"what's the shortest way"*.
+| Rule | What it means |
+|---|---|
+| **Nothing that earns nothing** | A score at or below zero is not a candidate. That is what makes `mine.taskWeight = 0` an off switch rather than a demotion, and what keeps a contract that can only lose money on the ground. |
+| **Cash floor** | Work whose estimated cost would drop credits below `credit.reserveFloor` is removed from consideration, not scored against. If everything reachable would breach it, the ship deliberately idles. Running out of money for fuel is not recoverable in SpaceTraders. |
+| **Reachability** | A target the ship can't route to isn't a candidate. Routing is fuel-aware: a leg longer than the tank is impossible, and an intermediate stop must have a fuel station. |
+
+```mermaid
+flowchart TD
+    S([ship needs a target]) --> D[discover & evaluate<br/>new contracts]
+    D --> L[load one snapshot:<br/>waypoints, credits, knobs,<br/>calibrated model]
+    L --> M[score every<br/>asteroid field]
+    L --> C[score every accepted,<br/>unassigned contract]
+    L --> K[score every<br/>marketplace by staleness]
+    M & C & K --> F{drop anything unreachable,<br/>over the cash floor,<br/>or scoring ≤ 0}
+    F --> W{highest score?}
+    W -->|contract| TC[contract task]
+    W -->|scout<br/>ties beat contracts| TS[scout task]
+    W -->|mine| TM[mining task]
+    W -->|nothing viable| TI[idle, try again next tick]
+```
 
 ### A worked example
 
@@ -66,7 +93,7 @@ A ship sits at a market. Two asteroid fields are in range:
 
 `BELT-NEAR` wins, despite being worth less than a third as much per trip,
 because it turns around six times faster. Now suppose a few more cycles at
-`BELT-FAR` come back richer still — say 60,000 — and its score becomes 9,524
+`BELT-FAR` come back richer still, say 60,000, and its score becomes 9,524
 cr/h. The planner switches, on its own, with no knob touched.
 
 **That switch is only possible because `credits/cycle` differs per field.** If
@@ -83,17 +110,27 @@ earns, how fast ships fly, how long the non-flying part of a cycle takes, and
 what fuel costs.
 
 These used to be hand-typed constants. They're now **measured from the fleet's
-own history** ([`src/observations.ts`](src/observations.ts)):
+own history**:
 
-| Fact | Measured from |
-|---|---|
-| Credits per mining cycle, **per field** | Every completed cycle: what it sold, at which field |
-| Ship speed | Real flights — the game reports both endpoints' coordinates and both timestamps |
-| Fixed cycle overhead | Measured cycle time minus the travel that cycle's distance accounts for |
-| Fuel credits per unit distance | Real refuel purchases, against the distance they paid for |
+| Fact | Measured from | Until then |
+|---|---|---|
+| Credits per mining cycle, **per field** | Every completed cycle: what it sold, at which field | `mine.creditsPerCyclePrior` |
+| Ship speed | Real flights: the game reports both endpoints' coordinates and both timestamps | `travel.speedUnitsPerHourPrior` |
+| Fixed cycle overhead | Measured cycle time minus the travel that cycle's distance accounts for | `cycle.overheadHoursPrior` |
+| Fuel credits per unit distance | Real refuel purchases: credits paid per unit bought, and a unit of fuel is a unit of distance in cruise flight | `fuel.creditsPerUnitDistancePrior` |
+
+```mermaid
+flowchart LR
+    F[flight completes] -->|distance, hours| T[(travel_observation)]
+    R[ship refuels] -->|units, credits| T
+    C[mining cycle completes] -->|field, revenue,<br/>hours, distance| M[(mining_observation)]
+    T & M -->|recency-weighted<br/>half-life decay| CAL[calibrated model]
+    P[model knobs<br/>*Prior] -->|only where nothing<br/>has been observed| CAL
+    CAL --> PL[planner scores]
+```
 
 Older observations count for less, on a half-life set by
-`observation.halfLifeHours` — so a field that has got better recently outweighs
+`observation.halfLifeHours`, so a field that has got better recently outweighs
 how it behaved yesterday, without one lucky trip swinging the estimate.
 
 **Before there's data**, each falls back to its `*Prior` knob, and the planner
@@ -135,7 +172,7 @@ API. Knobs come in three classes, and **the class is the point**:
 | **policy** | A preference with no measurable true value. | Operator **and the AI supervisor**. |
 | **alert** | The threshold that decides when something is wrong. | Operator only. **Not the AI.** |
 
-Model knobs are fenced off because editing one doesn't change reality — it
+Model knobs are fenced off because editing one doesn't change reality; it
 changes what the planner *believes* about reality, which is how you get a fleet
 confidently flying to the wrong asteroid. Alert knobs are fenced off for a
 sharper reason: an agent that can widen its own alarm thresholds will
@@ -170,28 +207,27 @@ is applied server-side so the restriction holds even if a client forgets it.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `anomaly.shipIdleMinutes` | `10` | Minutes without a phase change before a ship is flagged idle. |
+| `anomaly.shipIdleMinutes` | `10` | Minutes without progress (outside a known wait) before a ship is flagged idle. |
 | `anomaly.profitDropFraction` | `0.5` | Earnings stalled if the latest rate falls below this fraction of the 6h average. |
 | `anomaly.creditsFlatWindowHours` | `2` | Earnings also stalled if credits show no net increase across this window. |
 | `anomaly.consecutiveFailureLimit` | `3` | Consecutive failures on one ship that raise an anomaly. |
 | `anomaly.errorRateThreshold` | `0.1` | Error fraction of recent mining events that flags the fleet as failing. |
 | `anomaly.errorRateWindowMinutes` | `5` | Window that fraction is computed over. |
-| `anomaly.marketStalenessMinutes` | `30` | Minutes before an in-use market's prices are flagged stale. |
+| `anomaly.marketStalenessMinutes` | `30` | Minutes since a ship last read an in-use market in person before it's flagged stale. |
 | `anomaly.dedupeCooldownMinutes` | `15` | How long a fired anomaly stays suppressed. |
 
 **Scouting is priced, not switched.** `scout.creditsPerRefresh` is both the
-value of a refresh and scouting's only weight — a separate weight would just
+value of a refresh and scouting's only weight. A separate weight would just
 multiply against it, which is one knob pretending to be two. It can't be
 measured the way mining revenue can: the cost of stale prices is the bad trades
 you never see. So it's an honest policy judgment, defaulting to roughly a tenth
 of a typical cycle's revenue.
 
-**Redeploys**: bounds, defaults and classes come from
-[`KNOB_DEFINITIONS`](src/knobs.ts) and are re-synced on every boot; an
-operator's tuned *value* survives. A knob removed from the definitions is
-deleted, so no orphan lever outlives the code that read it. A tuned value that
-no longer fits tightened bounds is clamped, never left in a state the write path
-would reject.
+**Redeploys**: bounds, defaults and classes come from the definitions in code
+and are re-synced on every boot; an operator's tuned *value* survives. A knob
+removed from the definitions is deleted, so no orphan lever outlives the code
+that read it. A tuned value that no longer fits tightened bounds is clamped,
+never left in a state the write path would reject.
 
 ---
 
@@ -201,15 +237,52 @@ Each ship runs one task at a time as a resumable state machine. Per-ship
 progress persists to Postgres after every phase change, so a restart plus
 re-arm resumes from the last completed phase.
 
-Every tick performs **at most one atomic action** — dispatch one command,
+Every tick performs **at most one atomic action**: dispatch one command,
 resolve one elapsed wait, or get one planner assignment. Never two. That
 granularity is a safety property, not an optimisation: it's what lets *pause*
 take effect cleanly between actions instead of killing something mid-flight.
 
+```mermaid
+flowchart TD
+    T([tick]) --> A{status?}
+    A -->|disarmed / aborted| X([nothing])
+    A -->|armed or paused| B{mode?}
+    B -->|shadow, armed| SH[score & log the decision<br/>never dispatch] --> X
+    B -->|live| RP{replan due?}
+    RP -->|yes| RR[re-score every idle ship]
+    RR --> RS{was this ship<br/>one of them?}
+    RS -->|yes| X
+    RP -->|no| ID
+    RS -->|no| ID{ship has a target?}
+    ID -->|no, paused| X
+    ID -->|no, armed| AS[assign a target<br/>see How it decides] --> X
+    ID -->|yes| PW{paused and not<br/>mid-wait?}
+    PW -->|yes| X
+    PW -->|no| AD[advance the task's state machine<br/>by one action]
+    AD --> DS{aborted or switched to<br/>shadow meanwhile?}
+    DS -->|yes| DC[discard result, log it] --> X
+    DS -->|no| SV[save task → record what was learned → log event] --> X
+```
+
+All three machines share their travel, docking and refuelling steps, and every
+one of them **refuels at every marketplace it docks at**: the sell market, the
+procurement market, the scouted market. No task hands a ship back to the
+planner too dry to reach anything.
+
 ### Mining
 
-```
-TRAVEL_TO_ASTEROID → SURVEY → EXTRACT → TRAVEL_TO_MARKET → SELL → (refuel) → done
+```mermaid
+stateDiagram-v2
+    [*] --> TRAVEL_TO_ASTEROID: planner assigns a field
+    TRAVEL_TO_ASTEROID --> SURVEY: arrived
+    SURVEY --> EXTRACT: survey in hand
+    EXTRACT --> EXTRACT: extract, wait out cooldown
+    EXTRACT --> SURVEY: survey expired
+    EXTRACT --> TRAVEL_TO_MARKET: cargo full
+    TRAVEL_TO_MARKET --> SELL: best market chosen, arrived
+    SELL --> SELL: sell each good this market buys
+    SELL --> TRAVEL_TO_MARKET: hold still has goods this market won't buy
+    SELL --> [*]: hold empty → refuel → cycle recorded, ship idle
 ```
 
 The sell leg queries every in-system marketplace and picks the best price for
@@ -219,14 +292,20 @@ that takes the rest, repeating until the hold is empty. Each extra stop costs a
 real trip.
 
 On completion the ship hands itself back to the planner, and the cycle's
-takings become one `mining_observation` row — which is how the next decision
-gets smarter.
+takings become one mining observation, which is how the next decision gets
+smarter.
 
 ### Contracts
 
-```
-CONTRACT_TRAVEL_TO_MARKET → CONTRACT_PURCHASE → CONTRACT_TRAVEL_TO_DESTINATION
-  → CONTRACT_DELIVER → CONTRACT_FULFILL
+```mermaid
+stateDiagram-v2
+    [*] --> CONTRACT_TRAVEL_TO_MARKET: planner assigns a contract
+    CONTRACT_TRAVEL_TO_MARKET --> CONTRACT_PURCHASE: arrived
+    CONTRACT_PURCHASE --> CONTRACT_TRAVEL_TO_DESTINATION: refuelled, bought what fits
+    CONTRACT_TRAVEL_TO_DESTINATION --> CONTRACT_DELIVER: arrived
+    CONTRACT_DELIVER --> CONTRACT_TRAVEL_TO_MARKET: units still owed, or hold empty
+    CONTRACT_DELIVER --> CONTRACT_FULFILL: everything delivered
+    CONTRACT_FULFILL --> [*]: fulfilled, ship idle
 ```
 
 Right before every assignment decision, any contract not yet seen is discovered
@@ -235,46 +314,94 @@ route through it to the destination, `profit = payment − procurement − trave
 Anything clearing `contract.minProfitThreshold` is accepted on the spot.
 
 This runs **inline, not as a background job**. An earlier version used a
-background scheduler and it raced the planner — a freshly discovered,
+background scheduler and it raced the planner: a freshly discovered,
 higher-scoring contract could lose to mining purely for being mid-evaluation.
 A discovery failure is logged and ignored rather than blocking mining;
 contracts are additive, never a dependency.
 
+Each trip buys as much of the contract's good as the hold has room for,
+counting only that good toward what's still owed, and loops back to the market
+while units remain.
+
 ### Scouting
 
-```
-SCOUT_TRAVEL → SCOUT_REFRESH
+```mermaid
+stateDiagram-v2
+    [*] --> SCOUT_TRAVEL: planner assigns a market
+    SCOUT_TRAVEL --> SCOUT_REFRESH: arrived
+    SCOUT_REFRESH --> [*]: docked, refuelled, prices read in person, ship idle
 ```
 
 Market prices age, and a planner deciding on stale prices decides blind.
 Scouting scores "go refresh that market" against real work. A market's value
 grows linearly with staleness and drops to zero the moment it's refreshed, so
-the planner rotates through markets on its own — no cooldown or round-robin
+the planner rotates through markets on its own; no cooldown or round-robin is
 needed. A market never seen is treated as ten thresholds stale: high priority,
 but finite.
+
+**Freshness is one store**, written whenever a ship of ours reads a market
+*while docked there*: a scout's refresh, or a miner pricing the market it is
+about to sell at. SpaceTraders only reports trade goods to a ship that is
+present, so that is the only read that actually refreshes anything; the sell
+leg's comparison of every market from afar is a cache read and doesn't count.
+The planner scouts against this store and the `market_stale` alert reads it
+too, so a market the miner just sold at is fresh to both, and neither can call
+stale what the other calls fresh.
 
 ### When a target keeps failing
 
 After `mine.failureRetryLimit` consecutive failures the ship is reset for a
-fresh assignment — **unless it's holding cargo it hasn't disposed of**, in which
+fresh assignment, **unless it's holding cargo it hasn't disposed of**, in which
 case it keeps retrying rather than stranding it. An abandoned contract is
 released back to the pool rather than left claimed by a ship that gave up.
+
+---
+
+## Autopilot lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> disarmed: process start
+    disarmed --> armed: arm
+    armed --> paused: pause
+    armed --> aborted: abort
+    paused --> aborted: abort
+    paused --> armed: arm
+    aborted --> armed: arm
+    armed --> armed: arm (re-arm, e.g. switch live ↔ shadow)
+```
+
+| Status | What the scheduler does |
+|---|---|
+| **disarmed** | Nothing. The service has just started and holds no token. |
+| **armed** | Full progression: assigns targets, dispatches actions, replans. |
+| **paused** | Lets an already-dispatched wait finish and be recorded, then stops dispatching. Never starts a new action or assignment. |
+| **aborted** | Stops immediately and forgets the token. An action already in flight can't be un-sent, so its result is discarded and logged as such, not applied. |
+
+The token only ever lives in memory, so a restart always disarms. Arming is
+valid from any status, including after an abort, and is the only way to switch
+between live and shadow mode.
 
 ---
 
 ## Replan
 
 Assignment normally happens ship-by-ship as ships free up. A **replan**
-re-scores every *idle* ship when something changes that could change the answer:
-any knob write, any new anomaly, a manual request, or a periodic fallback
-(`REPLAN_INTERVAL_MS`, default 5 minutes).
+re-scores every *idle* ship when something changes that could change the answer.
+
+| Trigger | Reason logged | When it runs |
+|---|---|---|
+| Any knob write | `knob_change` | Once `replan.debounceSeconds` has passed since the last replan |
+| Any new anomaly | `anomaly` | Same debounce |
+| `POST /planner/replan` | `manual` | Same debounce |
+| Periodic fallback | `interval` | `REPLAN_INTERVAL_MS` after the last replan, or after arming |
 
 All triggers share one debounce clock, so a storm of knob changes coalesces into
 a single replan.
 
 **Running work is never preempted.** A replan only touches ships with no
-assigned target. Tasks are kept short and bounded — one mining round trip, one
-delivery leg — so a stale assignment costs minutes at most. Abort is the only
+assigned target. Tasks are kept short and bounded, one mining round trip or one
+delivery leg, so a stale assignment costs minutes at most. Abort is the only
 interrupt.
 
 ---
@@ -282,7 +409,7 @@ interrupt.
 ## Shadow mode
 
 Arming with `mode: "shadow"` runs the full scoring cycle on the live schedule
-and logs every would-be decision as `planner_shadow_assignment` — but never
+and logs every would-be decision as `planner_shadow_assignment`, but never
 writes task state and never dispatches a ship action. Nothing is ever assigned,
 so the same cycle recomputes every tick: a continuous preview of what live mode
 would do.
@@ -295,32 +422,52 @@ drifts from dry run into live dispatch by accident.
 ## Watching for trouble
 
 Five checks run on a fixed interval, independent of whether the autopilot is
-armed — a broken ship stays worth reporting while an operator investigates.
+armed. A broken ship stays worth reporting while an operator investigates.
 
 | Check | Fires when |
 |---|---|
-| `ship_idle` | A ship's task hasn't changed phase in N minutes (while armed and live) |
-| `earnings_stalled` | The money stopped: the hourly rate collapsed against its own history, **or** credits show no net increase across a window |
-| `consecutive_failures` | One ship accumulates N consecutive failures |
-| `error_rate` | The error fraction of recent mining events exceeds a threshold |
-| `market_stale` | A market in active use hasn't been repriced in N minutes |
+| `ship_idle` | A ship's task hasn't progressed in N minutes (while armed and live). Time inside a flight or cooldown it was told to wait out doesn't count, so a long transit never pages. |
+| `earnings_stalled` | The money stopped: the hourly rate collapsed against its own history, **or** credits show no net increase across a window. |
+| `consecutive_failures` | One ship accumulates N consecutive failures. |
+| `error_rate` | The error fraction of recent mining events exceeds a threshold. |
+| `market_stale` | A market the sell leg priced in the last 24h hasn't been read in person by a ship within N minutes (or ever). |
 
 `earnings_stalled` covers what used to be two separate checks (`profit_drop`
-and `credits_flat`). They're two ways of measuring one thing — a fleet that
-stops earning trips both — so paging twice made the digest look busier than the
+and `credits_flat`). They're two ways of measuring one thing, a fleet that
+stops earning trips both, so paging twice made the digest look busier than the
 fleet was. Both conditions stay separately tunable and are reported in
 `detail.reasons`.
 
-Each anomaly is **persisted before** delivery is attempted, then POSTed to
-`ANOMALY_WEBHOOK_URL` with up to three retries and exponential backoff. Repeat
-firings of the same condition are suppressed for `anomaly.dedupeCooldownMinutes`
-rather than paging every tick a problem stays open.
+```mermaid
+flowchart LR
+    I([every ANOMALY_INTERVAL_MS]) --> S[snapshot credits<br/>if armed & live]
+    S --> C[run the five checks]
+    C --> D{fired within<br/>dedupe cooldown?}
+    D -->|yes| Q[suppress]
+    D -->|no| P[(persist anomaly)]
+    P --> R[request a replan]
+    P --> W[POST to webhook<br/>3 attempts, backoff]
+    W -->|2xx| OK[mark delivered]
+    W -->|all failed| NO[count the attempts,<br/>keep the record]
+```
+
+Each anomaly is **persisted before** delivery is attempted, so a webhook outage
+never loses the record. Repeat firings of the same condition are suppressed for
+`anomaly.dedupeCooldownMinutes` rather than paging every tick a problem stays
+open.
+
+### Metrics rollups
+
+A background scheduler persists one rollup per tick, each covering the window
+since the last one ended: credits/hour (sell revenue, not netted against
+costs), units extracted, and error rate. On restart it resumes from the last
+persisted window end, so there's no gap and no double count.
 
 ---
 
 ## Replaying decisions
 
-Every planner decision logs the inputs it used — each candidate's distance, the
+Every planner decision logs the inputs it used: each candidate's distance, the
 calibrated model, every knob value. Since scoring is pure arithmetic over
 exactly those inputs, past decisions can be re-scored under different knobs
 without touching the game:
@@ -334,16 +481,19 @@ npm run replay -- --since 6h --set credit.reserveFloor=50000 --verbose
 ```
 
 It reports how many past decisions would have gone differently. **Zero flips
-means the change does nothing** — worth knowing before you attribute a later
-swing in profit to it.
+means the change does nothing**, which is worth knowing before you attribute a
+later swing in profit to it.
 
-Flags: `--set name=value` (repeatable, validated against the knob's real
-bounds), `--since 90m|2h|7d` (default 24h), `--limit` (default 200),
-`--verbose` to show every candidate's score rather than only the flips.
+| Flag | Meaning |
+|---|---|
+| `--set name=value` | Override a knob (repeatable, validated against the knob's real bounds) |
+| `--since 90m\|2h\|7d` | How far back to replay (default 24h) |
+| `--limit N` | Cap on decisions (default 200) |
+| `--verbose` | Show every candidate's score rather than only the flips |
 
 It replays the **choice between asteroid fields**, which is where the
 field-vs-field trade-off lives. It doesn't re-derive whether a contract or scout
-would have beaten mining outright — those scores were frozen from market state
+would have beaten mining outright; those scores were frozen from market state
 at the time and can't be honestly recomputed from the log.
 
 ---
@@ -356,7 +506,7 @@ All routes are under `/api/automation/v1`. `/health` is unversioned.
 
 | | |
 |---|---|
-| `POST /autopilot/arm` | `{ token, mode? }` — `mode` is `"live"` (default) or `"shadow"`. Holds the token **in memory only**; a restart always disarms. Valid from any status. |
+| `POST /autopilot/arm` | `{ token, mode? }`. `mode` is `"live"` (default) or `"shadow"`. Holds the token **in memory only**; a restart always disarms. Valid from any status, including after an abort. |
 | `POST /autopilot/pause` | Lets an already-dispatched wait finish and be recorded, then stops dispatching. Armed only. |
 | `POST /autopilot/abort` | Clears the token and stops immediately. An action already in flight can't be un-sent, so its result is discarded and marked, not silently applied. |
 | `GET /autopilot/status` | Current status and mode (`mode` is `null` whenever no token is held). |
@@ -382,13 +532,6 @@ All routes are under `/api/automation/v1`. `/health` is unversioned.
 
 Invalid lifecycle transitions return `409` naming the current status.
 
-### Metrics rollups
-
-A background scheduler persists one rollup per tick, each covering the window
-since the last one ended — credits/hour (sell revenue, not netted against
-costs), units extracted, and error rate. On restart it resumes from the last
-persisted `window_end`, so there's no gap and no double count.
-
 ---
 
 ## Configuration
@@ -403,35 +546,39 @@ persisted `window_end`, so there's no gap and no double count.
 | `MINING_SHIP_SYMBOL` | Ship to fly (**required**) |
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
 | `REPLAN_INTERVAL_MS` | Periodic replan fallback (default `300000`) |
-| `ANOMALY_WEBHOOK_URL` | Anomaly delivery target — anomaly detection is disabled entirely if unset |
+| `ANOMALY_WEBHOOK_URL` | Anomaly delivery target. Anomaly detection is disabled entirely if unset |
 | `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
 | `METRICS_ROLLUP_INTERVAL_MS` | Rollup cadence (default `60000`) |
 | `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |
-| `CLERK_JWT_KEY` | Clerk's RS256 public key, PEM/SPKI — literal `\n` escapes are accepted |
+| `CLERK_JWT_KEY` | Clerk's RS256 public key, PEM/SPKI. Literal `\n` escapes are accepted |
 | `CLERK_JWT_KEY_FILE` | Path to that key instead of an inline value; `CLERK_JWT_KEY` wins if both are set. One of the two is **required** |
-| `CLERK_ISSUER` | Expected `iss`, optional — narrows misconfiguration, not a control |
+| `CLERK_ISSUER` | Expected `iss`, optional. Narrows misconfiguration, not a control |
 | `AI_SERVICE_SECRET` | Shared secret for `POST /events` (**required**) |
+| `CLERK_M2M_SECRET_KEY` | Clerk Machine Secret Key this service mints its own outbound token with (production) |
+| `DEV_M2M_SIGNING_KEY_FILE` | Path to a private key to sign that token locally instead, no Clerk account needed. One of these two is **required** |
 
-Which asteroid field to mine is **not** configured — the planner chooses it.
-Tune scoring through knobs, not env vars.
+Which asteroid field to mine is **not** configured; the planner chooses it.
+Tune scoring through knobs, not env vars. Every `*_MS` value and `PORT` must
+be a positive number; a malformed one refuses to start rather than turning
+into a timer that fires every millisecond.
 
 ## Authentication
 
 Every `GET` is public. Every mutating route needs a verified Clerk session
 carrying the **`fleet:control`** scope, except `POST /events`, which is a machine
-call from ai-service and uses the `X-Service-Secret` shared secret instead —
-there is no human identity behind it, and Clerk stays scoped to humans.
+call from ai-service and uses the `X-Service-Secret` shared secret instead.
+There is no human identity behind it, and Clerk stays scoped to humans.
 
 | | Route | Requires |
 |---|---|---|
-| public | `GET /autopilot/status`, `/autopilot/events`, `/autopilot/ships/:s` | — |
-| public | `GET /planner/knobs`, `/planner/model`, `/metrics/context`, `/anomalies/digest` | — |
-| public | `GET /health`, `/api/automation/health` | — |
+| public | `GET /autopilot/status`, `/autopilot/events`, `/autopilot/ships/:s` | none |
+| public | `GET /planner/knobs`, `/planner/model`, `/metrics/context`, `/anomalies/digest` | none |
+| public | `GET /health`, `/api/automation/health` | none |
 | gated | `POST /autopilot/arm`, `/pause`, `/abort` | `fleet:control` |
 | gated | `PUT /planner/knobs/:name`, `POST /planner/replan` | `fleet:control` |
 | gated | `POST /events` | `X-Service-Secret` |
 
-Verification is **networkless** — the service holds Clerk's public key and checks
+Verification is **networkless**: the service holds Clerk's public key and checks
 signatures itself, so there is no JWKS fetch on the hot path and no cache to go
 stale. A missing token is `401`; a valid token without the scope is `403`, since
 re-authenticating would not help.
@@ -440,14 +587,24 @@ re-authenticating would not help.
 "auth optional" mode. A service that can start without a trust anchor is a
 service that can be deployed with authentication silently off.
 
-Mutating routes stamp `detail.actor` — the Clerk user id — onto the event they
-write, so the audit trail records who armed, paused, aborted or retuned. The id
-only: `eventLog.ts`'s rule that nothing token-shaped enters `detail` still holds.
+Mutating routes stamp `detail.actor`, the Clerk user id, onto the event they
+write, so the audit trail records who armed, paused, aborted or retuned.
 
-Tests run this exact code path. `src/testSupport/authTokens.ts` mints an
-ephemeral keypair per test run and signs real tokens with it; `createTestApp`
-hands the public half to `createApp`. Only the trust anchor differs — there is no
-stub verifier and no bypass flag.
+### Calling out
+
+The sibling services gate their own routes the same way, so this service is
+itself a caller that has to prove who it is. Every outbound call carries two
+headers, because they answer two different questions:
+
+| Header | Carries | Answers |
+|---|---|---|
+| `Authorization` | This service's own Clerk M2M token, minted and cached for its lifetime rather than per tick | "May automation-service act here?" |
+| `X-SpaceTraders-Token` | The raw game token the operator armed with | "Which agent is this acting for?" |
+
+The M2M token comes from a real Clerk Machine in production
+(`CLERK_M2M_SECRET_KEY`) and is signed locally in dev and tests
+(`DEV_M2M_SIGNING_KEY_FILE`). Only the trust anchor differs; verification on
+the receiving end is real either way.
 
 ---
 
@@ -455,7 +612,7 @@ stub verifier and no bypass flag.
 
 Tests drive the real HTTP API against a real Postgres, with stub HTTP servers
 standing in for the three upstream services and an injectable clock so
-multi-minute transits resolve instantly. No mocked database layer.
+multi-minute transits resolve instantly. There is no mocked database layer.
 
 ```bash
 docker run --rm -d --name automation-service-test-db -p 5433:5432 \
@@ -470,14 +627,17 @@ npm install && npm test
 npm run dev
 ```
 
-Test files share one database, so `jest.config.js` pins `maxWorkers: 1` —
-parallel files race each other's `TRUNCATE`. Every file resets through
-[`resetDatabase`](src/testSupport/resetDatabase.ts); a new table needs adding
-there once, not in eight `beforeEach` blocks. Files not testing scouting leave
-it disabled, so a third bidder doesn't quietly change what they're asserting.
+| Command | Does |
+|---|---|
+| `npm test` | Full suite against the Postgres above |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run build` / `npm start` | Compile to `dist/` and run |
+| `npm run replay -- …` | Re-score past decisions, see [Replaying decisions](#replaying-decisions) |
 
-[`src/scoring.ts`](src/scoring.ts) has no I/O and is tested directly — start
-there if you want to understand or change what the autopilot optimises for.
+How the code is laid out, the invariants each module keeps, and the testing
+pitfalls to know about are in [CLAUDE.md](CLAUDE.md). Start with
+[`src/scoring.ts`](src/scoring.ts) if you want to understand or change what
+the autopilot optimises for.
 
 ---
 
@@ -487,33 +647,34 @@ Everything the implementation deliberately doesn't do yet, in one place.
 
 **Scope**
 
-- **Single ship.** The planner, replan, and `listIdle()` are all written per-ship
-  and scale to N ships without further changes, but dispatch is still keyed to
-  one configured `MINING_SHIP_SYMBOL`. Nothing demonstrates fleet-wide fan-out.
+- **Single ship.** The planner, replan, and idle-ship listing are all written
+  per-ship and scale to N ships without further changes, but dispatch is still
+  keyed to one configured `MINING_SHIP_SYMBOL`. Nothing demonstrates fleet-wide
+  fan-out.
 - **One system.** Every candidate must be in the ship's current system.
 - **Contracts evaluate only their first deliverable.** Multi-good contracts
   aren't supported.
-- **Contract purchase quantity** assumes the whole hold belongs to the
-  contract's good. True for a ship that arrives empty (mining always sells out
-  first), wrong if a ship ever carried something unrelated into a contract task.
+- **Shadow mode doesn't discover contracts.** Accepting one is a real mutation,
+  so a shadow preview scores only contracts already accepted; live mode would
+  also have evaluated anything new on offer.
 
 **Model**
 
-- **Fuel cost is usually a prior.** It's only measured when a refuel response
-  reports a transaction price; otherwise `fuel.creditsPerUnitDistancePrior`
-  stands. It affects the reserve-floor safety margin, not scoring order.
-- **A fuel observation assumes the cycle started on a full tank**, since it
-  divides the refuel price by the distance flown that cycle. True from the
-  second cycle onward (every cycle ends by refuelling), but a ship's first
-  cycle after arming can start part-full and will overstate the cost per unit
-  distance. The error is conservative — it widens the cash safety margin — and
-  decays out as later cycles are observed.
+- **Fuel cost is measured only from refuels that report their transaction**
+  (units and price). A response without one still refuels the ship and teaches
+  nothing; `fuel.creditsPerUnitDistancePrior` stands until one does. It affects
+  the reserve-floor safety margin, not scoring order.
+- **Fuel units are taken to equal distance**, which holds in cruise flight, the
+  mode every navigate here uses. A fleet flown in burn or drift would measure
+  fuel cost per unit of distance wrongly by a constant factor.
 - **Routing is really a reachability check.** Every waypoint is directly
   reachable from every other and legs cost Euclidean distance, so the direct hop
-  is always shortest — the search only does interesting work when the direct hop
+  is always shortest. The search only does interesting work when the direct hop
   is out of fuel range.
 - **Fuel stations are inferred** from the `MARKETPLACE` trait, without
-  confirming the market actually stocks fuel.
+  confirming the market actually stocks fuel. Routing and the
+  refuel-at-every-market rule both lean on it: a marketplace that doesn't sell
+  fuel makes the refuel there fail, which counts against the task's retry budget.
 - **The mining sell leg has no route-cost awareness.** "Best market" means best
   price in the same system, not best price net of getting there.
 - **A field's revenue is measured, not predicted.** The model learns what a
@@ -523,11 +684,11 @@ Everything the implementation deliberately doesn't do yet, in one place.
 **Operations**
 
 - **Metrics rollups assume a single instance.** There's no distributed lock, so
-  two live replicas would each bootstrap from the same `window_end` and
+  two live replicas would each bootstrap from the same window end and
   double-count.
-- **No retention policy.** `metrics_rollup`, `event_log`, and the two
-  observation tables grow indefinitely. Observations are bounded at read time
-  (recent rows only), so this is a disk concern, not a correctness one.
+- **No retention policy.** Rollups, the event log, and the two observation
+  tables grow indefinitely. Observations are bounded at read time (recent rows
+  only), so this is a disk concern, not a correctness one.
 - **Anomalies deliver sequentially** within a tick, so several tripping at once
   against a slow webhook queue behind each other's retry budget.
 - **`market_stale`'s "in active use" window** is a fixed 24h lookback, not a knob.

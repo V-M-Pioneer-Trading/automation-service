@@ -440,6 +440,20 @@ describe("automation-service mining loop", () => {
     expect(dispatchedAgain).toBe(false);
   }, 10_000);
 
+  it("ticks again after an abort followed by a re-arm in the same process", async () => {
+    const gateway = app();
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await waitForWaiting(gateway); // navigate to the asteroid dispatched
+
+    await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+
+    // Pre-fix, stop() left the scheduler's stopped flag set and start() never
+    // cleared it, so a re-armed autopilot silently never ticked again.
+    clock.advance(1000);
+    await waitForPhase(gateway, "SURVEY");
+  }, 10_000);
+
   it("discards a tick's result instead of persisting or logging it as a real action if abort lands mid-flight", async () => {
     // The dispatch itself can't be un-sent once the tick has awaited it — but
     // an abort that lands while that await is in flight must still stop the

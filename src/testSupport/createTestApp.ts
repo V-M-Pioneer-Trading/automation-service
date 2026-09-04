@@ -1,11 +1,10 @@
 /**
  * @file `createApp` with a test trust anchor, and nothing else changed.
  *
- * `createApp` takes its `AuthConfig` as a required second argument, ahead of
- * every optional one, so no call site can construct this service without
- * deciding what it trusts. Tests still need to construct it, so they go through
- * here — which supplies the ephemeral keypair from `authTokens` and forwards
- * everything else untouched.
+ * `createApp` requires an `AuthConfig`, so no call site can construct this
+ * service without deciding what it trusts. Tests still need to construct it,
+ * so they go through here — which supplies the ephemeral keypair from
+ * `authTokens` and forwards everything else untouched.
  *
  * This is a different *key*, not a different code path: requests still run
  * through the real verifier in `auth.ts`, still need a real signature, and
@@ -15,12 +14,18 @@
 
 import { generateKeyPairSync } from "crypto";
 import type { Pool } from "pg";
-import { SCOPE_FLEET_CONTROL } from "../auth";
 import type { AnomalyConfig } from "../anomalyScheduler";
+import { SCOPE_FLEET_CONTROL } from "../auth";
 import type { Clock } from "../clock";
 import { createLocalM2MTokenSource } from "../m2mToken";
 import { createApp, type MetricsConfig, type MiningConfig } from "../server";
 import { TEST_CLERK_JWT_KEY, TEST_SERVICE_SECRET } from "./authTokens";
+
+export const TEST_AUTH = {
+  clerkJwtKeyPem: TEST_CLERK_JWT_KEY,
+  clerkIssuer: null,
+  aiServiceSecret: TEST_SERVICE_SECRET,
+};
 
 // A throwaway keypair for gameClients' own outbound Authorization header
 // (decision 19) — separate from authTokens.ts's keypair, which is for
@@ -41,17 +46,13 @@ export const createTestApp = (
   anomaly?: AnomalyConfig,
   corsAllowedOrigin?: string
 ) =>
-  createApp(
+  createApp({
     pool,
-    {
-      clerkJwtKeyPem: TEST_CLERK_JWT_KEY,
-      clerkIssuer: null,
-      aiServiceSecret: TEST_SERVICE_SECRET,
-    },
+    auth: TEST_AUTH,
     clock,
     mining,
     metrics,
     anomaly,
     corsAllowedOrigin,
-    createLocalM2MTokenSource(TEST_M2M_SIGNING_KEY, { scope: SCOPE_FLEET_CONTROL })
-  );
+    authTokenSource: createLocalM2MTokenSource(TEST_M2M_SIGNING_KEY, { scope: SCOPE_FLEET_CONTROL }),
+  });

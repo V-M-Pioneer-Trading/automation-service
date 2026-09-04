@@ -2,8 +2,8 @@ import request from "supertest";
 import { Pool } from "pg";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
-import { createPool, migrate, syncKnobDefinitions } from "../db";
-import { KNOB_DEFINITIONS } from "../knobs";
+import { createPool, migrate } from "../db";
+import { KNOB_DEFINITIONS, syncKnobDefinitions } from "../knobs";
 import { resetDatabase } from "../testSupport/resetDatabase";
 
 /**

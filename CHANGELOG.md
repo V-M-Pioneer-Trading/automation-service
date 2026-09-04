@@ -1,10 +1,58 @@
 # Changelog
 
 How this service got here. The [README](README.md) describes what it does
-*now*; this file is the provenance — which `meta` issue introduced each piece,
-and which decisions were later reversed.
+*now*, [CLAUDE.md](CLAUDE.md) describes how the code is put together, and this
+file is the provenance — which `meta` issue introduced each piece, and which
+decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
+
+## Structure pass: shared FSM, one interval loop, one freshness store
+
+A refactor of how the pieces fit, with the bugs it turned up fixed along the
+way. No new knobs; the API is unchanged.
+
+- **Re-arming after an abort never ticked again.** `stop()` set a flag that
+  `start()` never cleared, so the documented recovery path (abort, re-arm)
+  silently left the ship idle until the process restarted. Every scheduler now
+  runs on one `IntervalLoop` (`intervalLoop.ts`) that owns the one-tick-at-a-
+  time guard, the draining stop, and a restartable start — the same ~40 lines
+  three classes used to carry separately.
+- **`ship_idle` paged on every long flight.** It measured time since the task
+  row last changed, and a row doesn't change during a 30-minute transit. Time
+  inside a wait the ship was told to sit through no longer counts.
+- **`mine.taskWeight = 0` demoted mining instead of disabling it.** A zero
+  score still beat "nothing else on offer". Anything scoring at or below zero
+  is now not a candidate, which also keeps a contract that can only lose money
+  from being flown.
+- **Contract and scout tasks never refuelled.** Only the mining sell leg did,
+  so a ship handed back after a delivery to a non-market waypoint could be too
+  dry to reach anything, and idle there forever on `planner_no_viable_target`.
+  Every task now tops up at every marketplace it docks at.
+- **Two ideas of "market freshness" that disagreed.** The planner scouted
+  against `market_intel` (written only by scouts); `market_stale` read the sell
+  leg's from-afar cache comparisons, which don't refresh anything. A miner
+  that had just sold at a market could be sent straight back to scout it. One
+  store now: `market_intel` is written whenever a docked ship reads a market,
+  and both the planner and the alert read it.
+- **Fuel cost is measured from the purchase itself** — units bought against
+  credits paid — instead of dividing the price by the distance flown that
+  cycle, which assumed the cycle began on a full tank.
+- **Contract purchases counted unrelated cargo as contract goods**, buying too
+  little and believing too much was owed. Only the contract's own good counts.
+- **Contract evaluation loaded the world once per contract** (waypoints,
+  credits, calibration, every market). Discovery now loads one context and
+  reads each market once, and evaluation is pure arithmetic over it.
+- **Knob names are typed.** `KNOB_DEFINITIONS` is the source of `KnobName`;
+  a misspelled knob is a compile error rather than a `NaN` score.
+- **Malformed numeric env vars** (`SCHEDULER_INTERVAL_MS=5s`) refuse to start
+  instead of becoming a `NaN` interval that fires every millisecond.
+- The three task FSMs share `taskFsm.ts` (travel, dock, refuel, wait
+  resolution) and derive their targets from the task instead of being handed
+  them; `contractScheduler.ts` is `contractDiscovery.ts`, since it was never a
+  scheduler; `MiningScheduler` is `FleetScheduler`; `createApp` takes an
+  options object; `withTransaction` and `syncKnobDefinitions` moved out of
+  `db.ts` so knobs and db no longer import each other.
 
 ## Measured value model, knob classes, replay
 

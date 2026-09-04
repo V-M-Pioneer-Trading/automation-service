@@ -5,21 +5,21 @@ import { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
 import { AnomalyConfig, AnomalyScheduler } from "./anomalyScheduler";
 import { AuthConfig, actorOf, createVerifier, SCOPE_FLEET_CONTROL } from "./auth";
-import { AutopilotMode, AutopilotState, InvalidTransitionError } from "./autopilotState";
+import { AutopilotState, InvalidTransitionError } from "./autopilotState";
 import { Clock, systemClock } from "./clock";
 import { ServiceConfig, configFromEnv, resolveM2MTokenSource } from "./config";
 import { ContractRepo } from "./contractRepo";
 import { createPool, migrate } from "./db";
-import { MarketIntelRepo } from "./marketIntelRepo";
 import { EventLog } from "./eventLog";
 import { createGameClients, UpstreamCallError } from "./gameClients";
-import { KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
-import { createClerkM2MTokenSource, createLocalM2MTokenSource, M2MTokenSource } from "./m2mToken";
+import { isKnobClass, KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
+import { createLocalM2MTokenSource, M2MTokenSource } from "./m2mToken";
+import { MarketIntelRepo } from "./marketIntelRepo";
 import { MetricsRepo } from "./metrics";
 import { MetricsScheduler } from "./metricsScheduler";
-import { ObservationRepo } from "./observations";
+import { ObservationRepo, priorsFromKnobs } from "./observations";
 import { Planner } from "./planner";
-import { MiningScheduler } from "./scheduler";
+import { FleetScheduler } from "./scheduler";
 import { ShipTaskRepo } from "./shipTaskRepo";
 import { WebhookDelivery } from "./webhookDelivery";
 
@@ -64,6 +64,8 @@ const clampLimit = (raw: unknown, fallback: number, max: number): number => {
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
 };
 
+const badRequest = (res: express.Response, message: string) => res.status(400).json({ error: { message } });
+
 /**
  * Safety net for a direct `createApp` caller that wires up `mining` without
  * also supplying `authTokenSource` — the real entrypoint and `createTestApp`
@@ -74,14 +76,14 @@ const clampLimit = (raw: unknown, fallback: number, max: number): number => {
  */
 let fallback: M2MTokenSource | null = null;
 const fallbackAuthTokenSource = (): M2MTokenSource => {
-  if (fallback === null) {
-    const { privateKey } = generateKeyPairSync("rsa", {
+  fallback ??= createLocalM2MTokenSource(
+    generateKeyPairSync("rsa", {
       modulusLength: 2048,
       privateKeyEncoding: { type: "pkcs8", format: "pem" },
       publicKeyEncoding: { type: "spki", format: "pem" },
-    });
-    fallback = createLocalM2MTokenSource(privateKey, { scope: SCOPE_FLEET_CONTROL });
-  }
+    }).privateKey,
+    { scope: SCOPE_FLEET_CONTROL }
+  );
   return fallback;
 };
 
@@ -98,34 +100,41 @@ export interface MetricsConfig {
   rollupIntervalMs: number;
 }
 
-/**
- * mining: optional so ticket-8's lifecycle-only tests (and any deployment that
- * hasn't configured a mining target yet) keep working with autopilot arm/pause/
- * abort but no ship-driving scheduler at all. metrics: optional for the same
- * reason — tests that don't care about rollups shouldn't get a background
- * timer they then have to account for. anomaly: optional likewise; requires a
- * webhook URL to be configured, so a deployment that hasn't set one up yet
- * doesn't get anomaly checks silently trying (and failing) to deliver anywhere.
- * authTokenSource: only meaningful alongside `mining` — it's what gameClients
- * presents as `Authorization` on every call to agent/fleet-service (decision
- * 19). Optional so a direct `createApp` caller that never wires up `mining`
- * doesn't also have to think about it; falls back to a throwaway local
- * signer when `mining` is set but this isn't — the real entrypoint below and
- * `createTestApp` both always supply one explicitly.
- */
-export function createApp(
-  pool: Pool,
-  auth: AuthConfig,
-  clock: Clock = systemClock,
-  mining?: MiningConfig,
-  metrics?: MetricsConfig,
-  anomaly?: AnomalyConfig,
-  corsAllowedOrigin: string = "http://localhost:3000",
-  authTokenSource?: M2MTokenSource
-) {
-  // Second and required, ahead of every optional: a caller cannot construct
-  // this service without deciding what it trusts. Tests use `createTestApp`,
-  // which supplies an ephemeral keypair — not a bypass.
+export interface AppOptions {
+  pool: Pool;
+  /** Required: a caller cannot construct this service without deciding what it trusts. Tests use `createTestApp`. */
+  auth: AuthConfig;
+  clock?: Clock;
+  /** Optional so lifecycle-only deployments and tests get arm/pause/abort with no ship-driving scheduler at all. */
+  mining?: MiningConfig;
+  /** Optional so tests that don't care about rollups don't get a background timer to account for. */
+  metrics?: MetricsConfig;
+  /** Optional: needs a webhook URL, so a deployment without one doesn't run checks that can't deliver anywhere. */
+  anomaly?: AnomalyConfig;
+  corsAllowedOrigin?: string;
+  /**
+   * What gameClients presents as `Authorization` on every outbound call to
+   * agent/fleet-service (auth-design.md decision 19). Only meaningful
+   * alongside `mining`. Optional so a caller that wires no `mining` needn't
+   * think about it; with `mining` set but this absent it falls back to a
+   * throwaway local signer, which fails safe (nothing in production trusts
+   * it) rather than open. The entrypoint and `createTestApp` both supply one.
+   */
+  authTokenSource?: M2MTokenSource;
+}
+
+export function createApp(options: AppOptions) {
+  const {
+    pool,
+    auth,
+    clock = systemClock,
+    mining,
+    metrics,
+    anomaly,
+    corsAllowedOrigin = "http://localhost:3000",
+    authTokenSource,
+  } = options;
+
   const { requireScope, requireServiceSecret } = createVerifier(auth);
   const requireControl = requireScope(SCOPE_FLEET_CONTROL);
 
@@ -144,66 +153,61 @@ export function createApp(
 
   const state = new AutopilotState();
   const events = new EventLog(pool, clock);
-  const shipTaskRepo = new ShipTaskRepo(pool, clock);
+  const tasks = new ShipTaskRepo(pool, clock);
   const knobs = new KnobRepo(pool);
   const metricsRepo = new MetricsRepo(pool, clock);
   const anomalyRepo = new AnomalyRepo(pool, clock);
-  const contractRepo = new ContractRepo(pool, clock);
+  const contracts = new ContractRepo(pool, clock);
+  const observations = new ObservationRepo(pool, clock);
+  const marketIntel = new MarketIntelRepo(pool, clock);
 
-  const observationRepo = new ObservationRepo(pool, clock);
   const gameClients =
     mining !== undefined
       ? createGameClients({ ...mining, authTokenSource: authTokenSource ?? fallbackAuthTokenSource() })
       : null;
-  const planner = gameClients !== null ? new Planner(gameClients, knobs, observationRepo) : null;
-  const marketIntelRepo = new MarketIntelRepo(pool, clock);
-
+  const planner = gameClients !== null ? new Planner(gameClients, knobs, observations, contracts, marketIntel) : null;
   const scheduler =
     mining !== undefined && gameClients !== null && planner !== null
-      ? new MiningScheduler(
+      ? new FleetScheduler({
           state,
-          shipTaskRepo,
+          tasks,
           events,
-          gameClients,
+          clients: gameClients,
           clock,
           planner,
           knobs,
-          contractRepo,
-          marketIntelRepo,
-          observationRepo,
+          contracts,
+          marketIntel,
+          observations,
           pool,
-          {
-            shipSymbol: mining.miningShipSymbol,
-            intervalMs: mining.schedulerIntervalMs,
-            replanIntervalMs: mining.replanIntervalMs,
-          }
-        )
+          shipSymbol: mining.miningShipSymbol,
+          intervalMs: mining.schedulerIntervalMs,
+          replanIntervalMs: mining.replanIntervalMs,
+        })
       : null;
 
-  // Runs independent of autopilot arm/pause/abort — metrics (including the
-  // error rate) are meaningful whether or not the fleet is currently armed.
-  const metricsScheduler =
-    metrics !== undefined ? new MetricsScheduler(metricsRepo, clock, metrics.rollupIntervalMs) : null;
+  // Metrics and anomaly detection run independent of autopilot arm/pause/abort:
+  // an idle or erroring fleet is exactly what an operator needs to hear about
+  // whether or not autopilot happens to be armed right now.
+  const metricsScheduler = metrics !== undefined ? new MetricsScheduler(metricsRepo, clock, metrics.rollupIntervalMs) : null;
   metricsScheduler?.start();
 
-  // Also independent of arm/pause/abort, for the same reason as metrics — an
-  // idle or erroring fleet is exactly what an operator needs to hear about
-  // whether or not autopilot happens to be armed right now.
   const anomalyScheduler =
     anomaly !== undefined
-      ? new AnomalyScheduler(
+      ? new AnomalyScheduler({
           state,
-          anomalyRepo,
-          new AnomalyChecker(pool, clock, knobs, state),
-          new WebhookDelivery({ url: anomaly.webhookUrl }),
+          repo: anomalyRepo,
+          checker: new AnomalyChecker(pool, clock, knobs, state, marketIntel),
+          webhook: new WebhookDelivery({ url: anomaly.webhookUrl }),
           events,
           clock,
           knobs,
-          shipTaskRepo,
+          tasks,
           gameClients,
-          { shipSymbol: mining?.miningShipSymbol ?? null, intervalMs: anomaly.intervalMs },
-          () => scheduler?.requestReplan("anomaly")
-        )
+          shipSymbol: mining?.miningShipSymbol ?? null,
+          intervalMs: anomaly.intervalMs,
+          onAnomalyRecorded: () => scheduler?.requestReplan("anomaly"),
+        })
       : null;
   anomalyScheduler?.start();
 
@@ -218,45 +222,43 @@ export function createApp(
   app.get("/health", health);
   app.get("/api/automation/health", health);
 
-  const apiRouter = express.Router();
+  const api = express.Router();
 
-  apiRouter.get("/autopilot/status", (_req, res) => {
-    res.json({ status: state.getStatus(), mode: state.getMode() });
+  // --- Autopilot lifecycle ---
+
+  const lifecycleStatus = () => ({ status: state.getStatus(), mode: state.getMode() });
+
+  api.get("/autopilot/status", (_req, res) => {
+    res.json(lifecycleStatus());
   });
 
-  apiRouter.post(
+  api.post(
     "/autopilot/arm",
     requireControl,
     asyncHandler(async (req, res) => {
-      const token = req.body?.token;
+      const token: unknown = req.body?.token;
       if (typeof token !== "string" || token.length === 0) {
-        res.status(400).json({ error: { message: "token is required" } });
+        badRequest(res, "token is required");
         return;
       }
       const mode: unknown = req.body?.mode ?? "live";
       if (mode !== "live" && mode !== "shadow") {
-        res.status(400).json({ error: { message: 'mode must be "live" or "shadow"' } });
+        badRequest(res, 'mode must be "live" or "shadow"');
         return;
       }
       const from = state.getStatus();
-      state.arm(token, mode as AutopilotMode);
+      state.arm(token, mode);
       scheduler?.start();
       await events.append("armed", { from, mode, actor: actorOf(res) });
-      res.json({ status: state.getStatus(), mode: state.getMode() });
+      res.json(lifecycleStatus());
     })
   );
 
-  const transition = (action: "pause" | "abort", eventType: string) =>
+  const transition = (action: "pause" | "abort") =>
     asyncHandler(async (_req, res) => {
+      const from = state.getStatus();
       try {
-        const from = state.getStatus();
         state[action]();
-        // Awaited so the abort response only returns once any in-flight tick
-        // (assignTarget can now run several sequential HTTP calls for meta#11's
-        // contract discovery) has actually finished, not just been told to stop.
-        if (action === "abort") await scheduler?.stop();
-        await events.append(eventType, { from, actor: actorOf(res) });
-        res.json({ status: state.getStatus(), mode: state.getMode() });
       } catch (err) {
         if (err instanceof InvalidTransitionError) {
           res.status(409).json({ error: { message: err.message } });
@@ -264,18 +266,37 @@ export function createApp(
         }
         throw err;
       }
+      // Awaited so the abort response only returns once any in-flight tick has
+      // actually finished, not just been told to stop.
+      if (action === "abort") await scheduler?.stop();
+      await events.append(action === "pause" ? "paused" : "aborted", { from, actor: actorOf(res) });
+      res.json(lifecycleStatus());
     });
 
-  apiRouter.post("/autopilot/pause", requireControl, transition("pause", "paused"));
-  apiRouter.post("/autopilot/abort", requireControl, transition("abort", "aborted"));
+  api.post("/autopilot/pause", requireControl, transition("pause"));
+  api.post("/autopilot/abort", requireControl, transition("abort"));
 
-  apiRouter.get(
+  api.get(
     "/autopilot/events",
     asyncHandler(async (req, res) => {
       const limit = clampLimit(req.query.limit, 100, MAX_EVENTS_LIMIT);
       res.json({ events: await events.list(limit) });
     })
   );
+
+  if (scheduler !== null) {
+    api.get(
+      "/autopilot/ships/:shipSymbol",
+      asyncHandler(async (req, res) => {
+        const task = await tasks.get(req.params.shipSymbol);
+        if (task === null) {
+          res.status(404).json({ error: { message: "no task for this ship yet" } });
+          return;
+        }
+        res.json({ task });
+      })
+    );
+  }
 
   // For an external supervisor (meta#19's ai-service) to log its own rationale
   // into the same audit trail everything else here uses. `type` is restricted
@@ -284,84 +305,59 @@ export function createApp(
   // that the rest of this service treats as authoritative.
   //
   // Machine caller, so a shared secret rather than a Clerk scope — there is no
-  // human identity behind it, and Clerk stays scoped to humans. The namespace
-  // restriction below is kept as well: authentication proves *who* is calling,
-  // not that the caller should be able to forge an "armed" event.
-  apiRouter.post(
+  // human identity behind it, and Clerk stays scoped to humans.
+  api.post(
     "/events",
     requireServiceSecret(),
     asyncHandler(async (req, res) => {
-      const type = req.body?.type;
-      const detail = req.body?.detail;
+      const type: unknown = req.body?.type;
+      const detail: unknown = req.body?.detail;
       if (typeof type !== "string" || !type.startsWith("ai_")) {
-        res.status(400).json({ error: { message: 'type must be a string starting with "ai_"' } });
+        badRequest(res, 'type must be a string starting with "ai_"');
         return;
       }
       if (detail !== undefined && (typeof detail !== "object" || detail === null || Array.isArray(detail))) {
-        res.status(400).json({ error: { message: "detail must be an object" } });
+        badRequest(res, "detail must be an object");
         return;
       }
-      await events.append(type, detail ?? {});
+      await events.append(type, (detail as Record<string, unknown> | undefined) ?? {});
       res.status(201).json({ ok: true });
     })
   );
 
+  // --- Planner ---
+
   // `?class=policy` is how the AI supervisor asks for exactly the knobs it is
   // allowed to write. Serving the filter here rather than trusting the caller
   // to filter means the restriction holds even if a client forgets it.
-  apiRouter.get(
+  api.get(
     "/planner/knobs",
     asyncHandler(async (req, res) => {
       const requested = req.query.class;
-      if (requested !== undefined) {
-        if (requested !== "model" && requested !== "policy" && requested !== "alert") {
-          res.status(400).json({ error: { message: 'class must be "model", "policy" or "alert"' } });
-          return;
-        }
-        res.json({ knobs: await knobs.getByClass(requested) });
+      if (requested === undefined) {
+        res.json({ knobs: await knobs.getAll() });
         return;
       }
-      res.json({ knobs: await knobs.getAll() });
+      if (!isKnobClass(requested)) {
+        badRequest(res, 'class must be "model", "policy" or "alert"');
+        return;
+      }
+      res.json({ knobs: await knobs.getByClass(requested) });
     })
   );
 
-  // What the planner currently believes about the universe, and whether each
-  // belief was measured or assumed. The single most useful thing to look at
-  // when a ship goes somewhere surprising.
-  apiRouter.get(
-    "/planner/model",
-    asyncHandler(async (_req, res) => {
-      const values = await knobs.getValues();
-      const model = await observationRepo.calibrate({
-        creditsPerCyclePrior: values["mine.creditsPerCyclePrior"],
-        speedUnitsPerHourPrior: values["travel.speedUnitsPerHourPrior"],
-        overheadHoursPrior: values["cycle.overheadHoursPrior"],
-        fuelCreditsPerUnitDistancePrior: values["fuel.creditsPerUnitDistancePrior"],
-        halfLifeHours: values["observation.halfLifeHours"],
-      });
-      res.json({ model });
-    })
-  );
-
-  apiRouter.put(
+  api.put(
     "/planner/knobs/:name",
     requireControl,
     asyncHandler(async (req, res) => {
-      const value = req.body?.value;
+      const value: unknown = req.body?.value;
       if (typeof value !== "number" || !Number.isFinite(value)) {
-        res.status(400).json({ error: { message: "value must be a finite number" } });
+        badRequest(res, "value must be a finite number");
         return;
       }
       try {
-        // set() reads and writes within one transaction so previousValue is
-        // never stale under concurrent writes to the same knob.
         const { knob, previousValue } = await knobs.set(req.params.name, value);
-        await events.append("knob_changed", {
-          name: req.params.name,
-          previousValue,
-          newValue: knob.value,
-          actor: actorOf(res),
-        });
+        await events.append("knob_changed", { name: req.params.name, previousValue, newValue: knob.value, actor: actorOf(res) });
         scheduler?.requestReplan("knob_change");
         res.json({ knob });
       } catch (err) {
@@ -370,7 +366,7 @@ export function createApp(
           return;
         }
         if (err instanceof KnobOutOfRangeError) {
-          res.status(400).json({ error: { message: err.message } });
+          badRequest(res, err.message);
           return;
         }
         throw err;
@@ -378,8 +374,18 @@ export function createApp(
     })
   );
 
+  // What the planner currently believes about the universe, and whether each
+  // belief was measured or assumed. The single most useful thing to look at
+  // when a ship goes somewhere surprising.
+  api.get(
+    "/planner/model",
+    asyncHandler(async (_req, res) => {
+      res.json({ model: await observations.calibrate(priorsFromKnobs(await knobs.getValues())) });
+    })
+  );
+
   if (scheduler !== null) {
-    apiRouter.post(
+    api.post(
       "/planner/replan",
       requireControl,
       asyncHandler(async (_req, res) => {
@@ -389,23 +395,22 @@ export function createApp(
     );
   }
 
+  // --- Observability ---
+
   if (metricsScheduler !== null) {
-    apiRouter.get(
+    api.get(
       "/metrics/context",
       asyncHandler(async (req, res) => {
         const rollupLimit = clampLimit(req.query.rollupLimit, DEFAULT_CONTEXT_ROLLUP_LIMIT, MAX_ROLLUPS_LIMIT);
         const eventLimit = clampLimit(req.query.eventLimit, DEFAULT_CONTEXT_EVENT_LIMIT, MAX_CONTEXT_EVENT_LIMIT);
-        const [rollups, recentEvents] = await Promise.all([
-          metricsRepo.list(rollupLimit),
-          events.list(eventLimit),
-        ]);
+        const [rollups, recentEvents] = await Promise.all([metricsRepo.list(rollupLimit), events.list(eventLimit)]);
         res.json({ rollups, events: recentEvents });
       })
     );
   }
 
   if (anomalyScheduler !== null) {
-    apiRouter.get(
+    api.get(
       "/anomalies/digest",
       asyncHandler(async (req, res) => {
         const windowMinutes = clampLimit(req.query.windowMinutes, DEFAULT_DIGEST_WINDOW_MINUTES, MAX_DIGEST_WINDOW_MINUTES);
@@ -421,21 +426,7 @@ export function createApp(
     );
   }
 
-  if (scheduler !== null) {
-    apiRouter.get(
-      "/autopilot/ships/:shipSymbol",
-      asyncHandler(async (req, res) => {
-        const task = await shipTaskRepo.get(req.params.shipSymbol);
-        if (task === null) {
-          res.status(404).json({ error: { message: "no task for this ship yet" } });
-          return;
-        }
-        res.json({ task });
-      })
-    );
-  }
-
-  app.use("/api/automation/v1", apiRouter);
+  app.use("/api/automation/v1", api);
 
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const status = err instanceof UpstreamCallError ? err.statusCode : 500;
@@ -447,16 +438,15 @@ export function createApp(
   // short-lived apps in one process need an explicit way to stop these
   // background timers, or a leaked scheduler from an earlier test keeps
   // ticking against (and polluting) a later test's freshly-truncated tables.
-  // Deliberately does NOT stop the mining/contract schedulers — those ARE tied
-  // to arm/abort (see the "abort" transition above), so a test that configures
-  // mining should call POST /autopilot/abort for those, same as production.
+  // Deliberately does NOT stop the fleet scheduler — that IS tied to
+  // arm/abort, so a test that configures mining should POST /autopilot/abort.
   app.locals.stopBackgroundSchedulers = async () => {
     await Promise.all([metricsScheduler?.stop(), anomalyScheduler?.stop()]);
   };
 
-  // Test-only escape hatch from the anomaly scheduler's real setInterval —
-  // lets a test force exactly one deterministic tick (draining any in-flight
-  // one first) instead of racing FakeClock jumps against wall-clock ticks.
+  // Test-only escape hatch from the anomaly scheduler's real interval — lets
+  // a test force exactly one deterministic tick instead of racing FakeClock
+  // jumps against wall-clock ticks.
   app.locals.forceAnomalyTick = async () => {
     await anomalyScheduler?.forceTick();
   };
@@ -469,27 +459,18 @@ if (require.main === module) {
     .then(() => {
       const config: ServiceConfig = configFromEnv();
       const pool = createPool(config.databaseUrl);
-      const port = Number(process.env.PORT ?? 3003);
-      const anomalyConfig: AnomalyConfig | undefined =
-        config.anomalyWebhookUrl !== null
-          ? { webhookUrl: config.anomalyWebhookUrl, intervalMs: config.anomalyIntervalMs }
-          : undefined;
       return migrate(pool).then(() =>
-        createApp(
+        createApp({
           pool,
-          {
-            clerkJwtKeyPem: config.clerkJwtKeyPem,
-            clerkIssuer: config.clerkIssuer,
-            aiServiceSecret: config.aiServiceSecret,
-          },
-          systemClock,
-          config,
-          { rollupIntervalMs: config.metricsRollupIntervalMs },
-          anomalyConfig,
-          config.corsAllowedOrigin,
-          resolveM2MTokenSource()
-        ).listen(port, () => {
-          console.log(`automation-service listening on http://localhost:${port}`);
+          auth: { clerkJwtKeyPem: config.clerkJwtKeyPem, clerkIssuer: config.clerkIssuer, aiServiceSecret: config.aiServiceSecret },
+          mining: config,
+          metrics: { rollupIntervalMs: config.metricsRollupIntervalMs },
+          anomaly:
+            config.anomalyWebhookUrl !== null ? { webhookUrl: config.anomalyWebhookUrl, intervalMs: config.anomalyIntervalMs } : undefined,
+          corsAllowedOrigin: config.corsAllowedOrigin,
+          authTokenSource: resolveM2MTokenSource(),
+        }).listen(config.port, () => {
+          console.log(`automation-service listening on http://localhost:${config.port}`);
         })
       );
     })

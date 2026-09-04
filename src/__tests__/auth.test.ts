@@ -46,16 +46,15 @@ describe("automation-service authentication", () => {
   describe("refusing to start without a trust anchor", () => {
     it("rejects an empty Clerk key rather than defaulting to open", () => {
       expect(() =>
-        createApp(pool, { clerkJwtKeyPem: "", clerkIssuer: null, aiServiceSecret: "s" })
+        createApp({ pool, auth: { clerkJwtKeyPem: "", clerkIssuer: null, aiServiceSecret: "s" } })
       ).toThrow(/clerkJwtKeyPem is required/);
     });
 
     it("rejects an empty service secret rather than leaving the machine route open", () => {
       expect(() =>
-        createApp(pool, {
-          clerkJwtKeyPem: TEST_CLERK_JWT_KEY,
-          clerkIssuer: null,
-          aiServiceSecret: "",
+        createApp({
+          pool,
+          auth: { clerkJwtKeyPem: TEST_CLERK_JWT_KEY, clerkIssuer: null, aiServiceSecret: "" },
         })
       ).toThrow(/aiServiceSecret is required/);
     });

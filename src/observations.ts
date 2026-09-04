@@ -1,5 +1,6 @@
 import { Pool, PoolClient } from "pg";
 import { Clock } from "./clock";
+import { KnobValues } from "./knobs";
 
 /**
  * What the fleet has actually learned by flying.
@@ -77,6 +78,23 @@ export interface CalibratedModel {
 
 export type Provenance = "measured" | "prior";
 
+export interface CalibrationPriors {
+  creditsPerCyclePrior: number;
+  speedUnitsPerHourPrior: number;
+  overheadHoursPrior: number;
+  fuelCreditsPerUnitDistancePrior: number;
+  halfLifeHours: number;
+}
+
+/** The `model`-class knobs, as the cold-start priors `calibrate` falls back to. */
+export const priorsFromKnobs = (knobs: KnobValues): CalibrationPriors => ({
+  creditsPerCyclePrior: knobs["mine.creditsPerCyclePrior"],
+  speedUnitsPerHourPrior: knobs["travel.speedUnitsPerHourPrior"],
+  overheadHoursPrior: knobs["cycle.overheadHoursPrior"],
+  fuelCreditsPerUnitDistancePrior: knobs["fuel.creditsPerUnitDistancePrior"],
+  halfLifeHours: knobs["observation.halfLifeHours"],
+});
+
 export class ObservationRepo {
   constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
@@ -106,9 +124,9 @@ export class ObservationRepo {
   }
 
   /**
-   * Records one real flight: how far, how long. Taken from the ship's own nav
-   * route (origin and destination coordinates, departure and arrival times), so
-   * it's the game's own timing rather than anything we estimated.
+   * Records one real flight (how far, how long — from the ship's own nav
+   * route, so it's the game's timing rather than an estimate) or one refuel
+   * (how many units, what they cost).
    */
   async recordTravel(params: { distance: number; hours?: number | null; fuelCredits?: number | null }): Promise<void> {
     await this.pool.query(
@@ -153,13 +171,7 @@ export class ObservationRepo {
    * on missing data — a fleet on its first tick calibrates to exactly the
    * priors, which is the old behavior, so there is no cold-start cliff.
    */
-  async calibrate(priors: {
-    creditsPerCyclePrior: number;
-    speedUnitsPerHourPrior: number;
-    overheadHoursPrior: number;
-    fuelCreditsPerUnitDistancePrior: number;
-    halfLifeHours: number;
-  }): Promise<CalibratedModel> {
+  async calibrate(priors: CalibrationPriors): Promise<CalibratedModel> {
     const now = this.clock.now();
     const since = new Date(now.getTime() - MAX_OBSERVATION_AGE_HOURS * 3_600_000);
     const [mining, travel] = await Promise.all([this.recentMining(since), this.recentTravel(since)]);

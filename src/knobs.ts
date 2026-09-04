@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { withTransaction } from "./transaction";
 
 /**
  * Which kind of number a knob holds. This distinction is the reason knobs are
@@ -26,6 +27,11 @@ import { Pool } from "pg";
  */
 export type KnobClass = "model" | "policy" | "alert";
 
+export const KNOB_CLASSES: readonly KnobClass[] = ["model", "policy", "alert"];
+
+export const isKnobClass = (value: unknown): value is KnobClass =>
+  typeof value === "string" && (KNOB_CLASSES as readonly string[]).includes(value);
+
 export interface KnobDefinition {
   name: string;
   class: KnobClass;
@@ -41,9 +47,11 @@ export interface KnobDefinition {
  * against schema data rather than a hardcoded switch statement.
  *
  * Adding a knob here is enough to create it; removing one here deletes it on
- * the next boot, so this list is always the complete and current set.
+ * the next boot, so this list is always the complete and current set. It is
+ * also the source of the `KnobName` type, so a typo in a knob name anywhere in
+ * the code is a compile error rather than a `NaN` score at runtime.
  */
-export const KNOB_DEFINITIONS: KnobDefinition[] = [
+export const KNOB_DEFINITIONS = [
   // --- Model: measured from observation, these values are only cold-start priors ---
   {
     name: "mine.creditsPerCyclePrior",
@@ -175,7 +183,9 @@ export const KNOB_DEFINITIONS: KnobDefinition[] = [
     default: 10,
     min: 1,
     max: 1440,
-    description: "Minutes a ship can sit without changing phase (while armed and live) before it's flagged idle.",
+    description:
+      "Minutes a ship can sit without progress (while armed and live) before it's flagged idle. " +
+      "Time spent inside a known wait — a flight or a cooldown — doesn't count.",
   },
   {
     name: "anomaly.profitDropFraction",
@@ -223,7 +233,9 @@ export const KNOB_DEFINITIONS: KnobDefinition[] = [
     default: 30,
     min: 5,
     max: 1440,
-    description: "Minutes since a market in active use was last priced before its price data is flagged stale.",
+    description:
+      "Minutes since a ship last refreshed a market's prices in person before a market the planner is " +
+      "deciding on is flagged stale.",
   },
   {
     name: "anomaly.dedupeCooldownMinutes",
@@ -233,7 +245,14 @@ export const KNOB_DEFINITIONS: KnobDefinition[] = [
     max: 1440,
     description: "How long an already-fired anomaly stays suppressed, so one open problem doesn't page every tick.",
   },
-];
+] as const satisfies readonly KnobDefinition[];
+
+export type KnobName = (typeof KNOB_DEFINITIONS)[number]["name"];
+
+/** Every knob's current value, keyed by name. Complete by construction — see `KnobRepo.getValues`. */
+export type KnobValues = Record<KnobName, number>;
+
+export const KNOB_NAMES: readonly KnobName[] = KNOB_DEFINITIONS.map((d) => d.name);
 
 export const KNOB_DEFINITIONS_BY_NAME: ReadonlyMap<string, KnobDefinition> = new Map(
   KNOB_DEFINITIONS.map((d) => [d.name, d])
@@ -261,63 +280,93 @@ export class KnobOutOfRangeError extends Error {
   }
 }
 
+const KNOB_SELECT = "SELECT name, knob_class, value, default_value, min_value, max_value FROM knob";
+
+/**
+ * Brings the `knob` table in line with KNOB_DEFINITIONS.
+ *
+ * An operator's *tuned value* always survives a redeploy — that's the whole
+ * point of storing it — but everything else about a knob (its class, bounds,
+ * default) is code, and code wins. A knob dropped from the definitions is
+ * deleted rather than left behind: an orphan row would still appear in the API
+ * and in the AI supervisor's tool list, offering a lever wired to nothing.
+ *
+ * A tuned value that no longer fits newly-tightened bounds is clamped, not
+ * discarded, so a redeploy can never leave a value the write path itself would
+ * reject.
+ */
+export async function syncKnobDefinitions(pool: Pool): Promise<void> {
+  for (const def of KNOB_DEFINITIONS) {
+    await pool.query(
+      `INSERT INTO knob (name, knob_class, value, default_value, min_value, max_value)
+       VALUES ($1, $2, $3, $3, $4, $5)
+       ON CONFLICT (name) DO UPDATE SET
+         knob_class = EXCLUDED.knob_class,
+         default_value = EXCLUDED.default_value,
+         min_value = EXCLUDED.min_value,
+         max_value = EXCLUDED.max_value,
+         value = LEAST(GREATEST(knob.value, EXCLUDED.min_value), EXCLUDED.max_value)`,
+      [def.name, def.class, def.default, def.min, def.max]
+    );
+  }
+  await pool.query(`DELETE FROM knob WHERE name <> ALL($1::text[])`, [KNOB_NAMES]);
+}
+
 export class KnobRepo {
   constructor(private pool: Pool) {}
 
   async getAll(): Promise<Knob[]> {
-    const { rows } = await this.pool.query(
-      "SELECT name, knob_class, value, default_value, min_value, max_value FROM knob ORDER BY name"
-    );
+    const { rows } = await this.pool.query(`${KNOB_SELECT} ORDER BY name`);
     return rows.map(rowToKnob);
   }
 
   /** Just the knobs of one class — how the AI supervisor's tool surface is narrowed to `policy`. */
   async getByClass(knobClass: KnobClass): Promise<Knob[]> {
-    const { rows } = await this.pool.query(
-      "SELECT name, knob_class, value, default_value, min_value, max_value FROM knob WHERE knob_class = $1 ORDER BY name",
-      [knobClass]
-    );
+    const { rows } = await this.pool.query(`${KNOB_SELECT} WHERE knob_class = $1 ORDER BY name`, [knobClass]);
     return rows.map(rowToKnob);
   }
 
-  async get(name: string): Promise<number> {
+  async get(name: KnobName): Promise<number> {
     const { rows } = await this.pool.query("SELECT value FROM knob WHERE name = $1", [name]);
     if (rows.length === 0) throw new KnobNotFoundError(name);
     return Number(rows[0].value);
   }
 
-  /** Every knob as a plain name→value map, for the callers that need most of them at once. */
-  async getValues(): Promise<Record<string, number>> {
+  /**
+   * Every knob's value at once, for the planner and anything else that needs
+   * most of them. Guaranteed complete: a name missing from the table (which
+   * `syncKnobDefinitions` on boot should make impossible) throws here rather
+   * than turning up as `undefined` inside a score.
+   */
+  async getValues(): Promise<KnobValues> {
     const { rows } = await this.pool.query("SELECT name, value FROM knob");
-    return Object.fromEntries(rows.map((r: { name: string; value: string | number }) => [r.name, Number(r.value)]));
+    const values: Partial<KnobValues> = {};
+    for (const row of rows as { name: string; value: string | number }[]) {
+      if (KNOB_DEFINITIONS_BY_NAME.has(row.name)) values[row.name as KnobName] = Number(row.value);
+    }
+    for (const name of KNOB_NAMES) {
+      if (values[name] === undefined) throw new KnobNotFoundError(name);
+    }
+    return values as KnobValues;
   }
 
-  // Reads and writes on the same row within one client-held transaction (with a
-  // row lock), so the previousValue returned is always the value actually
-  // overwritten — a plain pool.query() get() followed by a separate set() call
-  // could interleave with a concurrent writer and report a stale previousValue.
+  /**
+   * Reads and writes the row under one row lock, so the previousValue returned
+   * is always the value actually overwritten — a plain get() followed by a
+   * separate set() could interleave with a concurrent writer and report a
+   * stale previousValue.
+   */
   async set(name: string, value: number): Promise<{ knob: Knob; previousValue: number }> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const { rows } = await client.query(
-        "SELECT name, knob_class, value, default_value, min_value, max_value FROM knob WHERE name = $1 FOR UPDATE",
-        [name]
-      );
+    return withTransaction(this.pool, async (client) => {
+      const { rows } = await client.query(`${KNOB_SELECT} WHERE name = $1 FOR UPDATE`, [name]);
       if (rows.length === 0) throw new KnobNotFoundError(name);
       const knob = rowToKnob(rows[0]);
       if (value < knob.min || value > knob.max) {
         throw new KnobOutOfRangeError(name, value, knob.min, knob.max);
       }
       await client.query("UPDATE knob SET value = $2 WHERE name = $1", [name, value]);
-      await client.query("COMMIT");
       return { knob: { ...knob, value }, previousValue: knob.value };
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
+    });
   }
 }
 

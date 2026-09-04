@@ -24,8 +24,8 @@ export interface ContractRecord {
  */
 export class ContractRepo {
   // Pool | PoolClient (not just Pool) so callers can pass a transaction's
-  // checked-out client (see db.ts's withTransaction) to make this write part
-  // of a larger atomic transaction (meta#30).
+  // checked-out client (see transaction.ts) to make this write part of a
+  // larger atomic transaction (meta#30).
   constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
   async knownIds(): Promise<Set<string>> {

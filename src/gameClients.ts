@@ -156,8 +156,7 @@ export function createGameClients(config: {
 
     getAgent: (spaceTradersToken: string) => callJson<AgentSnapshot>(`${config.agentServiceUrl}/agent`, spaceTradersToken),
 
-    getContracts: (spaceTradersToken: string) =>
-      callJson<Contract[]>(`${config.agentServiceUrl}/contracts`, spaceTradersToken),
+    getContracts: (spaceTradersToken: string) => callJson<Contract[]>(`${config.agentServiceUrl}/contracts`, spaceTradersToken),
 
     acceptContract: (contractId: string, spaceTradersToken: string) =>
       callJson<{ agent: AgentSnapshot; contract: Contract }>(
@@ -210,20 +209,13 @@ export function createGameClients(config: {
     // calibrate fuel cost (observations.ts) — a refuel that reports no price
     // still refuels the ship, it just teaches us nothing.
     refuel: (shipSymbol: string, spaceTradersToken: string) =>
-      fleetAction<{ data?: { transaction?: { totalPrice?: number } } }>(shipSymbol, "refuel", spaceTradersToken),
+      fleetAction<{ data?: { transaction?: { units?: number; totalPrice?: number } } }>(shipSymbol, "refuel", spaceTradersToken),
 
     purchase: (shipSymbol: string, tradeSymbol: string, units: number, spaceTradersToken: string) =>
       agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "purchase", spaceTradersToken, {
         symbol: tradeSymbol,
         units,
       }),
-
-    purchaseShip: (shipType: string, waypointSymbol: string, spaceTradersToken: string) =>
-      callJson<{ data: { ship: ShipSnapshot; transaction: { price: number } } }>(
-        `${config.agentServiceUrl}/ships/purchase`,
-        spaceTradersToken,
-        { method: "POST", body: JSON.stringify({ shipType, waypointSymbol }) }
-      ),
 
     deliverContract: (
       contractId: string,
@@ -232,11 +224,10 @@ export function createGameClients(config: {
       units: number,
       spaceTradersToken: string
     ) =>
-      callJson<{ data: { contract: Contract } }>(
-        `${config.fleetServiceUrl}/contracts/${contractId}/deliver`,
-        spaceTradersToken,
-        { method: "POST", body: JSON.stringify({ shipSymbol, tradeSymbol, units }) }
-      ),
+      callJson<{ data: { contract: Contract } }>(`${config.fleetServiceUrl}/contracts/${contractId}/deliver`, spaceTradersToken, {
+        method: "POST",
+        body: JSON.stringify({ shipSymbol, tradeSymbol, units }),
+      }),
   };
 }
 
