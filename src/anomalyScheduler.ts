@@ -99,7 +99,7 @@ export class AnomalyScheduler {
     const token = state.getToken();
     if (token === null) return;
     try {
-      const agent = await gameClients.getAgent(`Bearer ${token}`);
+      const agent = await gameClients.getAgent(token);
       if (this.loop.stopped) return; // a leaked in-flight tick must not persist after stop()
       await events.append("agent_credits_snapshot", { credits: agent.credits });
     } catch {

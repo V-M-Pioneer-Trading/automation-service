@@ -61,7 +61,7 @@ const ctx = (overrides: Partial<TaskContext>): TaskContext => ({
   ship: ship(),
   clients: clients({}),
   clock,
-  authHeader: "Bearer t",
+  spaceTradersToken: "t",
   ...overrides,
 });
 
@@ -148,7 +148,7 @@ describe("contract purchase", () => {
       }),
       contract,
     });
-    expect(purchase).toHaveBeenCalledWith("SHIP-1", "IRON_ORE", 5, "Bearer t");
+    expect(purchase).toHaveBeenCalledWith("SHIP-1", "IRON_ORE", 5, "t");
     expect(result).toMatchObject({ event: "contract_purchase", task: { phase: "CONTRACT_TRAVEL_TO_DESTINATION" } });
   });
 
@@ -200,7 +200,7 @@ describe("mining", () => {
         }),
       })
     );
-    expect(sell).toHaveBeenCalledWith("SHIP-1", "IRON_ORE", 3, "Bearer t");
+    expect(sell).toHaveBeenCalledWith("SHIP-1", "IRON_ORE", 3, "t");
     expect(result).toMatchObject({
       event: "mining_sell",
       task: { cycleRevenue: 90 },

@@ -14,6 +14,7 @@ flowchart LR
     AS[automation-service] -->|ship state, agent, contracts,<br/>buy / sell| AG[agent-service]
     AS -->|orbit, dock, navigate,<br/>survey, extract, refuel, deliver| FL[fleet-service]
     AS -->|waypoints, markets| NAV[navigation-service]
+    AS -.->|every outbound call carries two headers:<br/>its own Clerk M2M token, and<br/>the armed SpaceTraders token| AG
     AS --- DB[(Postgres<br/>tasks, knobs, events,<br/>observations, anomalies)]
     AS -->|anomaly webhook| WH[operator webhook]
     AG & FL & NAV --> ST[(SpaceTraders API)]
@@ -553,6 +554,8 @@ Invalid lifecycle transitions return `409` naming the current status.
 | `CLERK_JWT_KEY_FILE` | Path to that key instead of an inline value; `CLERK_JWT_KEY` wins if both are set. One of the two is **required** |
 | `CLERK_ISSUER` | Expected `iss`, optional. Narrows misconfiguration, not a control |
 | `AI_SERVICE_SECRET` | Shared secret for `POST /events` (**required**) |
+| `CLERK_M2M_SECRET_KEY` | Clerk Machine Secret Key this service mints its own outbound token with (production) |
+| `DEV_M2M_SIGNING_KEY_FILE` | Path to a private key to sign that token locally instead, no Clerk account needed. One of these two is **required** |
 
 Which asteroid field to mine is **not** configured; the planner chooses it.
 Tune scoring through knobs, not env vars. Every `*_MS` value and `PORT` must
@@ -586,6 +589,22 @@ service that can be deployed with authentication silently off.
 
 Mutating routes stamp `detail.actor`, the Clerk user id, onto the event they
 write, so the audit trail records who armed, paused, aborted or retuned.
+
+### Calling out
+
+The sibling services gate their own routes the same way, so this service is
+itself a caller that has to prove who it is. Every outbound call carries two
+headers, because they answer two different questions:
+
+| Header | Carries | Answers |
+|---|---|---|
+| `Authorization` | This service's own Clerk M2M token, minted and cached for its lifetime rather than per tick | "May automation-service act here?" |
+| `X-SpaceTraders-Token` | The raw game token the operator armed with | "Which agent is this acting for?" |
+
+The M2M token comes from a real Clerk Machine in production
+(`CLERK_M2M_SECRET_KEY`) and is signed locally in dev and tests
+(`DEV_M2M_SIGNING_KEY_FILE`). Only the trust anchor differs; verification on
+the receiving end is real either way.
 
 ---
 

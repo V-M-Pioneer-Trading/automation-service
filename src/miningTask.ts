@@ -55,13 +55,13 @@ const cooldownWait = (ctx: TaskContext, phase: "SURVEY" | "EXTRACT"): TickResult
 };
 
 async function dispatchSurvey(ctx: TaskContext): Promise<TickResult> {
-  const { task, clients, authHeader } = ctx;
+  const { task, clients, spaceTradersToken } = ctx;
   const cooldown = cooldownWait(ctx, "SURVEY");
   if (cooldown !== null) return cooldown;
   if (task.survey !== null) {
     return { task: withPhase(task, "EXTRACT"), event: "mining_survey_ready", detail: { shipSymbol: task.shipSymbol } };
   }
-  const res = await clients.survey(task.shipSymbol, authHeader);
+  const res = await clients.survey(task.shipSymbol, spaceTradersToken);
   const survey = res.data.surveys[0] ?? null;
   return {
     task: withWait({ ...task, survey }, new Date(res.data.cooldown.expiration)),
@@ -71,7 +71,7 @@ async function dispatchSurvey(ctx: TaskContext): Promise<TickResult> {
 }
 
 async function dispatchExtract(ctx: TaskContext): Promise<TickResult> {
-  const { task, ship, clients, clock, authHeader } = ctx;
+  const { task, ship, clients, clock, spaceTradersToken } = ctx;
   if (ship.cargo.units >= ship.cargo.capacity) {
     return {
       task: { ...withPhase(task, "TRAVEL_TO_MARKET"), survey: null },
@@ -88,7 +88,7 @@ async function dispatchExtract(ctx: TaskContext): Promise<TickResult> {
       detail: { shipSymbol: task.shipSymbol },
     };
   }
-  const res = await clients.extractWithSurvey(task.shipSymbol, task.survey, authHeader);
+  const res = await clients.extractWithSurvey(task.shipSymbol, task.survey, spaceTradersToken);
   const { symbol, units } = res.data.extraction.yield;
   return {
     task: withWait(
@@ -109,15 +109,15 @@ async function findBestMarket(
   systemSymbol: string,
   tradeSymbol: string,
   clients: GameClients,
-  authHeader: string
+  spaceTradersToken: string
 ): Promise<{ waypoint: string | null; checked: string[] }> {
-  const waypoints = await clients.getSystemWaypoints(systemSymbol, authHeader);
+  const waypoints = await clients.getSystemWaypoints(systemSymbol, spaceTradersToken);
   const marketplaces = waypoints.filter((w) => w.traits.some((t) => t.symbol === "MARKETPLACE"));
 
   let best: { waypoint: string; price: number } | null = null;
   const checked: string[] = [];
   for (const w of marketplaces) {
-    const market = await clients.getMarket(w.symbol, authHeader);
+    const market = await clients.getMarket(w.symbol, spaceTradersToken);
     checked.push(w.symbol);
     const good = market.tradeGoods?.find((g) => g.symbol === tradeSymbol);
     if (good !== undefined && (best === null || good.sellPrice > best.price)) {
@@ -128,7 +128,7 @@ async function findBestMarket(
 }
 
 async function travelToMarket(ctx: TaskContext): Promise<TickResult> {
-  const { task, ship, clients, authHeader } = ctx;
+  const { task, ship, clients, spaceTradersToken } = ctx;
   if (task.marketWaypoint !== null) return travelTo(ctx, task.marketWaypoint, "SELL", "mining");
 
   // A survey can yield more than one resource type before cargo fills, but
@@ -137,7 +137,7 @@ async function travelToMarket(ctx: TaskContext): Promise<TickResult> {
   // marketWaypoint reset) for each distinct good the chosen market doesn't
   // buy, so every stop picks the best market for whatever's left.
   const remaining = ship.cargo.inventory[0]?.symbol ?? task.tradeSymbol ?? "";
-  const { waypoint: market, checked } = await findBestMarket(ship.nav.systemSymbol, remaining, clients, authHeader);
+  const { waypoint: market, checked } = await findBestMarket(ship.nav.systemSymbol, remaining, clients, spaceTradersToken);
   if (market === null) {
     return { task, event: "mining_no_market_found", detail: { shipSymbol: task.shipSymbol, tradeSymbol: remaining } };
   }
@@ -151,7 +151,7 @@ async function travelToMarket(ctx: TaskContext): Promise<TickResult> {
 }
 
 async function dispatchSell(ctx: TaskContext): Promise<TickResult> {
-  const { task, ship, clients, clock, authHeader } = ctx;
+  const { task, ship, clients, clock, spaceTradersToken } = ctx;
   const docking = await dockIfNeeded(ctx, "mining");
   if (docking !== null) return docking;
 
@@ -161,7 +161,7 @@ async function dispatchSell(ctx: TaskContext): Promise<TickResult> {
     // dispatching a sell, instead of always trying inventory[0] and erroring
     // the moment it's a good this market doesn't carry. The ship is docked
     // here, so this read is a genuine price refresh.
-    const market = await clients.getMarket(marketWaypoint, authHeader);
+    const market = await clients.getMarket(marketWaypoint, spaceTradersToken);
     const observations = { marketsRefreshed: [marketWaypoint] };
     const sellable = ship.cargo.inventory.find((i) => market.tradeGoods?.some((g) => g.symbol === i.symbol));
     if (sellable === undefined) {
@@ -180,7 +180,7 @@ async function dispatchSell(ctx: TaskContext): Promise<TickResult> {
         observations,
       };
     }
-    const res = await clients.sell(task.shipSymbol, sellable.symbol, sellable.units, authHeader);
+    const res = await clients.sell(task.shipSymbol, sellable.symbol, sellable.units, spaceTradersToken);
     const totalPrice = res.data.transaction.totalPrice;
     return {
       // Revenue accumulates across every sell in the cycle, including the extra

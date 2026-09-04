@@ -100,10 +100,10 @@ export class Planner {
   ) {}
 
   /** One fetch of everything a decision depends on: one waypoint lookup, one credit balance, one calibration. */
-  async loadContext(systemSymbol: string, authHeader: string): Promise<DecisionContext> {
+  async loadContext(systemSymbol: string, spaceTradersToken: string): Promise<DecisionContext> {
     const [waypoints, agent, knobs] = await Promise.all([
-      this.clients.getSystemWaypoints(systemSymbol, authHeader),
-      this.clients.getAgent(authHeader),
+      this.clients.getSystemWaypoints(systemSymbol, spaceTradersToken),
+      this.clients.getAgent(spaceTradersToken),
       this.knobs.getValues(),
     ]);
     const model = await this.observations.calibrate(priorsFromKnobs(knobs));
@@ -123,10 +123,10 @@ export class Planner {
    * best accepted-but-unassigned contract, and the most worthwhile market to
    * re-price, compared in the same credits-per-hour units.
    */
-  async assignTarget(params: { ship: ShipSnapshot; authHeader: string; now: Date }): Promise<TargetAssignment> {
-    const { ship, authHeader, now } = params;
+  async assignTarget(params: { ship: ShipSnapshot; spaceTradersToken: string; now: Date }): Promise<TargetAssignment> {
+    const { ship, spaceTradersToken, now } = params;
     const [context, acceptedContracts, marketIntel] = await Promise.all([
-      this.loadContext(ship.nav.systemSymbol, authHeader),
+      this.loadContext(ship.nav.systemSymbol, spaceTradersToken),
       this.contracts.listAccepted(),
       this.marketIntel.getAll(),
     ]);

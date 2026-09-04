@@ -44,7 +44,7 @@ const heldUnits = (ctx: TaskContext, tradeSymbol: string): number =>
   ctx.ship.cargo.inventory.find((i) => i.symbol === tradeSymbol)?.units ?? 0;
 
 async function dispatchPurchase(ctx: TaskContext, contract: ContractRecord): Promise<TickResult> {
-  const { task, ship, clients, authHeader } = ctx;
+  const { task, ship, clients, spaceTradersToken } = ctx;
   const docking = await dockIfNeeded(ctx, "contract");
   if (docking !== null) return docking;
   // The procurement market is the one guaranteed fuel stop on this loop; leave
@@ -64,7 +64,7 @@ async function dispatchPurchase(ctx: TaskContext, contract: ContractRecord): Pro
       detail: { shipSymbol: task.shipSymbol, reason: owed <= 0 ? "cargo already holds what's owed" : "cargo full" },
     };
   }
-  const res = await clients.purchase(task.shipSymbol, tradeSymbol, units, authHeader);
+  const res = await clients.purchase(task.shipSymbol, tradeSymbol, units, spaceTradersToken);
   return {
     task: { ...withPhase(task, "CONTRACT_TRAVEL_TO_DESTINATION"), tradeSymbol },
     event: "contract_purchase",
@@ -73,7 +73,7 @@ async function dispatchPurchase(ctx: TaskContext, contract: ContractRecord): Pro
 }
 
 async function dispatchDeliver(ctx: TaskContext, contract: ContractRecord): Promise<TickResult> {
-  const { task, clients, authHeader } = ctx;
+  const { task, clients, spaceTradersToken } = ctx;
   const docking = await dockIfNeeded(ctx, "contract");
   if (docking !== null) return docking;
 
@@ -90,7 +90,7 @@ async function dispatchDeliver(ctx: TaskContext, contract: ContractRecord): Prom
       detail: { shipSymbol: task.shipSymbol, contractId, tradeSymbol, reason: "cargo hold has none of the contract good" },
     };
   }
-  await clients.deliverContract(contractId, task.shipSymbol, tradeSymbol, units, authHeader);
+  await clients.deliverContract(contractId, task.shipSymbol, tradeSymbol, units, spaceTradersToken);
 
   const unitsDelivered = task.unitsDelivered + units;
   const done = unitsDelivered >= unitsRequired;
@@ -102,8 +102,8 @@ async function dispatchDeliver(ctx: TaskContext, contract: ContractRecord): Prom
 }
 
 async function dispatchFulfill(ctx: TaskContext, contract: ContractRecord): Promise<TickResult> {
-  const { task, clients, authHeader } = ctx;
-  await clients.fulfillContract(contract.contractId, authHeader);
+  const { task, clients, spaceTradersToken } = ctx;
+  await clients.fulfillContract(contract.contractId, spaceTradersToken);
   // Idle hands the ship back to the planner on its very next tick — mining, or
   // the next accepted contract, whichever scores higher.
   return {

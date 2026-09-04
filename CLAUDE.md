@@ -42,7 +42,8 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
 | `auth.ts` | Networkless Clerk JWT verification, service-secret guard | jose |
 | `config.ts` | `configFromEnv()`; every numeric env var validated positive | fs |
-| `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout | fetch |
+| `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout, dual auth headers | m2mToken, fetch |
+| `m2mToken.ts` | Mints/caches this service's own Clerk M2M token for outbound `Authorization` | fetch, crypto |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs |
 
 Dependency direction is strictly downward in that table's spirit: `scoring`
@@ -57,7 +58,7 @@ other (that cycle existed once; `transaction.ts` exists to break it).
   whichever happens first. A replan that considered the configured ship counts
   as that ship's action for the tick (`maybeReplan` returns the set it touched).
 - **FSMs are DB-free and return the next task.** `advance*Task(ctx)` takes
-  `{task, ship, clients, clock, authHeader}` and returns `TickResult | null`
+  `{task, ship, clients, clock, spaceTradersToken}` and returns `TickResult | null`
   (`null` = wait still pending). Anything worth remembering rides on
   `result.observations`; the scheduler persists it. Never query Postgres from
   an FSM.
@@ -129,7 +130,7 @@ wraps an `IntervalLoop`. Semantics you can rely on:
 
 ## Planner and scoring
 
-- `Planner.loadContext(systemSymbol, authHeader)` is one waypoint fetch, one
+- `Planner.loadContext(systemSymbol, spaceTradersToken)` is one waypoint fetch, one
   agent fetch, one knob read, one calibration. Every arm of a decision scores
   against the *same* context. `assignTarget` loads it once; contract discovery
   loads one more when there is something new to evaluate (and reads every
@@ -236,7 +237,22 @@ is the Clerk `sub` only.
   `/contracts`, `/ships/:s/sell|purchase`); ship movement and mining actions
   go to **fleet-service** (`/ships/:s/orbit|dock|navigate|survey|extract/survey|refuel`,
   `/contracts/:id/deliver`); waypoints and markets go to
-  **navigation-service**. The caller's bearer token is forwarded verbatim.
+  **navigation-service**.
+- **Two headers on every outbound call** (auth-design.md decisions 18/19).
+  `Authorization: Bearer <M2M token>` is *this service's own* Clerk machine
+  token, minted and cached by `m2mToken.ts` and fetched inside `callJson`;
+  `X-SpaceTraders-Token` is the raw game token the operator armed with. The
+  value threaded through the scheduler, planner and FSMs is the **raw game
+  token** (`spaceTradersToken`), never a pre-built Authorization value — do
+  not wrap it in `Bearer `. `AutopilotState.getToken()` returns it as-is.
+- M2M token sources: `createClerkM2MTokenSource` (production, mints via
+  Clerk's Backend API against `CLERK_M2M_SECRET_KEY`, cached and refreshed at
+  half its lifetime, prefers a stale-but-unexpired token over a failed
+  refresh) and `createLocalM2MTokenSource` (local dev via
+  `DEV_M2M_SIGNING_KEY_FILE`, and tests via an ephemeral keypair in
+  `createTestApp`). `createApp` falls back to a throwaway local signer when
+  `mining` is set without `authTokenSource`; that fails safe, since nothing
+  production trusts it. Test stub servers don't verify either header.
 - `getMarket` returns `tradeGoods` only when one of our ships is at the
   waypoint; otherwise navigation-service serves whatever it has cached.
 - A ship `IN_TRANSIT` flips to `IN_ORBIT` by itself once `route.arrival`

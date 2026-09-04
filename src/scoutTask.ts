@@ -26,14 +26,14 @@ export async function advanceScoutTask(ctx: TaskContext): Promise<TickResult | n
 }
 
 async function dispatchRefresh(ctx: TaskContext, market: string): Promise<TickResult> {
-  const { task, clients, authHeader } = ctx;
+  const { task, clients, spaceTradersToken } = ctx;
   const docking = await dockIfNeeded(ctx, "scout");
   if (docking !== null) return docking;
   // Already docked at a marketplace: the cheapest possible moment to top up.
   const refuel = await refuelIfNeeded(ctx, "scout");
   if (refuel !== null) return refuel;
 
-  const data = await clients.getMarket(market, authHeader);
+  const data = await clients.getMarket(market, spaceTradersToken);
   return {
     task: idleTask(task),
     event: "scout_market_refresh",

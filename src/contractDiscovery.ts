@@ -23,11 +23,11 @@ export async function discoverAndEvaluateContracts(deps: {
   clients: GameClients;
   planner: Planner;
   ship: ShipSnapshot;
-  authHeader: string;
+  spaceTradersToken: string;
 }): Promise<void> {
-  const { contracts, events, clients, planner, ship, authHeader } = deps;
+  const { contracts, events, clients, planner, ship, spaceTradersToken } = deps;
 
-  const [offered, known] = await Promise.all([clients.getContracts(authHeader), contracts.knownIds()]);
+  const [offered, known] = await Promise.all([clients.getContracts(spaceTradersToken), contracts.knownIds()]);
 
   // Contracts SpaceTraders already shows as accepted but this agent has no
   // local row for (meta#28): a prior run's acceptContract succeeded but the
@@ -40,8 +40,8 @@ export async function discoverAndEvaluateContracts(deps: {
   if (orphanedAccepted.length === 0 && unseen.length === 0) return;
 
   // One context and one read of every market serve every evaluation below.
-  const context = await planner.loadContext(ship.nav.systemSymbol, authHeader);
-  const markets = await Promise.all(context.marketplaces.map((w) => clients.getMarket(w.symbol, authHeader)));
+  const context = await planner.loadContext(ship.nav.systemSymbol, spaceTradersToken);
+  const markets = await Promise.all(context.marketplaces.map((w) => clients.getMarket(w.symbol, spaceTradersToken)));
   const evaluate = (contract: Contract) => planner.evaluateContract({ contract, ship, context, markets });
 
   for (const contract of orphanedAccepted) {
@@ -60,7 +60,7 @@ export async function discoverAndEvaluateContracts(deps: {
       await contracts.record(toRecord(contract, evaluation, "declined"));
       continue;
     }
-    await clients.acceptContract(contract.id, authHeader);
+    await clients.acceptContract(contract.id, spaceTradersToken);
     await contracts.record(toRecord(contract, evaluation, "accepted"));
     await events.append("contract_accepted", { contractId: contract.id, expectedProfit: evaluation.expectedProfit });
   }
