@@ -20,7 +20,6 @@ export async function withTransaction<T>(pool: Pool, fn: (client: PoolClient) =>
       // Ignore rollback errors so we don't mask the original failure.
     }
     throw err;
-  }
   } finally {
     client.release();
   }
