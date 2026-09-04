@@ -193,7 +193,14 @@ Both the planner's scout scoring and the `market_stale` check read
   `knobClasses.test.ts` asserts every class is represented and bounds are sane.
 - Classes are a security boundary: `GET /planner/knobs?class=policy` is the AI
   supervisor's entire write surface. Never move an `alert` or `model` knob to
-  `policy` casually.
+  `policy` casually. Note the fence is enforced on **reads only** — the write
+  path checks bounds and the `fleet:control` scope, not class — so anything
+  holding an operator credential can still write any class.
+- A default is a safety decision. `credit.reserveFloor` defaults to a real
+  reserve because at `0` the check reserves nothing, and the failure it guards
+  is unrecoverable in-game. Changing a default only affects rows that don't
+  exist yet: `syncKnobDefinitions` updates `default_value` but preserves
+  `value`, since it cannot tell a deliberately-set value from a stale default.
 - `resetDatabase()` in tests resets all knobs to defaults **and sets
   `scout.creditsPerRefresh` to 0** unless `{ enableScouting: true }`; a test
   that unexpectedly sees a scout assignment usually forgot this.
@@ -209,6 +216,7 @@ ai-service); treat them as public. Things that depend on specific types:
 | `MetricsRepo` | `mining_sell.totalPrice`, `mining_extract.units`, all `mining\_%` for the error-rate denominator, `mining_tick_error` + `mining_task_failed` as errors |
 | `AnomalyChecker.checkErrorRate` | same `mining\_%` split (note the escaped underscore in `LIKE`) |
 | `AnomalyChecker.detectCreditsFlat` | `agent_credits_snapshot.credits`, written by the anomaly scheduler only while armed & live |
+| `AnomalyChecker.detectNoEarnings` | `mining_sell` as proof of earning, and `armed`/`paused`/`aborted` as the operator's stated intent |
 | `AnomalyChecker.checkMarketStaleness` | `mining_market_selected.marketsChecked` |
 | `replay.ts` | `planner_assignment`, `planner_shadow_assignment` (shape above) |
 | `/anomalies/digest` | `NOTABLE_EVENT_TYPES` in `server.ts` |
@@ -279,7 +287,10 @@ is the Clerk `sub` only.
 - Cleanup order matters: `afterEach` must `stopBackgroundSchedulers()` (metrics
   and anomaly loops are *not* tied to abort) and `POST /autopilot/abort` (which
   awaits the fleet loop's drain) before closing stubs or truncating.
-- Timing pitfalls that have caused flakes before: polling for a phase that
+- Timing pitfalls that have caused flakes before: mutating state across a
+  `FakeClock` jump while the real interval is still ticking, so a background
+  tick judges a half-arranged window (set `intervalMs` high and drive with
+  `forceAnomalyTick`); polling for a phase that
   resolves within a single tick (poll for the *next* one instead); reusing a
   "wait is set" check across two consecutive waits (`waitForNewWait`); polling
   for the first of several anomalies when the assertion needs all of them

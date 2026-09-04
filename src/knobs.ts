@@ -153,10 +153,19 @@ export const KNOB_DEFINITIONS = [
   {
     name: "credit.reserveFloor",
     class: "policy",
-    default: 0,
+    // Deliberately not 0. At zero the check reduces to "would this take the
+    // balance negative", which reserves nothing and only blocks work the agent
+    // already cannot afford — so the guard against the unrecoverable
+    // out-of-fuel-money spiral shipped nominally on and functionally absent.
+    // 5000 is roughly ten round trips' fuel at the prior rate: enough that a
+    // ship can always still reach a market. Turning the protection off should
+    // cost an explicit write, not be what happens if nobody thinks about it.
+    default: 5000,
     min: 0,
     max: 100_000_000,
-    description: "Cash floor. The planner never takes on work whose estimated cost would drop credits below this.",
+    description:
+      "Cash floor. The planner never takes on work whose estimated cost would drop credits below this. " +
+      "0 disables the floor entirely, which risks the unrecoverable out-of-fuel-money spiral.",
   },
   {
     name: "mine.failureRetryLimit",
@@ -194,6 +203,17 @@ export const KNOB_DEFINITIONS = [
     min: 0,
     max: 1,
     description: "Earnings are stalled if the latest hour's rate falls below this fraction of the trailing 6h average.",
+  },
+  {
+    name: "anomaly.noEarningsMinutes",
+    class: "alert",
+    default: 60,
+    min: 5,
+    max: 1440,
+    description:
+      "Minutes the autopilot can be armed or paused with nothing sold at all before earnings are " +
+      "flagged as stalled. The only check measured against zero rather than the fleet's own recent " +
+      "history, so unlike profit drop it cannot go quiet once a dead fleet's average reaches zero.",
   },
   {
     name: "anomaly.creditsFlatWindowHours",
