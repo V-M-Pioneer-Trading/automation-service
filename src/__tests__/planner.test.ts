@@ -250,7 +250,9 @@ describe("automation-service planner (meta#10)", () => {
     const listRes = await request(gateway).get("/api/automation/v1/planner/knobs");
     expect(listRes.status).toBe(200);
     const reserveFloor = listRes.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
-    expect(reserveFloor).toMatchObject({ value: 0, default: 0, min: 0 });
+    // Reads back at its default, whatever that is — the value itself is
+    // pinned in knobClasses.test.ts, where the reason for it lives.
+    expect(reserveFloor).toMatchObject({ value: reserveFloor.default, min: 0 });
 
     const okRes = await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").set("Authorization", bearer()).send({ value: 1000 });
     expect(okRes.status).toBe(200);
@@ -273,7 +275,7 @@ describe("automation-service planner (meta#10)", () => {
     expect(knobEvents).toHaveLength(1);
     expect(knobEvents[0].detail).toMatchObject({
       name: "credit.reserveFloor",
-      previousValue: 0,
+      previousValue: reserveFloor.default,
       newValue: 1000,
     });
   });

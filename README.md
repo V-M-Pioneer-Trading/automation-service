@@ -64,7 +64,7 @@ Three rules apply before any of it matters:
 | Rule | What it means |
 |---|---|
 | **Nothing that earns nothing** | A score at or below zero is not a candidate. That is what makes `mine.taskWeight = 0` an off switch rather than a demotion, and what keeps a contract that can only lose money on the ground. |
-| **Cash floor** | Work whose estimated cost would drop credits below `credit.reserveFloor` is removed from consideration, not scored against. If everything reachable would breach it, the ship deliberately idles. Running out of money for fuel is not recoverable in SpaceTraders. |
+| **Cash floor** | Work whose estimated cost would drop credits below `credit.reserveFloor` is removed from consideration, not scored against. If everything reachable would breach it, the ship deliberately idles. Running out of money for fuel is not recoverable in SpaceTraders, so the floor defaults to a real reserve rather than zero. |
 | **Reachability** | A target the ship can't route to isn't a candidate. Routing is fuel-aware: a leg longer than the tank is impossible, and an intermediate stop must have a fuel station. |
 
 ```mermaid
@@ -199,7 +199,7 @@ is applied server-side so the restriction holds even if a client forgets it.
 | `contract.minProfitThreshold` | `0` | Minimum expected profit to accept a contract. Raise to be pickier. |
 | `scout.creditsPerRefresh` | `500` | What refreshing one market's prices is worth. `0` disables scouting. |
 | `scout.stalenessThresholdHours` | `0.5` | Staleness at which a refresh is worth its full value. |
-| `credit.reserveFloor` | `0` | Cash floor the planner will never spend past. |
+| `credit.reserveFloor` | `5000` | Cash floor the planner will never spend past. `0` switches the protection off. |
 | `mine.failureRetryLimit` | `3` | Consecutive failures on a target before giving up on it. |
 | `replan.debounceSeconds` | `30` | Minimum gap between replans; bursts coalesce into one. |
 
@@ -210,6 +210,7 @@ is applied server-side so the restriction holds even if a client forgets it.
 | `anomaly.shipIdleMinutes` | `10` | Minutes without progress (outside a known wait) before a ship is flagged idle. |
 | `anomaly.profitDropFraction` | `0.5` | Earnings stalled if the latest rate falls below this fraction of the 6h average. |
 | `anomaly.creditsFlatWindowHours` | `2` | Earnings also stalled if credits show no net increase across this window. |
+| `anomaly.noEarningsMinutes` | `60` | Earnings also stalled if nothing at all sells across this window while armed or paused. |
 | `anomaly.consecutiveFailureLimit` | `3` | Consecutive failures on one ship that raise an anomaly. |
 | `anomaly.errorRateThreshold` | `0.1` | Error fraction of recent mining events that flags the fleet as failing. |
 | `anomaly.errorRateWindowMinutes` | `5` | Window that fraction is computed over. |
@@ -427,16 +428,24 @@ armed. A broken ship stays worth reporting while an operator investigates.
 | Check | Fires when |
 |---|---|
 | `ship_idle` | A ship's task hasn't progressed in N minutes (while armed and live). Time inside a flight or cooldown it was told to wait out doesn't count, so a long transit never pages. |
-| `earnings_stalled` | The money stopped: the hourly rate collapsed against its own history, **or** credits show no net increase across a window. |
+| `earnings_stalled` | The money stopped: the hourly rate collapsed against its own history, **or** credits show no net increase across a window, **or** nothing sold at all for a window while the fleet was meant to be working. |
 | `consecutive_failures` | One ship accumulates N consecutive failures. |
 | `error_rate` | The error fraction of recent mining events exceeds a threshold. |
 | `market_stale` | A market the sell leg priced in the last 24h hasn't been read in person by a ship within N minutes (or ever). |
 
-`earnings_stalled` covers what used to be two separate checks (`profit_drop`
-and `credits_flat`). They're two ways of measuring one thing, a fleet that
-stops earning trips both, so paging twice made the digest look busier than the
-fleet was. Both conditions stay separately tunable and are reported in
-`detail.reasons`.
+`earnings_stalled` covers three readings of one problem, reported in
+`detail.reasons` and separately tunable. `profit_drop` and `credits_flat` were
+once separate checks; a fleet that stops earning trips both, so paging twice
+made the digest look busier than the fleet was.
+
+The third, `no_earnings`, exists because the other two compare the fleet only
+against its own recent history. A fleet that has been dead long enough for
+that history to reach zero has nothing left to fall below, so the alarms used
+to go quiet at roughly the six-hour mark, exactly when an outage stopped being
+transient. A fleet left **paused** was worse: `ship_idle` and the credit
+snapshots both require armed-and-live, so nothing watched it at all.
+`no_earnings` measures against zero rather than against history, and counts
+paused as "meant to be working", so neither case can switch it off.
 
 ```mermaid
 flowchart LR
@@ -694,7 +703,12 @@ Everything the implementation deliberately doesn't do yet, in one place.
 - **`market_stale`'s "in active use" window** is a fixed 24h lookback, not a knob.
 - **The credits-flat half of `earnings_stalled`** reads credit snapshots that
   are only logged while armed and live, so an anomaly-only deployment with no
-  `MINING_SHIP_SYMBOL` never gets them.
+  `MINING_SHIP_SYMBOL` never gets them. Its `no_earnings` half is unaffected:
+  it reads sell events, which are logged whenever selling happens.
+- **A raised `credit.reserveFloor` default only reaches new deployments.** A
+  knob's tuned value survives a redeploy by design, and an existing row sitting
+  at the old default of `0` is indistinguishable from one an operator set to
+  `0` deliberately. Existing deployments need the floor set once, by hand.
 - **Arm/pause/abort mutate in-memory status before persisting the event**, so a
   failed event write can briefly leave status and audit trail diverged.
 - **The token lives in memory only** and is never persisted, so a restart always

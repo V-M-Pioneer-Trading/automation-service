@@ -36,6 +36,21 @@ describe("knob classes", () => {
     expect(KNOB_DEFINITIONS.every((d) => d.min <= d.default && d.default <= d.max)).toBe(true);
   });
 
+  /**
+   * The floor guards the one failure the game does not let you recover from:
+   * no credits, therefore no fuel, therefore no way to earn credits. At 0 the
+   * check reduces to "would this take the balance negative" and reserves
+   * nothing, so a default of 0 shipped the protection switched off for every
+   * fresh deployment. Turning it off should take a deliberate write.
+   */
+  it("reserves cash by default, rather than shipping the death-spiral guard disabled", async () => {
+    const res = await request(app()).get("/api/automation/v1/planner/knobs");
+    const floor = res.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
+    expect(floor.default).toBeGreaterThan(0);
+    expect(floor.value).toBe(floor.default);
+    expect(floor.min).toBe(0); // still switchable off, but only on purpose
+  });
+
   it("lists every knob with its class and description", async () => {
     const res = await request(app()).get("/api/automation/v1/planner/knobs");
     expect(res.status).toBe(200);

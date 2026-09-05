@@ -268,6 +268,11 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
   it("does not fire earnings_stalled on flat credits when credits have grown", async () => {
     const gateway = app({ withMining: true });
+    // This case is about credits_flat alone. The fleet sells nothing across
+    // the two hours below, which is exactly what no_earnings exists to catch,
+    // so push that window out of the way rather than let a second reason
+    // decide the assertion.
+    await pool.query("UPDATE knob SET value = 1440 WHERE name = 'anomaly.noEarningsMinutes'");
     await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
 
     await gateway.locals.forceAnomalyTick(); // first snapshot, at window start
@@ -275,6 +280,54 @@ describe("automation-service anomaly detection (meta#15)", () => {
     credits = 150_000; // grew
     await gateway.locals.forceAnomalyTick(); // snapshot + check in one deterministic tick
     await expectNoAnomaly(gateway, "earnings_stalled", 0); // state is already settled, no wait needed
+  }, 10_000);
+
+  /**
+   * A fleet left paused used to go completely silent: ship_idle and the
+   * credits snapshot both gate on armed-and-live, and profit_drop compares
+   * the fleet only against itself, so once its trailing average decayed to
+   * zero there was nothing left to fall below. The alarm went quiet exactly
+   * when the outage stopped being transient.
+   */
+  it("fires earnings_stalled (reason: no_earnings) for a fleet left paused with nothing sold", async () => {
+    // Forced ticks, not the interval: every step below straddles a FakeClock
+    // jump, and a background tick landing mid-setup would judge a window the
+    // test hasn't finished arranging yet.
+    const gateway = app({ withMining: true, intervalMs: 100_000 });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/pause").set("Authorization", bearer());
+
+    clock.advance(30 * 60 * 1000); // half the default window: too early to judge
+    await gateway.locals.forceAnomalyTick();
+    await expectNoAnomaly(gateway, "earnings_stalled", 0);
+
+    clock.advance(31 * 60 * 1000); // now past it, still nothing sold
+    await gateway.locals.forceAnomalyTick();
+    const anomaly = await waitForAnomaly(gateway, "earnings_stalled");
+    expect(anomaly.detail.reasons).toContain("no_earnings");
+    expect(anomaly.detail.status).toBe("paused");
+    expect(anomaly.detail.lastSoldAt).toBeNull();
+  }, 10_000);
+
+  it("stays quiet while the fleet is still selling, and while it is aborted", async () => {
+    const gateway = app({ withMining: true, intervalMs: 100_000 });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+
+    clock.advance(61 * 60 * 1000);
+    // One sale inside the window is enough: the fleet is working. Written
+    // before any tick runs, so the check never sees the half-set-up state.
+    await pool.query(`INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, 'mining_sell', '{"totalPrice": 90}')`, [
+      new Date(clock.now().getTime() - 60_000),
+    ]);
+    await gateway.locals.forceAnomalyTick();
+    await expectNoAnomaly(gateway, "earnings_stalled", 0);
+
+    // Aborted is the operator saying the fleet should not be working, so
+    // earning nothing is the expected state, not an anomaly.
+    await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
+    clock.advance(61 * 60 * 1000);
+    await gateway.locals.forceAnomalyTick();
+    await expectNoAnomaly(gateway, "earnings_stalled", 0);
   }, 10_000);
 
   it("fires market_stale for an in-use market no ship has read in person within the window, while fresh ones stay quiet", async () => {

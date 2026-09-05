@@ -7,6 +7,29 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Two alarms that switched themselves off
+
+Both from an architecture review of the autopilot's safety machinery.
+
+- **A dead fleet stopped alarming after about six hours.** `ship_idle` and the
+  credit snapshots both require armed-and-live, so a fleet left *paused* was
+  watched by nothing at all; and `profit_drop` compares the fleet only against
+  its own trailing average, so once that average decayed to zero there was
+  nothing left to fall below. Every check went quiet exactly when an outage
+  stopped being transient. `earnings_stalled` gains a third reason,
+  `no_earnings`: nothing sold at all across `anomaly.noEarningsMinutes` while
+  the autopilot is armed or paused. It measures against zero rather than
+  against history, and treats paused as "meant to be working", so neither
+  escape hatch applies to it.
+- **The cash floor shipped switched off.** `credit.reserveFloor` defaulted to
+  `0`, where the check reduces to "would this take the balance negative" and
+  reserves nothing — so the guard against the unrecoverable
+  out-of-fuel-money spiral was nominally on and functionally absent on every
+  fresh deployment. It now defaults to 5000, roughly ten round trips' fuel at
+  the prior rate. `0` still disables it, but now as a deliberate write.
+  Existing deployments keep whatever value they hold: a stored `0` is
+  indistinguishable from one an operator chose, so it is not overwritten.
+
 ## Structure pass: shared FSM, one interval loop, one freshness store
 
 A refactor of how the pieces fit, with the bugs it turned up fixed along the

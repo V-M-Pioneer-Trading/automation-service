@@ -154,17 +154,23 @@ export class AnomalyChecker {
   }
 
   /**
-   * "The money stopped." Two independent readings of the same underlying
-   * problem, either of which is enough to fire:
+   * "The money stopped." Three independent readings of the same underlying
+   * problem, any of which is enough to fire:
    *
    *  - **profit_drop** — the latest hourly rate collapsed against its own
    *    recent history. Catches a fleet that's still working but earning less.
    *  - **credits_flat** — total credits haven't grown at all over a window.
    *    Catches a fleet that looks busy but nets nothing, which a rate compared
    *    only against itself can miss.
+   *  - **no_earnings** — nothing has been sold at all for a window, while the
+   *    operator's intent is that the fleet be working. Catches what the other
+   *    two structurally cannot: both compare the fleet against its own recent
+   *    history, so a fleet that has been dead long enough for that history to
+   *    reach zero stops tripping them. This one is absolute, so it keeps
+   *    firing for as long as the problem lasts.
    */
   private async checkEarningsStalled(now: Date): Promise<AnomalyCandidate | null> {
-    const readings = await Promise.all([this.detectProfitDrop(now), this.detectCreditsFlat(now)]);
+    const readings = await Promise.all([this.detectProfitDrop(now), this.detectCreditsFlat(now), this.detectNoEarnings(now)]);
     const reasons = readings.filter((r): r is Reason => r !== null);
     if (reasons.length === 0) return null;
     return {
@@ -233,6 +239,56 @@ export class AnomalyChecker {
     const netChange = newestCredits - oldestCredits;
     if (netChange > 0) return null;
     return { reason: "credits_flat", detail: { netChange, windowHours, oldestCredits, newestCredits } };
+  }
+
+  /**
+   * Nothing sold for a whole window, while the autopilot is armed or paused —
+   * i.e. while the operator's stated intent is that the fleet be working.
+   *
+   * This is the only check that asserts the *positive* condition, and it is
+   * the one that covers a fleet left paused: `ship_idle` and the credits
+   * snapshot both gate on armed-and-live, and `profit_drop` compares the
+   * fleet only against itself, so once a dead fleet's trailing average
+   * reaches zero it stops having anything to fall below. Measuring against
+   * zero instead of against history means this cannot switch itself off.
+   *
+   * The window is measured from the last lifecycle transition as well as from
+   * now, so a freshly armed fleet is given the full window to earn something
+   * before it is called stalled.
+   */
+  private async detectNoEarnings(now: Date): Promise<Reason | null> {
+    const status = this.state.getStatus();
+    if (status !== "armed" && status !== "paused") return null;
+
+    const windowMinutes = await this.knobs.get("anomaly.noEarningsMinutes");
+    const since = new Date(now.getTime() - windowMinutes * 60_000);
+
+    const [{ rows: lifecycleRows }, { rows: sellRows }] = await Promise.all([
+      this.pool.query(
+        `SELECT occurred_at FROM event_log WHERE type IN ('armed', 'paused', 'aborted')
+         ORDER BY occurred_at DESC, id DESC LIMIT 1`
+      ),
+      this.pool.query(
+        `SELECT MAX(occurred_at) AS last_sold, COUNT(*) AS sells FROM event_log
+         WHERE type = 'mining_sell' AND occurred_at >= $1 AND occurred_at <= $2`,
+        [since, now]
+      ),
+    ]);
+
+    // In this state for less than the window: too early to judge.
+    const enteredStateAt = lifecycleRows[0]?.occurred_at ?? null;
+    if (enteredStateAt === null || new Date(enteredStateAt) > since) return null;
+    if (Number(sellRows[0].sells) > 0) return null;
+
+    return {
+      reason: "no_earnings",
+      detail: {
+        status,
+        windowMinutes,
+        lastSoldAt: (sellRows[0].last_sold as Date | null)?.toISOString() ?? null,
+        enteredStateAt: new Date(enteredStateAt).toISOString(),
+      },
+    };
   }
 
   private async checkConsecutiveFailures(shipSymbol: string, failureCount: number): Promise<AnomalyCandidate | null> {
