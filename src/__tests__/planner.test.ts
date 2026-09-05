@@ -200,8 +200,15 @@ describe("automation-service planner (meta#10)", () => {
       // NEAR is a 20-unit round trip; FAR is 180. At the default 30 units/hour
       // and 0.3h overhead that's 0.97h vs 6.3h per cycle — so FAR only wins if
       // its measured revenue more than makes up for the extra flying.
-      await recordCycle("X1-TEST-BELT-NEAR", 500, clock.now());
-      await recordCycle("X1-TEST-BELT-FAR", 60_000, clock.now());
+      //
+      // Eight cycles each, not one: a field's estimate is shrunk toward the
+      // fleet average until it has been measured enough to be believed, so
+      // the switch is now driven by repeated evidence rather than by a single
+      // lucky trip. That is the point of the shrinkage, not a workaround.
+      for (let i = 0; i < 8; i++) {
+        await recordCycle("X1-TEST-BELT-NEAR", 500, clock.now());
+        await recordCycle("X1-TEST-BELT-FAR", 60_000, clock.now());
+      }
 
       const task = await waitForAssignment(await armed());
       expect(task.asteroidWaypoint).toBe("X1-TEST-BELT-FAR");

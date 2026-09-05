@@ -12,7 +12,7 @@ import { ContractRepo } from "./contractRepo";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients, UpstreamCallError } from "./gameClients";
-import { isKnobClass, KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
+import { isKnobClass, KnobClass, KnobClassForbiddenError, KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
 import { createLocalM2MTokenSource, M2MTokenSource } from "./m2mToken";
 import { MarketIntelRepo } from "./marketIntelRepo";
 import { MetricsRepo } from "./metrics";
@@ -346,18 +346,44 @@ export function createApp(options: AppOptions) {
     })
   );
 
+  /**
+   * Two kinds of caller may tune, and they are not trusted equally.
+   *
+   * A human operator with `fleet:control` may write any class. The AI
+   * supervisor authenticates as a machine and may write `policy` only — the
+   * class model is a fence around *it*, and a fence enforced only by which
+   * knobs it is shown is not a fence: nothing stopped it naming
+   * `anomaly.errorRateThreshold` and resolving "the error alarm fired" by
+   * making the error alarm unable to fire.
+   */
+  const machineWritableClasses: readonly KnobClass[] = ["policy"];
+  const knobWriteGuard: express.RequestHandler = (req, res, next) => {
+    if (req.header("X-Service-Secret") !== undefined) {
+      res.locals.machineCaller = true;
+      requireServiceSecret()(req, res, next);
+      return;
+    }
+    requireControl(req, res, next);
+  };
+
   api.put(
     "/planner/knobs/:name",
-    requireControl,
+    knobWriteGuard,
     asyncHandler(async (req, res) => {
       const value: unknown = req.body?.value;
       if (typeof value !== "number" || !Number.isFinite(value)) {
         badRequest(res, "value must be a finite number");
         return;
       }
+      const isMachine = res.locals.machineCaller === true;
       try {
-        const { knob, previousValue } = await knobs.set(req.params.name, value);
-        await events.append("knob_changed", { name: req.params.name, previousValue, newValue: knob.value, actor: actorOf(res) });
+        const { knob, previousValue } = await knobs.set(req.params.name, value, isMachine ? machineWritableClasses : undefined);
+        await events.append("knob_changed", {
+          name: req.params.name,
+          previousValue,
+          newValue: knob.value,
+          actor: isMachine ? "ai-service" : actorOf(res),
+        });
         scheduler?.requestReplan("knob_change");
         res.json({ knob });
       } catch (err) {
@@ -367,6 +393,12 @@ export function createApp(options: AppOptions) {
         }
         if (err instanceof KnobOutOfRangeError) {
           badRequest(res, err.message);
+          return;
+        }
+        if (err instanceof KnobClassForbiddenError) {
+          // 403, not 401: the credential is valid, it simply does not reach
+          // this class of knob. Re-authenticating would not help.
+          res.status(403).json({ error: { message: err.message } });
           return;
         }
         throw err;
@@ -459,8 +491,12 @@ if (require.main === module) {
     .then(() => {
       const config: ServiceConfig = configFromEnv();
       const pool = createPool(config.databaseUrl);
-      return migrate(pool).then(() =>
-        createApp({
+      return migrate(pool).then(async (knobClamps) => {
+        // A boot that moved an operator's tuned value to fit tightened bounds
+        // says so in the same audit trail every other knob change lands in.
+        const bootLog = new EventLog(pool, systemClock);
+        for (const clamp of knobClamps) await bootLog.append("knob_clamped", { ...clamp });
+        return createApp({
           pool,
           auth: { clerkJwtKeyPem: config.clerkJwtKeyPem, clerkIssuer: config.clerkIssuer, aiServiceSecret: config.aiServiceSecret },
           mining: config,
@@ -471,8 +507,8 @@ if (require.main === module) {
           authTokenSource: resolveM2MTokenSource(),
         }).listen(config.port, () => {
           console.log(`automation-service listening on http://localhost:${config.port}`);
-        })
-      );
+        });
+      });
     })
     .catch((err) => {
       console.error("automation-service failed to start:", err);

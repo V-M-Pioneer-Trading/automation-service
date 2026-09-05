@@ -103,32 +103,71 @@ describe("ObservationRepo.calibrate", () => {
     expect(model.provenance.refuelSampleCount).toBe(1);
   });
 
+  const recordCycles = (waypoint: string, revenue: number, times = 1) =>
+    Promise.all(
+      Array.from({ length: times }, () =>
+        repo.recordMiningCycle({
+          shipSymbol: "MINING-1",
+          asteroidWaypoint: waypoint,
+          revenue,
+          cycleHours: 1,
+          travelDistance: 30,
+          unitsExtracted: 10,
+        })
+      )
+    );
+
   /** The headline behaviour: two fields, different revenue, scored differently. */
   it("learns each field's own revenue and keeps a fleet-wide average for unvisited ones", async () => {
-    await repo.recordMiningCycle({
-      shipSymbol: "MINING-1",
-      asteroidWaypoint: "X1-RICH",
-      revenue: 9000,
-      cycleHours: 1,
-      travelDistance: 30,
-      unitsExtracted: 40,
-    });
-    await repo.recordMiningCycle({
-      shipSymbol: "MINING-1",
-      asteroidWaypoint: "X1-POOR",
-      revenue: 1000,
-      cycleHours: 1,
-      travelDistance: 30,
-      unitsExtracted: 10,
-    });
+    await recordCycles("X1-RICH", 9000, 5);
+    await recordCycles("X1-POOR", 1000, 5);
 
     const model = await repo.calibrate(PRIORS);
-    expect(model.creditsPerCycleByWaypoint["X1-RICH"]).toBeCloseTo(9000);
-    expect(model.creditsPerCycleByWaypoint["X1-POOR"]).toBeCloseTo(1000);
     expect(model.fleetCreditsPerCycle).toBeCloseTo(5000); // the average of the two, for a field never mined
+    // Each field is scored on its own measurements, pulled slightly toward the
+    // fleet average by the two pseudo-observations every field carries.
+    expect(model.creditsPerCycleByWaypoint["X1-RICH"]).toBeCloseTo((9000 * 5 + 5000 * 2) / 7);
+    expect(model.creditsPerCycleByWaypoint["X1-POOR"]).toBeCloseTo((1000 * 5 + 5000 * 2) / 7);
     expect(model.provenance.creditsPerCycle).toBe("measured");
     expect(model.provenance.waypointsWithOwnAverage).toEqual(["X1-POOR", "X1-RICH"]);
   });
+
+  /**
+   * Recency decay does not stop one lucky trip from swinging an estimate: a
+   * weighted mean over a single sample is that sample. Without shrinkage, one
+   * rich cycle set a field's estimate outright, the planner kept returning
+   * there, and the only cycles that could correct it were the ones the
+   * estimate itself caused.
+   */
+  it("does not let a single outlying cycle set a field's estimate outright", async () => {
+    await recordCycles("X1-KNOWN", 1000, 10); // a well-measured, ordinary field
+    await recordCycles("X1-LUCKY", 40_000, 1); // one anomalously rich trip
+
+    const model = await repo.calibrate(PRIORS);
+    const lucky = model.creditsPerCycleByWaypoint["X1-LUCKY"];
+    expect(lucky).toBeLessThan(40_000 / 2); // pulled most of the way back
+    expect(lucky).toBeGreaterThan(model.creditsPerCycleByWaypoint["X1-KNOWN"]); // still the better bet
+
+    // Enough repeat evidence and the field is believed on its own terms.
+    await recordCycles("X1-LUCKY", 40_000, 9);
+    const convinced = await repo.calibrate(PRIORS);
+    expect(convinced.creditsPerCycleByWaypoint["X1-LUCKY"]).toBeGreaterThan(30_000);
+  });
+
+  /**
+   * The cap used to be fleet-wide, so a rarely-mined field's own cycles could
+   * fall outside the newest N rows while still inside the age limit — it
+   * reverted to the (higher) fleet average and became attractive again, so the
+   * fleet re-learned the same disappointment on a loop.
+   */
+  it("keeps a rarely-mined field's own history even when a busy field fills the window", async () => {
+    await recordCycles("X1-RARE", 200, 2);
+    await recordCycles("X1-BUSY", 8000, 300);
+
+    const model = await repo.calibrate(PRIORS);
+    expect(model.provenance.waypointsWithOwnAverage).toContain("X1-RARE");
+    expect(model.creditsPerCycleByWaypoint["X1-RARE"]).toBeLessThan(model.fleetCreditsPerCycle);
+  }, 30_000);
 
   it("weights recent cycles above old ones, so a field that got better is noticed", async () => {
     await repo.recordMiningCycle({

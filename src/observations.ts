@@ -26,6 +26,25 @@ import { KnobValues } from "./knobs";
 const MAX_OBSERVATION_AGE_HOURS = 24 * 14;
 /** Cap on rows pulled per calibration, so a long-running fleet doesn't grow this query without bound. */
 const MAX_OBSERVATIONS = 500;
+/** The same bound for mining, but applied per field — see `recentMining`. */
+const MAX_OBSERVATIONS_PER_WAYPOINT = 100;
+
+/**
+ * How much a field's own measurements have to outweigh the fleet average
+ * before they are believed outright, expressed as the weight of a single
+ * imaginary fleet-average cycle mixed into every field's estimate.
+ *
+ * Recency decay alone does not deliver what the model claims. A weighted mean
+ * over one sample *is* that sample, so one anomalously rich cycle — a good
+ * survey, a momentary price spike — could set a distant field's estimate high
+ * enough to beat a closer, well-measured one. The planner then returns there,
+ * and the only cycles that can correct the estimate are the ones the estimate
+ * itself caused; there is no exploration term, so the error persisted until it
+ * decayed out. Two pseudo-observations is enough that a lone outlier is pulled
+ * most of the way back to the fleet average, while three or four real cycles
+ * still move a field decisively.
+ */
+const FLEET_PRIOR_WEIGHT = 2;
 
 export interface MiningObservation {
   asteroidWaypoint: string;
@@ -135,10 +154,24 @@ export class ObservationRepo {
     );
   }
 
-  async recentMining(since: Date, limit = MAX_OBSERVATIONS): Promise<MiningObservation[]> {
+  /**
+   * Recent mining cycles, capped **per field** rather than fleet-wide.
+   *
+   * A single global cap silently erased a rarely-mined field's own history on
+   * a busy fleet: its cycles fell outside the newest N rows even though they
+   * were well inside the age limit, the field reverted to the fleet average,
+   * and — being the average rather than its own poor measurement — became
+   * attractive again. The fleet then re-learned the same disappointment on a
+   * loop. Ranking within each waypoint keeps every field's own evidence.
+   */
+  async recentMining(since: Date, limit = MAX_OBSERVATIONS_PER_WAYPOINT): Promise<MiningObservation[]> {
     const { rows } = await this.pool.query(
-      `SELECT asteroid_waypoint, revenue, cycle_hours, travel_distance, units_extracted, observed_at
-       FROM mining_observation WHERE observed_at >= $1 ORDER BY observed_at DESC LIMIT $2`,
+      `SELECT asteroid_waypoint, revenue, cycle_hours, travel_distance, units_extracted, observed_at FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY asteroid_waypoint ORDER BY observed_at DESC) AS rank
+         FROM mining_observation WHERE observed_at >= $1
+       ) ranked
+       WHERE rank <= $2
+       ORDER BY observed_at DESC`,
       [since, limit]
     );
     return rows.map((r: Record<string, unknown>) => ({
@@ -219,6 +252,9 @@ export class ObservationRepo {
     const fleetRevenue = weightedMean(mining.map((m) => ({ value: m.revenue, weight: weightOf(m.observedAt) })));
     const fleetCreditsPerCycle = fleetRevenue ?? priors.creditsPerCyclePrior;
 
+    // A field's own average, shrunk toward the fleet average by
+    // FLEET_PRIOR_WEIGHT — so a field is trusted in proportion to how much it
+    // has actually been measured, not treated as authoritative off one cycle.
     const byWaypoint: Record<string, number> = {};
     const grouped = new Map<string, { value: number; weight: number }[]>();
     for (const m of mining) {
@@ -228,7 +264,9 @@ export class ObservationRepo {
     }
     for (const [waypoint, samples] of grouped) {
       const mean = weightedMean(samples);
-      if (mean !== null) byWaypoint[waypoint] = mean;
+      if (mean === null) continue;
+      const evidence = samples.reduce((total, s) => total + (Number.isFinite(s.weight) && s.weight > 0 ? s.weight : 0), 0);
+      byWaypoint[waypoint] = (mean * evidence + fleetCreditsPerCycle * FLEET_PRIOR_WEIGHT) / (evidence + FLEET_PRIOR_WEIGHT);
     }
 
     return {

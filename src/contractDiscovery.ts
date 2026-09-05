@@ -78,6 +78,7 @@ function toRecord(contract: Contract, evaluation: ContractEvaluation, status: Co
     status,
     expectedProfit: evaluation.expectedProfit,
     cycleHours: evaluation.cycleHours,
+    travelDistance: evaluation.travelDistance,
     procurementMarket: evaluation.procurementMarket,
   };
 }

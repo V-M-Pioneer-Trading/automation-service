@@ -46,6 +46,8 @@ export interface ContractEvaluation {
   procurementMarket: string | null;
   expectedProfit: number;
   cycleHours: number;
+  /** Route length behind `cycleHours`, kept so it can be re-timed under a later model. */
+  travelDistance: number;
   detail: Record<string, unknown>;
 }
 
@@ -281,9 +283,24 @@ export class Planner {
       if (record.procurementMarket === null) continue; // evaluated as unworkable — nowhere to buy the good
       const estimatedCost = record.totalPayment - record.expectedProfit;
       if (breachesReserveFloor({ currentCredits: credits, estimatedCost, reserveFloor: knobs["credit.reserveFloor"] })) continue;
+      // Cycle time is re-derived from the frozen route under the *current*
+      // model, not read back as frozen at discovery. Mining is always scored
+      // on today's calibration, so a contract evaluated on a cold fleet at the
+      // prior speed used to be compared against mining scores that had since
+      // doubled — half-fresh and half-stale, and systematically so. What stays
+      // frozen is expectedProfit, which depends on market prices this decision
+      // has not re-read and so cannot honestly recompute.
+      const cycleHoursNow =
+        record.travelDistance > 0
+          ? cycleHours({
+              distance: record.travelDistance,
+              speedUnitsPerHour: context.model.speedUnitsPerHour,
+              overheadHours: knobs["cycle.transactOverheadHoursPrior"],
+            })
+          : record.cycleHours; // recorded before travel_distance existed
       const score = contractScore({
         expectedProfit: record.expectedProfit,
-        cycleHours: record.cycleHours,
+        cycleHours: cycleHoursNow,
         taskWeight: knobs["contract.taskWeight"],
       });
       if (score > 0 && (best === null || score > best.score)) best = { record, score };
@@ -330,7 +347,12 @@ export class Planner {
         stalenessThresholdHours,
         creditsPerRefresh,
         speedUnitsPerHour: model.speedUnitsPerHour,
-        overheadHours: model.overheadHours,
+        // Not the mining overhead: that is calibrated as the residual of
+        // mining cycles, so it includes survey, extraction and cooldown a
+        // scout never performs. Charging it here inflated a ten-minute
+        // pricing trip to something like half an hour and biased every
+        // comparison toward mining, systematically rather than as noise.
+        overheadHours: knobs["cycle.transactOverheadHoursPrior"],
       });
       if (score > 0 && (best === null || score > best.score)) best = { waypoint: marketplace.symbol, score, elapsedHours };
     }
@@ -354,6 +376,7 @@ export class Planner {
       procurementMarket: null,
       expectedProfit: -Infinity,
       cycleHours: 0,
+      travelDistance: 0,
       detail: { contractId: contract.id, reason, ...extra },
     });
 
@@ -380,7 +403,13 @@ export class Planner {
 
     const unitsRequired = deliverable.unitsRequired - deliverable.unitsFulfilled;
     const travelDistance = toMarket.distance + toDestination.distance;
-    const hours = cycleHours({ distance: travelDistance, speedUnitsPerHour: model.speedUnitsPerHour, overheadHours: model.overheadHours });
+    // A contract cycle docks, buys, flies and delivers — no survey, no
+    // extraction, no cooldown — so it is not charged the mining overhead.
+    const hours = cycleHours({
+      distance: travelDistance,
+      speedUnitsPerHour: model.speedUnitsPerHour,
+      overheadHours: context.knobs["cycle.transactOverheadHoursPrior"],
+    });
     const travelCost = travelDistance * model.fuelCreditsPerUnitDistance;
     const procurementCost = unitsRequired * cheapest.price;
     const totalPayment = contract.terms.payment.onAccepted + contract.terms.payment.onFulfilled;
@@ -390,6 +419,7 @@ export class Planner {
       procurementMarket: cheapest.waypoint,
       expectedProfit,
       cycleHours: hours,
+      travelDistance,
       detail: {
         contractId: contract.id,
         tradeSymbol: deliverable.tradeSymbol,

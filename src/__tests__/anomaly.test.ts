@@ -402,12 +402,40 @@ describe("automation-service anomaly detection (meta#15)", () => {
     const digestBefore = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
     expect(digestBefore.body.anomalies[0].deliveredAt).toBeNull();
 
-    // Once the webhook recovers, it should stay quiet — the dedupe cooldown
-    // suppresses a re-fire of the same still-open condition.
+    // Once the webhook recovers, the missed page is sent. Dedupe suppresses a
+    // re-fire of the same still-open condition, so without this the alert was
+    // lost permanently — the record sat in Postgres looking fine, and no later
+    // firing would ever replace it.
     webhookStatus = 200;
-    await new Promise((r) => setTimeout(r, 100));
-    expect(webhook.calls.length).toBe(attemptsAfterFailure); // no new delivery attempt — still within cooldown
+    const deadline = Date.now() + 3000;
+    let delivered = null;
+    while (Date.now() < deadline && delivered === null) {
+      const digest = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
+      delivered = digest.body.anomalies[0].deliveredAt;
+      if (delivered === null) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(delivered).not.toBeNull();
+    expect(webhook.calls.length).toBeGreaterThan(attemptsAfterFailure);
   }, 10_000);
+
+  it("gives up on an undeliverable anomaly rather than retrying it forever", async () => {
+    webhookStatus = 500;
+    await pool.query(`INSERT INTO ship_task (ship_symbol, phase, failure_count, updated_at) VALUES ($1, 'EXTRACT', $2, $3)`, [
+      "MINING-1",
+      5,
+      clock.now(),
+    ]);
+    const gateway = app({ withMining: true });
+    const anomaly = await waitForAnomaly(gateway, "consecutive_failures");
+
+    // Rounds are bounded across ticks, not just within one, so a webhook that
+    // never comes back can't make every tick pay for it indefinitely. The
+    // column counts rounds — one per deliver() call, each of which retries
+    // internally — so the HTTP ceiling is this times the per-call budget.
+    await new Promise((r) => setTimeout(r, 1500));
+    const { rows } = await pool.query("SELECT delivery_attempts FROM anomaly WHERE id = $1", [anomaly.id]);
+    expect(Number(rows[0].delivery_attempts)).toBeLessThanOrEqual(12);
+  }, 15_000);
 
   it("dedupes repeat firings of the same condition within the cooldown window", async () => {
     await pool.query(

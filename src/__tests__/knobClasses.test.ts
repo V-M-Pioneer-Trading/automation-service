@@ -1,7 +1,7 @@
 import request from "supertest";
 import { Pool } from "pg";
 import { createTestApp } from "../testSupport/createTestApp";
-import { bearer } from "../testSupport/authTokens";
+import { bearer, TEST_SERVICE_SECRET } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { KNOB_DEFINITIONS, syncKnobDefinitions } from "../knobs";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -82,6 +82,55 @@ describe("knob classes", () => {
     expect(res.status).toBe(400);
   });
 
+  /**
+   * The fence used to be a read filter and nothing more: the supervisor was
+   * *shown* only policy knobs and trusted not to name any other. Nothing
+   * rejected a write, so the exact move the class model exists to prevent —
+   * an agent resolving "the error alarm fired" by making the error alarm
+   * unable to fire — landed as an ordinary knob_changed event.
+   */
+  describe("the fence on the write path", () => {
+    const machineWrite = (name: string, value: number) =>
+      request(app()).put(`/api/automation/v1/planner/knobs/${name}`).set("X-Service-Secret", TEST_SERVICE_SECRET).send({ value });
+
+    it("lets the supervisor write a policy knob", async () => {
+      const res = await machineWrite("mine.taskWeight", 2);
+      expect(res.status).toBe(200);
+      expect(res.body.knob.value).toBe(2);
+    });
+
+    it("refuses to let the supervisor widen its own alarm thresholds", async () => {
+      const res = await machineWrite("anomaly.errorRateThreshold", 1);
+      expect(res.status).toBe(403); // the credential is valid; it just doesn't reach this class
+      expect(res.body.error.message).toMatch(/alert knob/);
+
+      const after = await request(app()).get("/api/automation/v1/planner/knobs");
+      const knob = after.body.knobs.find((k: { name: string }) => k.name === "anomaly.errorRateThreshold");
+      expect(knob.value).toBe(0.1); // the rejected write never took effect
+    });
+
+    it("refuses to let the supervisor rewrite what the planner believes about the universe", async () => {
+      const res = await machineWrite("travel.speedUnitsPerHourPrior", 999);
+      expect(res.status).toBe(403);
+      expect(res.body.error.message).toMatch(/model knob/);
+    });
+
+    it("still refuses a machine caller presenting the wrong secret", async () => {
+      const res = await request(app())
+        .put("/api/automation/v1/planner/knobs/mine.taskWeight")
+        .set("X-Service-Secret", "not-the-secret")
+        .send({ value: 2 });
+      expect(res.status).toBe(401);
+    });
+
+    it("records the supervisor as the actor, so a tuning change is attributable", async () => {
+      await machineWrite("mine.taskWeight", 3);
+      const events = await request(app()).get("/api/automation/v1/autopilot/events?limit=10");
+      const changed = events.body.events.find((e: { type: string }) => e.type === "knob_changed");
+      expect(changed.detail).toMatchObject({ name: "mine.taskWeight", newValue: 3, actor: "ai-service" });
+    });
+  });
+
   it("still lets an operator write a model knob directly", async () => {
     const res = await request(app())
       .put("/api/automation/v1/planner/knobs/travel.speedUnitsPerHourPrior").set("Authorization", bearer())
@@ -105,12 +154,23 @@ describe("knob classes", () => {
 
   it("clamps a stored value that no longer fits tightened bounds, instead of leaving it unwritable", async () => {
     await pool.query(`UPDATE knob SET max_value = 1000, value = 1000 WHERE name = 'mine.taskWeight'`);
-    await syncKnobDefinitions(pool);
+    const clamps = await syncKnobDefinitions(pool);
 
     const res = await request(app()).get("/api/automation/v1/planner/knobs");
     const knob = res.body.knobs.find((k: { name: string }) => k.name === "mine.taskWeight");
     expect(knob.max).toBe(10);
     expect(knob.value).toBe(10);
+
+    // Reported rather than applied in silence: every API-driven change writes
+    // a knob_changed event, and a boot that moves an operator's tuned value
+    // owes the audit trail the same. The entrypoint logs these as
+    // knob_clamped; without it the log still showed 1000 as the last
+    // intended value with nothing marking where the two diverged.
+    expect(clamps).toEqual([{ name: "mine.taskWeight", previousValue: 1000, newValue: 10, min: 0, max: 10 }]);
+  });
+
+  it("reports nothing when a sync changes no value, so a normal boot is quiet", async () => {
+    expect(await syncKnobDefinitions(pool)).toEqual([]);
   });
 
   it("keeps an operator's tuned value across a redeploy", async () => {

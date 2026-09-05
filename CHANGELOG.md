@@ -7,6 +7,58 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## The rest of the audit
+
+The remaining findings from the architecture review, after the two alarms
+below. Same theme throughout: mechanisms built correctly, then not wired to
+the thing they protect.
+
+- **The knob-class fence was a read filter.** The supervisor was *shown* only
+  policy knobs and trusted not to name any other; nothing rejected a write, so
+  it could have resolved "the error alarm fired" by making the error alarm
+  unable to fire. The write path now checks class inside the same row lock as
+  the write. An operator with `fleet:control` may write any class; a machine
+  caller may write `policy` only, and gets `403` otherwise.
+- **Ship dispatch had no cross-process lock.** The re-entrancy guard was an
+  in-memory boolean covering one process overlapping itself, so two replicas
+  would each drive the same ship and each dispatch its own purchase, against a
+  reserve-floor check that had accounted for one. Dispatch now takes a
+  Postgres advisory lock; a second instance logs `dispatch_standby` and waits.
+  Session-level, so a process that dies releases it rather than wedging the
+  fleet.
+- **A single cycle set a field's revenue estimate outright.** Recency decay
+  cannot prevent that — an average over one sample is that sample — so one
+  lucky trip could send the fleet to a distant field, where the only cycles
+  able to correct the error were the ones the error caused. Estimates are now
+  shrunk toward the fleet average by two pseudo-observations.
+- **The observation cap erased rarely-mined fields.** Capped fleet-wide, a
+  quiet field's own cycles fell out of the window on a busy fleet, so it
+  reverted to the (higher) fleet average and became attractive again — the
+  fleet re-learned the same disappointment on a loop. The cap is now per field.
+- **Mining's overhead was billed to scouting and contracts.** It is calibrated
+  as the residual of mining cycles, so it includes survey, extraction and
+  cooldown that a market visit never performs; charging it inflated a
+  ten-minute pricing trip toward half an hour and biased every comparison
+  toward mining. Both now use `cycle.transactOverheadHoursPrior`.
+- **Contract scores were frozen under a model that had moved.** Cycle time is
+  re-derived from the stored route under the current calibration, so a
+  contract evaluated on a cold fleet is no longer compared against mining
+  scores that have since doubled. Expected profit stays frozen, since it
+  depends on prices the decision has not re-read.
+- **A failed anomaly delivery was never retried.** The record was safely in
+  Postgres, which is what made the loss invisible; dedupe then ensured no
+  later firing would replace the missed page. Later ticks now retry the oldest
+  undelivered anomalies, up to a bounded total, then give up.
+- **Redeploys clamped tuned values silently.** Every API-driven change writes
+  an event; a boot that moved an operator's value wrote nothing, so the audit
+  trail and the running configuration disagreed with nothing marking where.
+  `syncKnobDefinitions` now reports what it changed and the entrypoint logs
+  `knob_clamped`.
+- **Replan re-ran contract discovery once per idle ship.** What is on offer
+  belongs to the agent, not to whichever ship is idle, so N idle ships paid
+  for N identical passes inside one tick while the tick guard held everything
+  else. Discovery now runs once per tick.
+
 ## Two alarms that switched themselves off
 
 Both from an architecture review of the autopilot's safety machinery.

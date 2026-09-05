@@ -3,6 +3,7 @@ import { AutopilotState } from "./autopilotState";
 import { Clock } from "./clock";
 import { discoverAndEvaluateContracts } from "./contractDiscovery";
 import { ContractRepo } from "./contractRepo";
+import { DispatchLock } from "./dispatchLock";
 import { advanceContractTask } from "./contractTask";
 import { EventLog } from "./eventLog";
 import { GameClients, ShipSnapshot } from "./gameClients";
@@ -59,8 +60,14 @@ export class FleetScheduler {
   private startedAt: Date | null = null;
   private replanRequested = false;
   private replanReason: string | null = null;
+  // Cross-process guard on ship dispatch; the loop's own guard only covers
+  // this process overlapping itself. See dispatchLock.ts.
+  private readonly dispatchLock: DispatchLock;
+  // So standing by logs once per spell, not once per tick.
+  private standbyLogged = false;
 
   constructor(private readonly deps: FleetSchedulerDeps) {
+    this.dispatchLock = new DispatchLock(deps.pool, `dispatch:${deps.shipSymbol}`);
     this.loop = new IntervalLoop(deps.intervalMs, () => this.tick(), (err) =>
       deps.events.append("mining_tick_error", { shipSymbol: deps.shipSymbol, message: String(err) })
     );
@@ -72,8 +79,13 @@ export class FleetScheduler {
   }
 
   /** Resolves only once any in-flight tick has finished, so an abort's response means nothing is still running. */
-  stop(): Promise<void> {
-    return this.loop.stop();
+  async stop(): Promise<void> {
+    // Drain first, then hand the lock over: releasing while a tick is still
+    // dispatching would let another instance start driving the same ship
+    // alongside it, which is the thing the lock exists to prevent.
+    await this.loop.stop();
+    await this.dispatchLock.release();
+    this.standbyLogged = false;
   }
 
   /**
@@ -119,6 +131,17 @@ export class FleetScheduler {
     const spaceTradersToken = this.spaceTradersToken();
     if (spaceTradersToken === null) return;
 
+    // Only one process may drive a ship. Another replica holding the lock
+    // means this one stands by rather than double-dispatching alongside it.
+    if (!(await this.dispatchLock.acquire())) {
+      if (!this.standbyLogged) {
+        this.standbyLogged = true;
+        await events.append("dispatch_standby", { shipSymbol, reason: "another instance holds the dispatch lock" });
+      }
+      return;
+    }
+    this.standbyLogged = false;
+
     // Shadow mode (meta#21): run the planner's scoring cycle and log every
     // decision, but never touch ship_task or dispatch a ship action. Nothing is
     // ever "assigned", so the same cycle replays every tick — a continuous
@@ -141,7 +164,9 @@ export class FleetScheduler {
     const task = await tasks.getOrCreate(shipSymbol);
     if (isIdle(task)) {
       if (status === "paused") return; // never start a new assignment while paused
-      await this.assignTarget(task, spaceTradersToken);
+      const idleShip = await clients.getShip(shipSymbol, spaceTradersToken);
+      await this.discoverContracts(idleShip, spaceTradersToken);
+      await this.assignTarget(task, spaceTradersToken, idleShip);
       return;
     }
     if (status === "paused" && task.waitingUntil === null) return; // idle between steps
@@ -243,6 +268,11 @@ export class FleetScheduler {
     // Re-scores every ship with no assigned target. A ship mid-task never
     // matches that predicate, so running work is never preempted.
     const idle = await this.deps.tasks.listIdle();
+    if (idle.length > 0) {
+      // One discovery pass for the whole replan, not one per ship.
+      const ship = await this.deps.clients.getShip(idle[0].shipSymbol, spaceTradersToken);
+      await this.discoverContracts(ship, spaceTradersToken);
+    }
     for (const task of idle) await this.assignTarget(task, spaceTradersToken);
     await this.deps.events.append("replan_executed", { reason, shipsConsidered: idle.length });
     return new Set(idle.map((t) => t.shipSymbol));
@@ -259,20 +289,34 @@ export class FleetScheduler {
     await events.append("planner_shadow_assignment", assignment.detail);
   }
 
-  private async assignTarget(task: ShipTask, spaceTradersToken: string): Promise<void> {
-    const { clients, planner, clock, state, events, tasks, contracts, pool } = this.deps;
-    const ship = await clients.getShip(task.shipSymbol, spaceTradersToken);
-
-    // Catch up on any contract SpaceTraders has on offer that this agent
-    // hasn't seen yet before scoring — otherwise a fresh, higher-scoring
-    // contract could still be unevaluated when this tick locks the ship into a
-    // mining target instead (meta#11). A failure here must not block mining:
-    // contracts are additive, never a dependency.
+  /**
+   * Catches up on any contract SpaceTraders has on offer that this agent
+   * hasn't seen yet — otherwise a fresh, higher-scoring contract could still
+   * be unevaluated when a tick locks a ship into a mining target instead
+   * (meta#11).
+   *
+   * Runs **once per tick**, before any assignment, rather than once per ship.
+   * What is on offer is a property of the agent, not of whichever ship happens
+   * to be idle, so N idle ships used to pay for N identical discovery passes
+   * back to back inside a single tick — with the tick guard holding all other
+   * dispatch until the last one finished.
+   *
+   * A failure here must not block mining: contracts are additive, never a
+   * dependency.
+   */
+  private async discoverContracts(ship: ShipSnapshot, spaceTradersToken: string): Promise<void> {
+    const { clients, planner, events, contracts } = this.deps;
     try {
       await discoverAndEvaluateContracts({ contracts, events, clients, planner, ship, spaceTradersToken });
     } catch (err) {
       await events.append("contract_discovery_error", { message: String(err) });
     }
+  }
+
+  /** `ship` is passed in wherever the caller already read it, so one assignment costs one ship read. */
+  private async assignTarget(task: ShipTask, spaceTradersToken: string, preloadedShip?: ShipSnapshot): Promise<void> {
+    const { clients, planner, clock, state, events, tasks, contracts, pool } = this.deps;
+    const ship = preloadedShip ?? (await clients.getShip(task.shipSymbol, spaceTradersToken));
 
     const assignment = await planner.assignTarget({ ship, spaceTradersToken, now: clock.now() });
 

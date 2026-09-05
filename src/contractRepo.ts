@@ -14,6 +14,8 @@ export interface ContractRecord {
   expectedProfit: number;
   /** The evaluation's estimated hours to complete one full cycle — feeds the planner's score alongside mining. */
   cycleHours: number;
+  /** Route distance frozen at evaluation, so cycle time can be re-derived under the current model. */
+  travelDistance: number;
   procurementMarket: string | null;
 }
 
@@ -37,8 +39,8 @@ export class ContractRepo {
     await this.pool.query(
       `INSERT INTO contract
          (contract_id, trade_symbol, destination_waypoint, units_required, total_payment, status,
-          expected_profit, cycle_hours, procurement_market, evaluated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          expected_profit, cycle_hours, travel_distance, procurement_market, evaluated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (contract_id) DO NOTHING`,
       [
         record.contractId,
@@ -49,6 +51,7 @@ export class ContractRepo {
         record.status,
         record.expectedProfit,
         record.cycleHours,
+        record.travelDistance,
         record.procurementMarket,
         this.clock.now(),
       ]
@@ -80,6 +83,7 @@ function rowToRecord(row: {
   status: ContractStatus;
   expected_profit: string | number;
   cycle_hours: string | number;
+  travel_distance: string | number | null;
   procurement_market: string | null;
 }): ContractRecord {
   return {
@@ -91,6 +95,7 @@ function rowToRecord(row: {
     status: row.status,
     expectedProfit: Number(row.expected_profit),
     cycleHours: Number(row.cycle_hours),
+    travelDistance: Number(row.travel_distance ?? 0),
     procurementMarket: row.procurement_market,
   };
 }

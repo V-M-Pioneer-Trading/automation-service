@@ -74,6 +74,7 @@ const contract: ContractRecord = {
   status: "assigned",
   expectedProfit: 15_000,
   cycleHours: 1,
+  travelDistance: 30,
   procurementMarket: "X1-MARKET",
 };
 
