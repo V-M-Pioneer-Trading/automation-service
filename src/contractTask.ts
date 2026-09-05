@@ -102,13 +102,22 @@ async function dispatchDeliver(ctx: TaskContext, contract: ContractRecord): Prom
 }
 
 async function dispatchFulfill(ctx: TaskContext, contract: ContractRecord): Promise<TickResult> {
-  const { task, clients} = ctx;
-  await clients.fulfillContract(contract.contractId);
+  const { task, clients } = ctx;
+  // The response carries the settled contract, so the balance is recorded from
+  // what the game actually paid rather than from the evaluation's estimate.
+  // `payment` is the key the earnings checks and the credits/hour rollup read
+  // (see fleetEvents.ts) — without it a contract-running fleet reads as having
+  // earned nothing at all.
+  const settled = await clients.fulfillContract(contract.contractId);
   // Idle hands the ship back to the planner on its very next tick — mining, or
   // the next accepted contract, whichever scores higher.
   return {
     task: idleTask(task),
     event: "contract_fulfilled",
-    detail: { shipSymbol: task.shipSymbol, contractId: contract.contractId },
+    detail: {
+      shipSymbol: task.shipSymbol,
+      contractId: contract.contractId,
+      payment: settled?.contract?.terms?.payment?.onFulfilled ?? 0,
+    },
   };
 }

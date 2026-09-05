@@ -233,7 +233,7 @@ actor that made it.
 | `anomaly.creditsFlatWindowHours` | `2` | Earnings also stalled if credits show no net increase across this window. |
 | `anomaly.noEarningsMinutes` | `60` | Earnings also stalled if nothing at all sells across this window while armed or paused. |
 | `anomaly.consecutiveFailureLimit` | `3` | Consecutive failures on one ship that raise an anomaly. |
-| `anomaly.errorRateThreshold` | `0.1` | Error fraction of recent mining events that flags the fleet as failing. |
+| `anomaly.errorRateThreshold` | `0.1` | Error fraction of recent ship-task events — any task kind — that flags the fleet as failing. |
 | `anomaly.errorRateWindowMinutes` | `5` | Window that fraction is computed over. |
 | `anomaly.marketStalenessMinutes` | `30` | Minutes since a ship last read an in-use market in person before it's flagged stale. |
 | `anomaly.dedupeCooldownMinutes` | `15` | How long a fired anomaly stays suppressed. |
@@ -489,8 +489,9 @@ open.
 ### Metrics rollups
 
 A background scheduler persists one rollup per tick, each covering the window
-since the last one ended: credits/hour (sell revenue, not netted against
-costs), units extracted, and error rate. On restart it resumes from the last
+since the last one ended: credits/hour (mining sells plus both contract
+payments, not netted against costs), units extracted, and error rate — the
+latter over every ship-task event, not mining's alone. On restart it resumes from the last
 persisted window end, so there's no gap and no double count.
 
 ---

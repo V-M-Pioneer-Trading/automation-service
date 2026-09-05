@@ -61,7 +61,15 @@ export async function discoverAndEvaluateContracts(deps: {
     }
     await clients.acceptContract(contract.id);
     await contracts.record(toRecord(contract, evaluation, "accepted"));
-    await events.append("contract_accepted", { contractId: contract.id, expectedProfit: evaluation.expectedProfit });
+    // The advance is real credits arriving now, so it is logged the same way the
+    // balance is at fulfilment — see fleetEvents.ts. `expectedProfit` is the
+    // planner's estimate and deliberately stays beside it rather than standing
+    // in for it.
+    await events.append("contract_accepted", {
+      contractId: contract.id,
+      expectedProfit: evaluation.expectedProfit,
+      payment: contract.terms.payment.onAccepted,
+    });
   }
 }
 

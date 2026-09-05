@@ -217,7 +217,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     await expectNoAnomaly(gateway, "consecutive_failures");
   }, 10_000);
 
-  it("fires error_rate when over 10% of mining_* events in the trailing window are errors", async () => {
+  it("fires error_rate when over 10% of ship-task events in the trailing window are errors", async () => {
     const rows = [
       "mining_extract",
       "mining_extract",
@@ -237,6 +237,48 @@ describe("automation-service anomaly detection (meta#15)", () => {
     const gateway = app();
     const anomaly = await waitForAnomaly(gateway, "error_rate");
     expect(anomaly.detail.rate).toBeCloseTo(2 / 11, 5);
+  }, 10_000);
+
+  /**
+   * Regression: the denominator counted only `mining_%` events, but the two
+   * error types are logged by the scheduler for *every* task kind — they are
+   * misnamed, not mining-specific. So in a window containing only contract
+   * work, a single failure divided by a denominator of zero-plus-itself:
+   * errors 1, total 1, rate 1.0 against a 0.1 threshold. The alarm fired at
+   * 100% on a healthy contract fleet, and `mine.taskWeight = 0` is a
+   * supported configuration, so this was reachable without doing anything
+   * exotic.
+   */
+  it("does not fire error_rate on a contract-only window with one failure", async () => {
+    const rows = [
+      "contract_purchase",
+      "contract_deliver",
+      "contract_deliver",
+      "contract_deliver",
+      "contract_deliver",
+      "contract_deliver",
+      "contract_deliver",
+      "contract_deliver",
+      "contract_deliver",
+      "contract_fulfilled",
+      "mining_tick_error", // 1/11 — under the threshold, once contract work counts
+    ];
+    for (const type of rows) {
+      await pool.query(`INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, $2, '{}')`, [clock.now(), type]);
+    }
+    const gateway = app();
+    await expectNoAnomaly(gateway, "error_rate");
+  }, 10_000);
+
+  // Scout work counts toward the denominator for the same reason contract work
+  // does: `mining_tick_error` is what a failed scout tick logs too.
+  it("counts scout work in the error-rate denominator", async () => {
+    for (let i = 0; i < 19; i++) {
+      await pool.query(`INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, 'scout_market_refresh', '{}')`, [clock.now()]);
+    }
+    await pool.query(`INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, 'mining_task_failed', '{}')`, [clock.now()]);
+    const gateway = app();
+    await expectNoAnomaly(gateway, "error_rate"); // 1/20, not 1/1
   }, 10_000);
 
   it("does not fire error_rate when errors are under the threshold", async () => {
@@ -306,7 +348,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     const anomaly = await waitForAnomaly(gateway, "earnings_stalled");
     expect(anomaly.detail.reasons).toContain("no_earnings");
     expect(anomaly.detail.status).toBe("paused");
-    expect(anomaly.detail.lastSoldAt).toBeNull();
+    expect(anomaly.detail.lastEarnedAt).toBeNull();
   }, 10_000);
 
   it("stays quiet while the fleet is still selling, and while it is aborted", async () => {
@@ -326,6 +368,44 @@ describe("automation-service anomaly detection (meta#15)", () => {
     // earning nothing is the expected state, not an anomaly.
     await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
     clock.advance(61 * 60 * 1000);
+    await gateway.locals.forceAnomalyTick();
+    await expectNoAnomaly(gateway, "earnings_stalled", 0);
+  }, 10_000);
+
+  /**
+   * Regression: earnings were proven exclusively by `mining_sell`. Contract
+   * payments arrive at accept (the advance) and fulfil (the balance) and are
+   * neither of them a sell, so a fleet earning well on contracts paged
+   * `earnings_stalled` every dedupe window, forever. Worse, this is the check
+   * added specifically because it *cannot switch itself off* — so the only way
+   * out was widening an `alert` knob, which is the move the class fence exists
+   * to prevent.
+   */
+  it("stays quiet for a fleet earning on contracts rather than sells", async () => {
+    const gateway = app({ withMining: true, intervalMs: 100_000 });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
+
+    clock.advance(61 * 60 * 1000);
+    // No mining_sell anywhere in the window — the balance on a fulfilled
+    // contract is the only revenue, and it is revenue.
+    await pool.query(
+      `INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, 'contract_fulfilled', $2)`,
+      [new Date(clock.now().getTime() - 60_000), JSON.stringify({ contractId: "c1", payment: 120_000 })]
+    );
+    await gateway.locals.forceAnomalyTick();
+    await expectNoAnomaly(gateway, "earnings_stalled", 0);
+  }, 10_000);
+
+  // The advance is paid on acceptance, so it counts on its own.
+  it("counts a contract advance as earnings", async () => {
+    const gateway = app({ withMining: true, intervalMs: 100_000 });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
+
+    clock.advance(61 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, 'contract_accepted', $2)`,
+      [new Date(clock.now().getTime() - 60_000), JSON.stringify({ contractId: "c2", payment: 40_000 })]
+    );
     await gateway.locals.forceAnomalyTick();
     await expectNoAnomaly(gateway, "earnings_stalled", 0);
   }, 10_000);

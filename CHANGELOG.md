@@ -7,6 +7,33 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Two alarms that read the event log in mining's terms
+
+Both were the same root cause: the event vocabulary was written out separately
+in `anomaly.ts` and `metrics.ts`, so each consumer decided for itself what
+counted. `fleetEvents.ts` now owns those answers.
+
+- **The error-rate alarm fired at 100% on a healthy contract fleet.** Its
+  denominator counted `mining_%` events; its numerator counted
+  `mining_tick_error` and `mining_task_failed`, which the scheduler logs for
+  *every* task kind. A window containing only contract work therefore scored
+  one failure against a denominator of one: rate 1.0, threshold 0.1. That the
+  name is historical was already documented two lines below the table
+  describing the split — nobody had connected the two. `mine.taskWeight = 0`
+  is supported, so this needed nothing exotic to reach.
+- **The no-earnings alarm ignored contract income.** It proved earnings with
+  `mining_sell` alone. Contracts pay an advance on accept and the balance on
+  fulfil, and neither is a sell, so a fleet earning well on contracts paged
+  `earnings_stalled` every dedupe window forever. This is the check added
+  precisely because it cannot switch itself off, so the only escape was
+  widening an `alert` knob — the move the class fence exists to prevent.
+  Neither payment was recorded at all, so the fix logs `payment` on
+  `contract_accepted` and `contract_fulfilled` and counts both.
+
+The rollup carried the same two skews, which is why the metrics an operator
+checked agreed with the false alarm. `credits_per_hour` now includes contract
+payments, so `profit_drop` stops being blind to them too.
+
 ## The rest of the audit
 
 The remaining findings from the architecture review, after the two alarms

@@ -4,6 +4,7 @@ import { Clock } from "./clock";
 import { KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
 import { ShipTask } from "./shipTaskRepo";
+import { ACTION_ERROR_PREDICATE, EARNING_EVENT_PREDICATE, TASK_EVENT_PREDICATE } from "./fleetEvents";
 
 export interface Anomaly {
   id: string;
@@ -283,14 +284,14 @@ export class AnomalyChecker {
     const windowMinutes = await this.knobs.get("anomaly.noEarningsMinutes");
     const since = new Date(now.getTime() - windowMinutes * 60_000);
 
-    const [{ rows: lifecycleRows }, { rows: sellRows }] = await Promise.all([
+    const [{ rows: lifecycleRows }, { rows: earningRows }] = await Promise.all([
       this.pool.query(
         `SELECT occurred_at FROM event_log WHERE type IN ('armed', 'paused', 'aborted')
          ORDER BY occurred_at DESC, id DESC LIMIT 1`
       ),
       this.pool.query(
-        `SELECT MAX(occurred_at) AS last_sold, COUNT(*) AS sells FROM event_log
-         WHERE type = 'mining_sell' AND occurred_at >= $1 AND occurred_at <= $2`,
+        `SELECT MAX(occurred_at) AS last_earned, COUNT(*) AS earnings FROM event_log
+         WHERE ${EARNING_EVENT_PREDICATE} AND occurred_at >= $1 AND occurred_at <= $2`,
         [since, now]
       ),
     ]);
@@ -298,14 +299,14 @@ export class AnomalyChecker {
     // In this state for less than the window: too early to judge.
     const enteredStateAt = lifecycleRows[0]?.occurred_at ?? null;
     if (enteredStateAt === null || new Date(enteredStateAt) > since) return null;
-    if (Number(sellRows[0].sells) > 0) return null;
+    if (Number(earningRows[0].earnings) > 0) return null;
 
     return {
       reason: "no_earnings",
       detail: {
         status,
         windowMinutes,
-        lastSoldAt: (sellRows[0].last_sold as Date | null)?.toISOString() ?? null,
+        lastEarnedAt: (earningRows[0].last_earned as Date | null)?.toISOString() ?? null,
         enteredStateAt: new Date(enteredStateAt).toISOString(),
       },
     };
@@ -322,8 +323,8 @@ export class AnomalyChecker {
     const since = new Date(now.getTime() - windowMinutes * 60_000);
     const { rows } = await this.pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE type LIKE 'mining\_%') AS total,
-         COUNT(*) FILTER (WHERE type IN ('mining_tick_error', 'mining_task_failed')) AS errors
+         COUNT(*) FILTER (WHERE ${TASK_EVENT_PREDICATE}) AS total,
+         COUNT(*) FILTER (WHERE ${ACTION_ERROR_PREDICATE}) AS errors
        FROM event_log WHERE occurred_at >= $1 AND occurred_at <= $2`,
       [since, now]
     );
