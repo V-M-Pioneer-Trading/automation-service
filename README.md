@@ -558,7 +558,7 @@ All routes are under `/api/automation/v1`. `/health` is unversioned.
 | | |
 |---|---|
 | `GET /metrics/context?rollupLimit=&eventLimit=` | Rollups plus recent events in one bounded response, shaped to fit an AI context window. |
-| `GET /anomalies/digest?windowMinutes=&anomalyLimit=&eventLimit=` | Anomalies plus notable events for a window. |
+| `GET /anomalies/digest?windowMinutes=&anomalyLimit=&eventLimit=` | Anomalies plus notable events for a window: lifecycle, terminal task outcomes, silent-degradation failures, dispatch contention, knob changes and clamps, and AI actions. |
 | `POST /events` | `{ type, detail }` for an external supervisor. `type` must start with `ai_`, so an external caller can log its own decisions but can never spoof a lifecycle or planner event. |
 
 Invalid lifecycle transitions return `409` naming the current status.

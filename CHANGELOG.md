@@ -7,6 +7,28 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## The digest was dropping what it existed to show
+
+Five event types were written to the log and then filtered out of
+`/anomalies/digest` — the surface an operator reviews hourly and the AI
+supervisor reads for context. The record existed; the page never showed it.
+
+`contract_discovery_error` is the one with a scar: decision 19's outage took
+the entire autonomous loop down, and it was found by grepping the raw event log
+for exactly this type, because the digest filtered it. `observation_write_error`
+is the subtler one — calibration stops recording, and the planner goes on
+scoring against the last values it measured, confident and drifting.
+
+Also added: `dispatch_standby` (another replica holds the lock, logged once per
+spell), `knob_changed`, and `knob_clamped` — the last of which the audit had
+introduced specifically so a deploy silently pulling a tuned value back inside
+new bounds would stop being invisible, which left that fix half-finished.
+
+The inclusion rule is now written down: not "is this an error", but "would
+someone be wrong about the fleet without it, and does nothing else say it?"
+The digest is bounded and read by a human, so routine per-tick chatter staying
+out is half the point, and there is now a test for each half.
+
 ## Two alarms that read the event log in mining's terms
 
 Both were the same root cause: the event vocabulary was written out separately

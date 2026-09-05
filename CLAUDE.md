@@ -251,7 +251,7 @@ ai-service); treat them as public. Things that depend on specific types:
 | `AnomalyChecker.detectNoEarnings` | `fleetEvents`' earning predicate, and `armed`/`paused`/`aborted` as the operator's stated intent |
 | `AnomalyChecker.checkMarketStaleness` | `mining_market_selected.marketsChecked` |
 | `replay.ts` | `planner_assignment`, `planner_shadow_assignment` (shape above) |
-| `/anomalies/digest` | `NOTABLE_EVENT_TYPES` in `server.ts` |
+| `/anomalies/digest` | `NOTABLE_EVENT_TYPES` in `server.ts`. The test for inclusion is "would someone be wrong about the fleet without it, and does nothing else say it?" — not "is it an error". Routine per-tick events stay out; a bounded list nobody reads is worse than no list |
 
 **Ask `fleetEvents.ts`, never write your own `type LIKE …`.** Both alarms and
 the rollup used to spell these questions out separately, and drifted into
