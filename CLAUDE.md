@@ -36,9 +36,10 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `transaction.ts` | `withTransaction(pool, fn)` | pg |
 | `intervalLoop.ts` | `IntervalLoop`: the one guarded timer every scheduler runs on | nothing |
 | `dispatchLock.ts` | `DispatchLock`: Postgres advisory lock making "one process drives this ship" true across processes | pg, crypto |
-| `anomaly.ts` | `AnomalyRepo`, `AnomalyChecker` (five read-only checks) | knobs, marketIntel |
+| `fleetEvents.ts` | The event vocabulary: task progress, failed actions, credits arriving. SQL predicates only, no I/O | nothing |
+| `anomaly.ts` | `AnomalyRepo`, `AnomalyChecker` (five read-only checks) | knobs, marketIntel, fleetEvents |
 | `anomalyScheduler.ts` | Runs checks, dedupes, persists, delivers, requests replans | anomaly, webhookDelivery |
-| `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table |
+| `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table, fleetEvents |
 | `shipTaskRepo.ts`, `contractRepo.ts`, `marketIntelRepo.ts`, `eventLog.ts` | Row ↔ object repos. Repos taking `Pool \| PoolClient` can join a transaction | clock |
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
 | `auth.ts` | Networkless Clerk JWT verification, service-secret guard | jose |
@@ -243,17 +244,26 @@ ai-service); treat them as public. Things that depend on specific types:
 
 | Consumer | Reads |
 |---|---|
-| `MetricsRepo` | `mining_sell.totalPrice`, `mining_extract.units`, all `mining\_%` for the error-rate denominator, `mining_tick_error` + `mining_task_failed` as errors |
-| `AnomalyChecker.checkErrorRate` | same `mining\_%` split (note the escaped underscore in `LIKE`) |
+| `fleetEvents.ts` | **Owns the vocabulary.** Which types mean task progress, a failed action, and credits arriving |
+| `MetricsRepo` | `mining_extract.units`, plus `fleetEvents`' revenue and error-rate predicates |
+| `AnomalyChecker.checkErrorRate` | `fleetEvents`' task-progress and error predicates |
 | `AnomalyChecker.detectCreditsFlat` | `agent_credits_snapshot.credits`, written by the anomaly scheduler only while armed & live |
-| `AnomalyChecker.detectNoEarnings` | `mining_sell` as proof of earning, and `armed`/`paused`/`aborted` as the operator's stated intent |
+| `AnomalyChecker.detectNoEarnings` | `fleetEvents`' earning predicate, and `armed`/`paused`/`aborted` as the operator's stated intent |
 | `AnomalyChecker.checkMarketStaleness` | `mining_market_selected.marketsChecked` |
 | `replay.ts` | `planner_assignment`, `planner_shadow_assignment` (shape above) |
 | `/anomalies/digest` | `NOTABLE_EVENT_TYPES` in `server.ts` |
-| `AnomalyChecker.detectNoEarnings` | `mining_sell`, and `armed`/`paused`/`aborted` as operator intent |
 
-Scheduler-level errors are logged as `mining_tick_error` for every task kind
-(historical name; renaming it changes the metrics and anomaly denominators).
+**Ask `fleetEvents.ts`, never write your own `type LIKE …`.** Both alarms and
+the rollup used to spell these questions out separately, and drifted into
+agreeing with each other about the wrong thing: they counted errors that every
+task kind logs against a denominator of mining events only, so a contract-only
+window read as a 100% error rate; and they proved earnings with `mining_sell`
+alone, so a fleet earning on contracts read as earning nothing.
+
+Scheduler-level errors are logged as `mining_tick_error` for every task kind —
+the name is historical and means "a tick failed", not "a mining tick failed".
+Renaming it would strand every historical row, so it stays; what must not
+happen again is a *denominator* that reads the name literally.
 Event `detail` must never contain a token or anything token-shaped; `actor`
 is the Clerk `sub` only.
 
