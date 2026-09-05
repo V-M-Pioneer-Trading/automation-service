@@ -428,8 +428,10 @@ describe("automation-service anomaly detection (meta#15)", () => {
     const gateway = app({ withMining: true });
     const anomaly = await waitForAnomaly(gateway, "consecutive_failures");
 
-    // Attempts are bounded across ticks, not just within one, so a webhook
-    // that never comes back can't make every tick pay for it indefinitely.
+    // Rounds are bounded across ticks, not just within one, so a webhook that
+    // never comes back can't make every tick pay for it indefinitely. The
+    // column counts rounds — one per deliver() call, each of which retries
+    // internally — so the HTTP ceiling is this times the per-call budget.
     await new Promise((r) => setTimeout(r, 1500));
     const { rows } = await pool.query("SELECT delivery_attempts FROM anomaly WHERE id = $1", [anomaly.id]);
     expect(Number(rows[0].delivery_attempts)).toBeLessThanOrEqual(12);

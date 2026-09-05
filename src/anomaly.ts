@@ -64,11 +64,13 @@ export class AnomalyRepo {
    * row sat safely in Postgres looking fine. Dedupe made it worse: once the
    * condition cleared, no re-fire would ever replace the missed page.
    */
-  async listUndelivered(maxAttempts: number, limit: number): Promise<Anomaly[]> {
+  async listUndelivered(maxRounds: number, limit: number): Promise<Anomaly[]> {
     const { rows } = await this.pool.query(
+      // delivery_attempts counts *rounds* — one per deliver() call, each of
+      // which retries internally — not individual HTTP requests.
       `${ANOMALY_SELECT} WHERE delivered_at IS NULL AND delivery_attempts < $1
        ORDER BY detected_at ASC LIMIT $2`,
-      [maxAttempts, limit]
+      [maxRounds, limit]
     );
     return rows.map(rowToAnomaly);
   }

@@ -14,12 +14,20 @@ export interface AnomalyConfig {
 }
 
 /**
- * Total delivery attempts an anomaly is worth across all ticks. `WebhookDelivery`
- * spends three inside the tick that records it; the rest are spread over later
- * ticks by `redeliverMissed`, so a webhook that comes back within a few minutes
- * still gets the page.
+ * How many *rounds* of delivery an anomaly is worth in total — one per tick
+ * that tries it, which is what `anomaly.delivery_attempts` counts.
+ *
+ * A round is not one HTTP request: `WebhookDelivery.deliver` retries with
+ * backoff inside a single call (three attempts by default) and the counter is
+ * incremented once for the whole call. So the real ceiling on POSTs is this
+ * number times that one, and both have to be read together to know what a
+ * dead webhook actually costs.
+ *
+ * The first round runs in the tick that records the anomaly; the rest are
+ * spread over later ticks by `redeliverMissed`, so a webhook that comes back
+ * within a few minutes still gets the page.
  */
-const MAX_DELIVERY_ATTEMPTS = 12;
+const MAX_DELIVERY_ROUNDS = 12;
 /** Oldest undelivered anomalies retried per tick, so a backlog can't stall the checks. */
 const REDELIVERY_BATCH = 5;
 
@@ -105,17 +113,17 @@ export class AnomalyScheduler {
   /**
    * Re-sends anomalies that were recorded but never delivered.
    *
-   * The in-tick attempts (three, with backoff) all failing used to be the end
-   * of it: the row stayed undelivered forever, and dedupe meant no later
-   * firing of the same condition would replace the missed page — so a webhook
-   * that was down for a minute lost the alert permanently, while the record
-   * sat safely in Postgres looking like nothing was wrong. Each later tick now
-   * retries a few of the oldest, up to a bounded total budget, so a recovered
-   * webhook receives what it missed instead of never hearing about it.
+   * The first round failing used to be the end of it: the row stayed
+   * undelivered forever, and dedupe meant no later firing of the same
+   * condition would replace the missed page — so a webhook that was down for a
+   * minute lost the alert permanently, while the record sat safely in Postgres
+   * looking like nothing was wrong. Each later tick now retries a few of the
+   * oldest, within `MAX_DELIVERY_ROUNDS`, so a recovered webhook receives what
+   * it missed instead of never hearing about it.
    */
   private async redeliverMissed(): Promise<void> {
     const { repo } = this.deps;
-    const pending = await repo.listUndelivered(MAX_DELIVERY_ATTEMPTS, REDELIVERY_BATCH);
+    const pending = await repo.listUndelivered(MAX_DELIVERY_ROUNDS, REDELIVERY_BATCH);
     for (const anomaly of pending) {
       if (this.loop.stopped) return;
       await this.attemptDelivery(anomaly);
