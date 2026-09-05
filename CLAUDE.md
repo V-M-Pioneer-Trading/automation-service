@@ -35,6 +35,7 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `db.ts` | `createPool`, `migrate` (idempotent DDL) | knobs (for the sync) |
 | `transaction.ts` | `withTransaction(pool, fn)` | pg |
 | `intervalLoop.ts` | `IntervalLoop`: the one guarded timer every scheduler runs on | nothing |
+| `dispatchLock.ts` | `DispatchLock`: Postgres advisory lock making "one process drives this ship" true across processes | pg, crypto |
 | `anomaly.ts` | `AnomalyRepo`, `AnomalyChecker` (five read-only checks) | knobs, marketIntel |
 | `anomalyScheduler.ts` | Runs checks, dedupes, persists, delivers, requests replans | anomaly, webhookDelivery |
 | `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table |
@@ -57,6 +58,15 @@ other (that cycle existed once; `transaction.ts` exists to break it).
   command, *or* resolve one elapsed wait. `FleetScheduler.tick` returns after
   whichever happens first. A replan that considered the configured ship counts
   as that ship's action for the tick (`maybeReplan` returns the set it touched).
+- **One process drives a ship.** `IntervalLoop`'s guard only covers this
+  process; `DispatchLock` covers the rest. A tick that cannot take the lock
+  logs `dispatch_standby` once and does nothing. `stop()` drains the loop
+  *before* releasing, or a standby would start dispatching alongside an
+  in-flight tick. The lock holds a pooled connection for as long as it is
+  held, so a `pool.end()` without a preceding `stop()` will wait forever.
+- **Contract discovery runs once per tick, not once per ship.** What is on
+  offer belongs to the agent, not to whichever ship is idle. `assignTarget`
+  takes an already-read ship so one assignment costs one ship read.
 - **FSMs are DB-free and return the next task.** `advance*Task(ctx)` takes
   `{task, ship, clients, clock, spaceTradersToken}` and returns `TickResult | null`
   (`null` = wait still pending). Anything worth remembering rides on
@@ -164,9 +174,26 @@ wraps an `IntervalLoop`. Semantics you can rely on:
   running tallies (`cycleStartedAt` starts at the first *navigate*, not at
   assignment; `cycleTravelDistance` and `cycleUnitsExtracted` accumulate).
   Overhead is calibrated as `cycleHours − travelDistance/speed`, clamped at 0.
-- `calibrate()` reads at most 500 rows per table, at most 14 days old,
-  recency-weighted by `observation.halfLifeHours`. Rates (speed, fuel) are
-  `weightedRatio` (sum/sum), not means of per-sample ratios.
+- `calibrate()` reads at most 14 days back, recency-weighted by
+  `observation.halfLifeHours`. Travel is capped at 500 rows fleet-wide; mining
+  is capped **per waypoint** (`ROW_NUMBER() OVER (PARTITION BY ...)`), because
+  a global cap silently erased a rarely-mined field's own history on a busy
+  fleet. Rates (speed, fuel) are `weightedRatio` (sum/sum), not means of
+  per-sample ratios.
+- Per-field revenue is shrunk toward `fleetCreditsPerCycle` by
+  `FLEET_PRIOR_WEIGHT` pseudo-observations. Decay alone does not stop a single
+  cycle setting a field's estimate outright — a weighted mean over one sample
+  is that sample. Changing that constant changes how fast the planner commits
+  to a newly-measured field; the tests that pin it seed enough cycles to
+  outweigh it deliberately, so re-tune both together.
+- Mining overhead (`cycle.overheadHoursPrior`, measured as a residual)
+  includes survey, extraction and cooldown. Scout and contract cycles do none
+  of those and are charged `cycle.transactOverheadHoursPrior` instead. Do not
+  reuse the mining figure for a task kind that only docks and transacts.
+- A contract's `expectedProfit` is frozen at discovery (it depends on prices
+  the decision has not re-read); its cycle time is **re-derived** from the
+  stored `travel_distance` under the current model, because mining is always
+  scored on the current model and comparing the two otherwise drifts.
 - `priorsFromKnobs(knobs)` is the only way priors should be built from knob
   values; `/planner/model` and the planner both go through it.
 
@@ -191,11 +218,14 @@ Both the planner's scout scoring and the `market_stale` check read
   max, description). `migrate()` → `syncKnobDefinitions()` inserts it on boot;
   removing it deletes the row; tightened bounds clamp the stored value.
   `knobClasses.test.ts` asserts every class is represented and bounds are sane.
-- Classes are a security boundary: `GET /planner/knobs?class=policy` is the AI
-  supervisor's entire write surface. Never move an `alert` or `model` knob to
-  `policy` casually. Note the fence is enforced on **reads only** — the write
-  path checks bounds and the `fleet:control` scope, not class — so anything
-  holding an operator credential can still write any class.
+- Classes are a security boundary, enforced on **both** paths. Reads: the
+  `?class=` filter. Writes: `KnobRepo.set(name, value, allowedClasses?)`
+  checks the class inside the same row lock as the write and throws
+  `KnobClassForbiddenError` (→ 403). A Clerk `fleet:control` caller passes no
+  restriction and may write any class; a machine caller (`X-Service-Secret`)
+  is restricted to `policy`. Never move an `alert` or `model` knob to `policy`
+  casually, and never call `set` without `allowedClasses` on a path a
+  non-operator can reach.
 - A default is a safety decision. `credit.reserveFloor` defaults to a real
   reserve because at `0` the check reserves nothing, and the failure it guards
   is unrecoverable in-game. Changing a default only affects rows that don't
@@ -220,6 +250,7 @@ ai-service); treat them as public. Things that depend on specific types:
 | `AnomalyChecker.checkMarketStaleness` | `mining_market_selected.marketsChecked` |
 | `replay.ts` | `planner_assignment`, `planner_shadow_assignment` (shape above) |
 | `/anomalies/digest` | `NOTABLE_EVENT_TYPES` in `server.ts` |
+| `AnomalyChecker.detectNoEarnings` | `mining_sell`, and `armed`/`paused`/`aborted` as operator intent |
 
 Scheduler-level errors are logged as `mining_tick_error` for every task kind
 (historical name; renaming it changes the metrics and anomaly denominators).

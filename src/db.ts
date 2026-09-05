@@ -1,12 +1,12 @@
 import { Pool } from "pg";
-import { syncKnobDefinitions } from "./knobs";
+import { KnobClamp, syncKnobDefinitions } from "./knobs";
 
 export function createPool(databaseUrl: string): Pool {
   return new Pool({ connectionString: databaseUrl });
 }
 
 /** Idempotent so it can run on every boot; no separate migration runner yet. */
-export async function migrate(pool: Pool): Promise<void> {
+export async function migrate(pool: Pool): Promise<KnobClamp[]> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS event_log (
       id BIGSERIAL PRIMARY KEY,
@@ -82,7 +82,7 @@ export async function migrate(pool: Pool): Promise<void> {
   // may write, so a knob that somehow misses the sync below stays functional
   // rather than silently disappearing from the supervisor's tool list.
   await pool.query(`ALTER TABLE knob ADD COLUMN IF NOT EXISTS knob_class TEXT NOT NULL DEFAULT 'policy'`);
-  await syncKnobDefinitions(pool);
+  const knobClamps = await syncKnobDefinitions(pool);
 
   // Metrics rollups (meta#14): each row summarizes activity over one
   // [window_start, window_end) slice of event_log, computed and persisted on
@@ -199,4 +199,12 @@ export async function migrate(pool: Pool): Promise<void> {
       evaluated_at TIMESTAMPTZ NOT NULL
     )
   `);
+  // The route length the evaluation measured. Kept so the planner can re-derive
+  // a contract's cycle time under the *current* calibrated model instead of
+  // comparing a figure frozen at discovery against live mining scores.
+  await pool.query(`ALTER TABLE contract ADD COLUMN IF NOT EXISTS travel_distance DOUBLE PRECISION`);
+
+  // Returned rather than logged here: db.ts has no event log and the caller
+  // does. See `KnobClamp` for why a silent clamp is worth an audit entry.
+  return knobClamps;
 }

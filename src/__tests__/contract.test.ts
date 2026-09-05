@@ -336,6 +336,42 @@ describe("automation-service contract loop (meta#11)", () => {
     expect(finalTask.contractId).toBeNull();
   }, 20_000);
 
+  /**
+   * A contract's expected profit is frozen at discovery — it depends on market
+   * prices the decision has not re-read. Its *cycle time* must not be, because
+   * mining is always scored on the current calibration: a contract evaluated
+   * on a cold fleet at the prior speed used to be compared against mining
+   * scores that had since doubled, so the comparison was half-fresh and
+   * half-stale in a way that systematically favoured whichever arm the model
+   * had moved under.
+   */
+  it("re-times an accepted contract under the current model instead of scoring it at discovery-time speed", async () => {
+    const gateway = app();
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await waitForEvent(gateway, "contract_accepted");
+
+    const { rows } = await pool.query("SELECT cycle_hours, travel_distance FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
+    const frozenHours = Number(rows[0].cycle_hours);
+    const distance = Number(rows[0].travel_distance);
+    expect(distance).toBeGreaterThan(0); // the route is on record, not just the hours it implied
+
+    // Time the same route the way the planner now does, at a speed the fleet
+    // has since measured to be twice the prior.
+    await request(gateway)
+      .put("/api/automation/v1/planner/knobs/travel.speedUnitsPerHourPrior")
+      .set("Authorization", bearer())
+      .send({ value: 60 });
+
+    const modelRes = await request(gateway).get("/api/automation/v1/planner/model");
+    const speed = modelRes.body.model.speedUnitsPerHour;
+    expect(speed).toBe(60);
+
+    // 0.1h is cycle.transactOverheadHoursPrior: a contract docks and transacts,
+    // it never surveys or extracts, so it is not charged the mining overhead.
+    const retimed = distance / speed + 0.1;
+    expect(retimed).toBeLessThan(frozenHours);
+  }, 20_000);
+
   it("a contract task wins assignment over mining when it scores higher", async () => {
     includeAsteroidField = true; // mining's flat mine.expectedCreditsPerCycle default is 5000/cycle
     // Contract's default fixture pays 20000 total for 2 cheap units — should trounce mining's flat estimate.

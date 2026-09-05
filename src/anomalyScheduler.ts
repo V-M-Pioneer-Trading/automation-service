@@ -1,4 +1,4 @@
-import { AnomalyChecker, AnomalyRepo } from "./anomaly";
+import { Anomaly, AnomalyChecker, AnomalyRepo } from "./anomaly";
 import { AutopilotState } from "./autopilotState";
 import { Clock } from "./clock";
 import { EventLog } from "./eventLog";
@@ -12,6 +12,16 @@ export interface AnomalyConfig {
   intervalMs: number;
   webhookUrl: string;
 }
+
+/**
+ * Total delivery attempts an anomaly is worth across all ticks. `WebhookDelivery`
+ * spends three inside the tick that records it; the rest are spread over later
+ * ticks by `redeliverMissed`, so a webhook that comes back within a few minutes
+ * still gets the page.
+ */
+const MAX_DELIVERY_ATTEMPTS = 12;
+/** Oldest undelivered anomalies retried per tick, so a backlog can't stall the checks. */
+const REDELIVERY_BATCH = 5;
 
 export interface AnomalySchedulerDeps {
   state: AutopilotState;
@@ -86,9 +96,36 @@ export class AnomalyScheduler {
       const anomaly = await repo.record(candidate);
       onAnomalyRecorded?.();
       if (this.loop.stopped) return; // don't attempt delivery for a stop that landed mid-persist
-      if (await webhook.deliver(anomaly)) await repo.markDelivered(anomaly.id);
-      else await repo.incrementDeliveryAttempts(anomaly.id);
+      await this.attemptDelivery(anomaly);
     }
+
+    await this.redeliverMissed();
+  }
+
+  /**
+   * Re-sends anomalies that were recorded but never delivered.
+   *
+   * The in-tick attempts (three, with backoff) all failing used to be the end
+   * of it: the row stayed undelivered forever, and dedupe meant no later
+   * firing of the same condition would replace the missed page — so a webhook
+   * that was down for a minute lost the alert permanently, while the record
+   * sat safely in Postgres looking like nothing was wrong. Each later tick now
+   * retries a few of the oldest, up to a bounded total budget, so a recovered
+   * webhook receives what it missed instead of never hearing about it.
+   */
+  private async redeliverMissed(): Promise<void> {
+    const { repo } = this.deps;
+    const pending = await repo.listUndelivered(MAX_DELIVERY_ATTEMPTS, REDELIVERY_BATCH);
+    for (const anomaly of pending) {
+      if (this.loop.stopped) return;
+      await this.attemptDelivery(anomaly);
+    }
+  }
+
+  private async attemptDelivery(anomaly: Anomaly): Promise<void> {
+    const { repo, webhook } = this.deps;
+    if (await webhook.deliver(anomaly)) await repo.markDelivered(anomaly.id);
+    else await repo.incrementDeliveryAttempts(anomaly.id);
   }
 
   /** Logs a credits snapshot while mining is actually live — the credits-flat check's only data source. */

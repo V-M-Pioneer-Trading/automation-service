@@ -131,7 +131,16 @@ flowchart LR
 
 Older observations count for less, on a half-life set by
 `observation.halfLifeHours`, so a field that has got better recently outweighs
-how it behaved yesterday, without one lucky trip swinging the estimate.
+how it behaved yesterday.
+
+**One lucky trip does not swing an estimate**, because decay alone would not
+stop it: an average over a single cycle *is* that cycle. Every field's estimate
+is therefore shrunk toward the fleet average, as though it carried two extra
+cycles at the fleet's typical rate. A field with one anomalously rich trip is
+pulled most of the way back; a field measured four or five times is believed on
+its own terms. Without that, one good survey could send the fleet to a distant
+field and the only cycles able to correct the error were the ones the error
+itself caused.
 
 **Before there's data**, each falls back to its `*Prior` knob, and the planner
 behaves exactly as it did before any of this existed. There's no cold-start
@@ -170,6 +179,7 @@ API. Knobs come in three classes, and **the class is the point**:
 |---|---|---|
 | **model** | A claim about how the universe behaves. Calibrated from observation; the stored value is only a cold-start prior. | Operator (to test a hypothesis). **Not the AI.** |
 | **policy** | A preference with no measurable true value. | Operator **and the AI supervisor**. |
+
 | **alert** | The threshold that decides when something is wrong. | Operator only. **Not the AI.** |
 
 Model knobs are fenced off because editing one doesn't change reality; it
@@ -180,13 +190,24 @@ eventually resolve "profit dropped" by deciding profit drops are fine.
 `GET /planner/knobs?class=policy` is what the supervisor reads, and the filter
 is applied server-side so the restriction holds even if a client forgets it.
 
+**The fence is enforced on writes, not only on reads.** Being shown fewer
+knobs is not a control: the supervisor could always have named one it wasn't
+shown. `PUT /planner/knobs/:name` now checks the knob's class against the
+caller, inside the same row lock as the write. A human operator authenticating
+with `fleet:control` may write any class. The supervisor, authenticating as a
+machine with `X-Service-Secret`, may write `policy` only and gets `403`
+otherwise — so it cannot resolve "the error alarm fired" by making the error
+alarm unable to fire. Either way the change lands in the event log with the
+actor that made it.
+
 ### model
 
 | Knob | Default | Meaning |
 |---|---|---|
 | `mine.creditsPerCyclePrior` | `5000` | Assumed revenue per mining cycle, until real cycles replace it. |
 | `travel.speedUnitsPerHourPrior` | `30` | Assumed ship speed, until real flights are timed. |
-| `cycle.overheadHoursPrior` | `0.3` | Assumed survey+extract+cooldown+sell time, until real cycles replace it. |
+| `cycle.overheadHoursPrior` | `0.3` | Assumed survey+extract+cooldown+sell time for a **mining** cycle, until real cycles replace it. |
+| `cycle.transactOverheadHoursPrior` | `0.1` | Non-travel time for a task that only docks and transacts: a scout's market read, a contract's purchase or delivery. Not measured. |
 | `fuel.creditsPerUnitDistancePrior` | `5` | Assumed fuel cost per unit distance, until real refuels replace it. |
 | `observation.halfLifeHours` | `6` | How fast old observations stop counting. Lower adapts faster but is noisier. |
 
@@ -527,7 +548,7 @@ All routes are under `/api/automation/v1`. `/health` is unversioned.
 | | |
 |---|---|
 | `GET /planner/knobs?class=` | Every knob, or one class. |
-| `PUT /planner/knobs/:name` | `{ value }`. `404` unknown, `400` out of bounds. Logs `knob_changed` and triggers a replan. |
+| `PUT /planner/knobs/:name` | `{ value }`. `404` unknown, `400` out of bounds, `403` a class this caller may not write. Logs `knob_changed` and triggers a replan. |
 | `GET /planner/model` | What the planner currently believes, and whether each belief is measured or assumed. |
 | `POST /planner/replan` | Requests a replan, subject to the debounce. |
 
@@ -584,7 +605,8 @@ There is no human identity behind it, and Clerk stays scoped to humans.
 | public | `GET /planner/knobs`, `/planner/model`, `/metrics/context`, `/anomalies/digest` | none |
 | public | `GET /health`, `/api/automation/health` | none |
 | gated | `POST /autopilot/arm`, `/pause`, `/abort` | `fleet:control` |
-| gated | `PUT /planner/knobs/:name`, `POST /planner/replan` | `fleet:control` |
+| gated | `POST /planner/replan` | `fleet:control` |
+| gated | `PUT /planner/knobs/:name` | `fleet:control` for any class, or `X-Service-Secret` for `policy` only |
 | gated | `POST /events` | `X-Service-Secret` |
 
 Verification is **networkless**: the service holds Clerk's public key and checks
@@ -692,15 +714,26 @@ Everything the implementation deliberately doesn't do yet, in one place.
 
 **Operations**
 
-- **Metrics rollups assume a single instance.** There's no distributed lock, so
+- **Metrics rollups assume a single instance.** There's no lock on them, so
   two live replicas would each bootstrap from the same window end and
-  double-count.
+  double-count. Ship *dispatch* no longer has this problem: it takes a
+  Postgres advisory lock, so a second replica stands by rather than driving
+  the same ship alongside the first.
 - **No retention policy.** Rollups, the event log, and the two observation
   tables grow indefinitely. Observations are bounded at read time (recent rows
   only), so this is a disk concern, not a correctness one.
 - **Anomalies deliver sequentially** within a tick, so several tripping at once
-  against a slow webhook queue behind each other's retry budget.
+  against a slow webhook queue behind each other's retry budget. A delivery
+  that fails every attempt is retried on later ticks, up to a bounded total,
+  and then given up on.
+- **A contract's expected profit stays frozen** at discovery, because it
+  depends on market prices the decision has not re-read. Its cycle *time* is
+  re-derived under the current model, so the half that can be kept honest is.
 - **`market_stale`'s "in active use" window** is a fixed 24h lookback, not a knob.
+- **Scout and contract overhead is assumed, not measured.** Both are charged
+  `cycle.transactOverheadHoursPrior` rather than mining's measured residual,
+  which at least stops them being billed for a survey and an extraction they
+  never perform. Nothing yet calibrates their real dock-and-transact time.
 - **The credits-flat half of `earnings_stalled`** reads credit snapshots that
   are only logged while armed and live, so an anomaly-only deployment with no
   `MINING_SHIP_SYMBOL` never gets them. Its `no_earnings` half is unaffected:

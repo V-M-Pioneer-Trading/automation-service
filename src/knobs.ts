@@ -84,6 +84,18 @@ export const KNOB_DEFINITIONS = [
       "cycle has been observed. Replaced by measured cycle time minus measured travel time.",
   },
   {
+    name: "cycle.transactOverheadHoursPrior",
+    class: "model",
+    default: 0.1,
+    min: 0,
+    max: 5,
+    description:
+      "Non-travel time for a task that only docks and transacts — a scout's market read, a contract's " +
+      "purchase or delivery. Deliberately separate from cycle.overheadHoursPrior, which is measured as " +
+      "the residual of mining cycles and so includes survey, extraction and cooldown that these never do. " +
+      "Not yet measured from observation, unlike the mining figure.",
+  },
+  {
     name: "fuel.creditsPerUnitDistancePrior",
     class: "model",
     default: 5,
@@ -288,9 +300,42 @@ export interface Knob {
   description: string;
 }
 
+/**
+ * A tuned value a boot moved to fit newly-tightened bounds.
+ *
+ * Every API-driven change writes a `knob_changed` event; this one used to
+ * write nothing, so an operator's 500,000 credit floor could become 100,000 on
+ * a redeploy while the audit trail still showed 500,000 as the last intended
+ * value. The configuration and its own history disagreed, with nothing marking
+ * the moment they diverged. The caller logs these — see `migrate`'s callers.
+ */
+export interface KnobClamp {
+  name: string;
+  previousValue: number;
+  newValue: number;
+  min: number;
+  max: number;
+}
+
 export class KnobNotFoundError extends Error {
   constructor(name: string) {
     super(`unknown knob "${name}"`);
+  }
+}
+
+/**
+ * A caller tried to write a knob of a class it may not write.
+ *
+ * The three-class model was previously enforced only on reads — the supervisor
+ * was *shown* policy knobs and trusted not to name any other. Nothing stopped
+ * `PUT /planner/knobs/anomaly.errorRateThreshold {"value": 1}` from landing as
+ * an ordinary `knob_changed` event, which is the exact move the class model
+ * exists to prevent: an agent resolving "the error alarm fired" by making the
+ * error alarm unable to fire.
+ */
+export class KnobClassForbiddenError extends Error {
+  constructor(name: string, knobClass: KnobClass, allowed: readonly KnobClass[]) {
+    super(`${name} is a ${knobClass} knob; this caller may only write ${allowed.join(", ")}`);
   }
 }
 
@@ -315,9 +360,10 @@ const KNOB_SELECT = "SELECT name, knob_class, value, default_value, min_value, m
  * discarded, so a redeploy can never leave a value the write path itself would
  * reject.
  */
-export async function syncKnobDefinitions(pool: Pool): Promise<void> {
+export async function syncKnobDefinitions(pool: Pool): Promise<KnobClamp[]> {
+  const clamps: KnobClamp[] = [];
   for (const def of KNOB_DEFINITIONS) {
-    await pool.query(
+    const { rows } = await pool.query(
       `INSERT INTO knob (name, knob_class, value, default_value, min_value, max_value)
        VALUES ($1, $2, $3, $3, $4, $5)
        ON CONFLICT (name) DO UPDATE SET
@@ -325,11 +371,20 @@ export async function syncKnobDefinitions(pool: Pool): Promise<void> {
          default_value = EXCLUDED.default_value,
          min_value = EXCLUDED.min_value,
          max_value = EXCLUDED.max_value,
-         value = LEAST(GREATEST(knob.value, EXCLUDED.min_value), EXCLUDED.max_value)`,
+         value = LEAST(GREATEST(knob.value, EXCLUDED.min_value), EXCLUDED.max_value)
+       RETURNING value, (SELECT value FROM knob existing WHERE existing.name = $1) AS previous_value`,
       [def.name, def.class, def.default, def.min, def.max]
     );
+    // The sub-select reads the pre-update row, so a difference here is a value
+    // this boot changed without anyone asking — see KnobClamp.
+    const previous = rows[0]?.previous_value;
+    const value = Number(rows[0]?.value);
+    if (previous !== null && previous !== undefined && Number(previous) !== value) {
+      clamps.push({ name: def.name, previousValue: Number(previous), newValue: value, min: def.min, max: def.max });
+    }
   }
   await pool.query(`DELETE FROM knob WHERE name <> ALL($1::text[])`, [KNOB_NAMES]);
+  return clamps;
 }
 
 export class KnobRepo {
@@ -376,11 +431,17 @@ export class KnobRepo {
    * separate set() could interleave with a concurrent writer and report a
    * stale previousValue.
    */
-  async set(name: string, value: number): Promise<{ knob: Knob; previousValue: number }> {
+  async set(name: string, value: number, allowedClasses?: readonly KnobClass[]): Promise<{ knob: Knob; previousValue: number }> {
     return withTransaction(this.pool, async (client) => {
       const { rows } = await client.query(`${KNOB_SELECT} WHERE name = $1 FOR UPDATE`, [name]);
       if (rows.length === 0) throw new KnobNotFoundError(name);
       const knob = rowToKnob(rows[0]);
+      // Checked here, inside the same row lock as the write, rather than by
+      // the caller beforehand: a class read outside the lock is a class the
+      // write cannot be sure still applies.
+      if (allowedClasses !== undefined && !allowedClasses.includes(knob.class)) {
+        throw new KnobClassForbiddenError(name, knob.class, allowedClasses);
+      }
       if (value < knob.min || value > knob.max) {
         throw new KnobOutOfRangeError(name, value, knob.min, knob.max);
       }

@@ -46,8 +46,6 @@ export interface ContractEvaluation {
   procurementMarket: string | null;
   expectedProfit: number;
   cycleHours: number;
-  /** Route length behind `cycleHours`, kept so it can be re-timed under a later model. */
-  travelDistance: number;
   detail: Record<string, unknown>;
 }
 
@@ -376,7 +374,6 @@ export class Planner {
       procurementMarket: null,
       expectedProfit: -Infinity,
       cycleHours: 0,
-      travelDistance: 0,
       detail: { contractId: contract.id, reason, ...extra },
     });
 
@@ -419,7 +416,6 @@ export class Planner {
       procurementMarket: cheapest.waypoint,
       expectedProfit,
       cycleHours: hours,
-      travelDistance,
       detail: {
         contractId: contract.id,
         tradeSymbol: deliverable.tradeSymbol,
