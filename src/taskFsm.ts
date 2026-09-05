@@ -47,7 +47,6 @@ export interface TaskContext {
   ship: ShipSnapshot;
   clients: GameClients;
   clock: Clock;
-  spaceTradersToken: string;
 }
 
 export type EventPrefix = "mining" | "contract" | "scout";
@@ -117,7 +116,7 @@ export async function travelTo(
   arrivedPhase: TaskPhase,
   prefix: EventPrefix
 ): Promise<TickResult> {
-  const { task, ship, clients, clock, spaceTradersToken } = ctx;
+  const { task, ship, clients, clock} = ctx;
   if (ship.nav.waypointSymbol === destination && ship.nav.status !== "IN_TRANSIT") {
     return {
       task: withPhase(task, arrivedPhase),
@@ -134,10 +133,10 @@ export async function travelTo(
     };
   }
   if (ship.nav.status === "DOCKED") {
-    await clients.orbit(task.shipSymbol, spaceTradersToken);
+    await clients.orbit(task.shipSymbol);
     return { task, event: `${prefix}_orbit`, detail: { shipSymbol: task.shipSymbol } };
   }
-  const res = await clients.navigate(task.shipSymbol, destination, spaceTradersToken);
+  const res = await clients.navigate(task.shipSymbol, destination);
   const flight = measureFlight(res.data.nav.route);
 
   // A cycle's clock starts at its first real movement, not at assignment — a
@@ -165,9 +164,9 @@ export async function travelTo(
 
 /** Docks the ship as this tick's action, or returns null when it already is docked. */
 export async function dockIfNeeded(ctx: TaskContext, prefix: EventPrefix): Promise<TickResult | null> {
-  const { task, ship, clients, spaceTradersToken } = ctx;
+  const { task, ship, clients} = ctx;
   if (ship.nav.status === "DOCKED") return null;
-  await clients.dock(task.shipSymbol, spaceTradersToken);
+  await clients.dock(task.shipSymbol);
   return { task, event: `${prefix}_dock`, detail: { shipSymbol: task.shipSymbol } };
 }
 
@@ -182,9 +181,9 @@ export async function dockIfNeeded(ctx: TaskContext, prefix: EventPrefix): Promi
  * directly rather than inferred from how far the ship happened to fly.
  */
 export async function refuelIfNeeded(ctx: TaskContext, prefix: EventPrefix): Promise<TickResult | null> {
-  const { task, ship, clients, spaceTradersToken } = ctx;
+  const { task, ship, clients} = ctx;
   if (ship.fuel.current >= ship.fuel.capacity) return null;
-  const res = await clients.refuel(task.shipSymbol, spaceTradersToken);
+  const res = await clients.refuel(task.shipSymbol);
   const transaction = res?.data?.transaction;
   const units = transaction?.units;
   const fuelCredits = transaction?.totalPrice;

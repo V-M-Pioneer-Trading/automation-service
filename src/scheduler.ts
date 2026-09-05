@@ -99,15 +99,6 @@ export class FleetScheduler {
   }
 
   /**
-   * The raw game token the operator armed with, threaded to gameClients for
-   * `X-SpaceTraders-Token`. Not an Authorization value: that header carries
-   * this service's own M2M token, minted by gameClients itself (decision 19).
-   */
-  private spaceTradersToken(): string | null {
-    return this.deps.state.getToken();
-  }
-
-  /**
    * True unless the operator has since aborted, or switched to shadow mode —
    * the two ways an already-in-flight live dispatch's result must be discarded
    * instead of persisted. Deliberately NOT status === "armed": pausing mid-flight
@@ -128,8 +119,6 @@ export class FleetScheduler {
     const { state, tasks, clients, events, shipSymbol } = this.deps;
     const status = state.getStatus();
     if (status !== "armed" && status !== "paused") return;
-    const spaceTradersToken = this.spaceTradersToken();
-    if (spaceTradersToken === null) return;
 
     // Only one process may drive a ship. Another replica holding the lock
     // means this one stands by rather than double-dispatching alongside it.
@@ -148,7 +137,7 @@ export class FleetScheduler {
     // preview of what live mode would do. Paused shadow does nothing, same as
     // paused live starts nothing new.
     if (state.getMode() === "shadow") {
-      if (status === "armed") await this.runShadowCycle(spaceTradersToken);
+      if (status === "armed") await this.runShadowCycle();
       return;
     }
 
@@ -157,24 +146,24 @@ export class FleetScheduler {
     // dispatch as well would double-fire contract discovery's upstream calls.
     // A replan that didn't touch this ship must not block it, hence the set.
     if (status === "armed") {
-      const replanned = await this.maybeReplan(spaceTradersToken);
+      const replanned = await this.maybeReplan();
       if (replanned?.has(shipSymbol)) return;
     }
 
     const task = await tasks.getOrCreate(shipSymbol);
     if (isIdle(task)) {
       if (status === "paused") return; // never start a new assignment while paused
-      const idleShip = await clients.getShip(shipSymbol, spaceTradersToken);
-      await this.discoverContracts(idleShip, spaceTradersToken);
-      await this.assignTarget(task, spaceTradersToken, idleShip);
+      const idleShip = await clients.getShip(shipSymbol);
+      await this.discoverContracts(idleShip);
+      await this.assignTarget(task, idleShip);
       return;
     }
     if (status === "paused" && task.waitingUntil === null) return; // idle between steps
 
-    const ship = await clients.getShip(shipSymbol, spaceTradersToken);
+    const ship = await clients.getShip(shipSymbol);
     let result: TickResult | null;
     try {
-      result = await this.advance(task, ship, spaceTradersToken);
+      result = await this.advance(task, ship);
     } catch (err) {
       await this.handleTickFailure(task, err);
       return;
@@ -202,9 +191,9 @@ export class FleetScheduler {
   }
 
   /** One FSM step for whatever kind of task the ship is running. */
-  private async advance(task: ShipTask, ship: ShipSnapshot, spaceTradersToken: string): Promise<TickResult | null> {
+  private async advance(task: ShipTask, ship: ShipSnapshot): Promise<TickResult | null> {
     const { clients, clock, contracts } = this.deps;
-    const ctx = { task, ship, clients, clock, spaceTradersToken };
+    const ctx = { task, ship, clients, clock};
     switch (task.taskKind) {
       case "mining":
         return advanceMiningTask(ctx);
@@ -242,7 +231,7 @@ export class FleetScheduler {
    * last replan of any kind; the periodic fallback runs on replanIntervalMs
    * regardless, so a replan still happens even if nobody asks for one.
    */
-  private async maybeReplan(spaceTradersToken: string): Promise<Set<string> | null> {
+  private async maybeReplan(): Promise<Set<string> | null> {
     const { clock, knobs, replanIntervalMs } = this.deps;
     const now = clock.now();
     const debounceMs = (await knobs.get("replan.debounceSeconds")) * 1000;
@@ -270,18 +259,18 @@ export class FleetScheduler {
     const idle = await this.deps.tasks.listIdle();
     if (idle.length > 0) {
       // One discovery pass for the whole replan, not one per ship.
-      const ship = await this.deps.clients.getShip(idle[0].shipSymbol, spaceTradersToken);
-      await this.discoverContracts(ship, spaceTradersToken);
+      const ship = await this.deps.clients.getShip(idle[0].shipSymbol);
+      await this.discoverContracts(ship);
     }
-    for (const task of idle) await this.assignTarget(task, spaceTradersToken);
+    for (const task of idle) await this.assignTarget(task);
     await this.deps.events.append("replan_executed", { reason, shipsConsidered: idle.length });
     return new Set(idle.map((t) => t.shipSymbol));
   }
 
-  private async runShadowCycle(spaceTradersToken: string): Promise<void> {
+  private async runShadowCycle(): Promise<void> {
     const { clients, planner, clock, state, events, shipSymbol } = this.deps;
-    const ship = await clients.getShip(shipSymbol, spaceTradersToken);
-    const assignment = await planner.assignTarget({ ship, spaceTradersToken, now: clock.now() });
+    const ship = await clients.getShip(shipSymbol);
+    const assignment = await planner.assignTarget({ ship, now: clock.now() });
     // A switch back to live, a pause, or an abort mid-flight all mean this
     // decision is stale — fine to have computed (it's read-only), just not
     // worth logging as "what shadow just decided".
@@ -304,21 +293,21 @@ export class FleetScheduler {
    * A failure here must not block mining: contracts are additive, never a
    * dependency.
    */
-  private async discoverContracts(ship: ShipSnapshot, spaceTradersToken: string): Promise<void> {
+  private async discoverContracts(ship: ShipSnapshot): Promise<void> {
     const { clients, planner, events, contracts } = this.deps;
     try {
-      await discoverAndEvaluateContracts({ contracts, events, clients, planner, ship, spaceTradersToken });
+      await discoverAndEvaluateContracts({ contracts, events, clients, planner, ship});
     } catch (err) {
       await events.append("contract_discovery_error", { message: String(err) });
     }
   }
 
   /** `ship` is passed in wherever the caller already read it, so one assignment costs one ship read. */
-  private async assignTarget(task: ShipTask, spaceTradersToken: string, preloadedShip?: ShipSnapshot): Promise<void> {
+  private async assignTarget(task: ShipTask, preloadedShip?: ShipSnapshot): Promise<void> {
     const { clients, planner, clock, state, events, tasks, contracts, pool } = this.deps;
-    const ship = preloadedShip ?? (await clients.getShip(task.shipSymbol, spaceTradersToken));
+    const ship = preloadedShip ?? (await clients.getShip(task.shipSymbol));
 
-    const assignment = await planner.assignTarget({ ship, spaceTradersToken, now: clock.now() });
+    const assignment = await planner.assignTarget({ ship, now: clock.now() });
 
     // "Don't start anything new while paused" applies here too: a pause,
     // abort, or switch to shadow landing during these awaits must stop the

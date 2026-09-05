@@ -141,10 +141,8 @@ export class AnomalyScheduler {
     const { gameClients, state, events } = this.deps;
     if (gameClients === null) return;
     if (state.getStatus() !== "armed" || state.getMode() !== "live") return;
-    const token = state.getToken();
-    if (token === null) return;
     try {
-      const agent = await gameClients.getAgent(token);
+      const agent = await gameClients.getAgent();
       if (this.loop.stopped) return; // a leaked in-flight tick must not persist after stop()
       await events.append("agent_credits_snapshot", { credits: agent.credits });
     } catch {

@@ -293,7 +293,7 @@ describe("automation-service contract loop (meta#11)", () => {
     purchasePrice = 50_000;
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     const evaluated = await waitForEvent(gateway, "contract_evaluated");
     expect(evaluated.detail.accepted).toBe(false);
@@ -306,7 +306,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("accepts a profitable contract, procures, delivers, and fulfills it without operator input", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     const evaluated = await waitForEvent(gateway, "contract_evaluated");
     expect(evaluated.detail.accepted).toBe(true);
@@ -347,7 +347,7 @@ describe("automation-service contract loop (meta#11)", () => {
    */
   it("re-times an accepted contract under the current model instead of scoring it at discovery-time speed", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await waitForEvent(gateway, "contract_accepted");
 
     const { rows } = await pool.query("SELECT cycle_hours, travel_distance FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
@@ -377,7 +377,7 @@ describe("automation-service contract loop (meta#11)", () => {
     // Contract's default fixture pays 20000 total for 2 cheap units — should trounce mining's flat estimate.
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     await waitForEvent(gateway, "contract_accepted");
     // Waits until the assigned task is a contract — CONTRACT_TRAVEL_TO_MARKET
@@ -394,7 +394,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("resumes a contract task from its persisted phase after a restart instead of restarting it", async () => {
     const firstRun = app();
-    await request(firstRun).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(firstRun).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await waitForTaskPhase(firstRun, "CONTRACT_PURCHASE");
     await waitForEvent(firstRun, "contract_purchase");
     await waitForTaskPhase(firstRun, "CONTRACT_TRAVEL_TO_DESTINATION");
@@ -403,7 +403,7 @@ describe("automation-service contract loop (meta#11)", () => {
     const callsBeforeRestart = agent.calls.length;
 
     const restarted = app();
-    await request(restarted).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(restarted).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
     expect(task.phase).toBe("CONTRACT_TRAVEL_TO_DESTINATION"); // resumed, not reset to CONTRACT_TRAVEL_TO_MARKET
@@ -423,7 +423,7 @@ describe("automation-service contract loop (meta#11)", () => {
     await request(gateway).put("/api/automation/v1/planner/knobs/mine.failureRetryLimit").set("Authorization", bearer()).send({ value: 1 });
     failPurchase = true;
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // Pre-fix, cargoAtStake was always true for a contract task (tradeSymbol is
     // set at assignment time, not after a purchase), so this never fires and
@@ -440,7 +440,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("meta#29: an empty cargo hold at delivery time redirects to re-procure instead of delivering 0 units", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     await waitForEvent(gateway, "contract_purchase");
     expect(ship.cargo.inventory.find((i) => i.symbol === "IRON_ORE")?.units).toBe(2);
@@ -479,7 +479,7 @@ describe("automation-service contract loop (meta#11)", () => {
     });
     gateways.push(gateway);
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // First assignment attempt hits the simulated failure between the two
     // writes and rolls back — logged, not left half-applied.
@@ -497,7 +497,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
   it("meta#31: a missing contract row surfaces a descriptive error instead of a bare null-deref", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     await waitForTaskPhase(gateway, "CONTRACT_PURCHASE"); // contract assigned, row exists
 
@@ -528,7 +528,7 @@ describe("automation-service contract loop (meta#11)", () => {
     });
     gateways.push(gateway);
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // First tick: acceptContract succeeds upstream (contract.accepted flips to
     // true in the fixture) but the following repo.record insert is the

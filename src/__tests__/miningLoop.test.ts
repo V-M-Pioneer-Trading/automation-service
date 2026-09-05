@@ -318,7 +318,7 @@ describe("automation-service mining loop", () => {
 
   it("runs a full mining cycle: travel, survey, extract, sell, refuel, and loops back", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // TRAVEL_TO_ASTEROID: ship starts DOCKED elsewhere -> orbit, then navigate.
     await waitForPhase(gateway, "TRAVEL_TO_ASTEROID");
@@ -399,7 +399,7 @@ describe("automation-service mining loop", () => {
 
   it("lets the current wait finish on pause, then idles without dispatching the next action", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     await waitForWaiting(gateway); // mid navigate-to-asteroid
     await request(gateway).post("/api/automation/v1/autopilot/pause").set("Authorization", bearer());
@@ -418,7 +418,7 @@ describe("automation-service mining loop", () => {
 
   it("resumes from the persisted phase after a restart instead of starting over", async () => {
     const firstRun = app();
-    await request(firstRun).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(firstRun).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await waitForWaiting(firstRun); // navigate to asteroid dispatched
     clock.advance(1000);
     await waitForPhase(firstRun, "SURVEY");
@@ -427,7 +427,7 @@ describe("automation-service mining loop", () => {
     const callsBeforeRestart = fleet.calls.length;
 
     const restarted = app(); // fresh app instance == fresh process, same DB
-    await request(restarted).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(restarted).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
     expect(task.phase).toBe("SURVEY"); // resumed, not reset to TRAVEL_TO_ASTEROID
@@ -442,11 +442,11 @@ describe("automation-service mining loop", () => {
 
   it("ticks again after an abort followed by a re-arm in the same process", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await waitForWaiting(gateway); // navigate to the asteroid dispatched
 
     await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // Pre-fix, stop() left the scheduler's stopped flag set and start() never
     // cleared it, so a re-armed autopilot silently never ticked again.
@@ -468,7 +468,7 @@ describe("automation-service mining loop", () => {
     );
     const gateway = app();
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await new Promise((r) => setTimeout(r, 30)); // let the first tick start (and block on the slow getShip call)
     await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
 
@@ -487,7 +487,7 @@ describe("automation-service mining loop", () => {
     ship = makeShip({ cargo: { units: 0, capacity: 2, inventory: [] } });
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     await waitForPhase(gateway, "TRAVEL_TO_ASTEROID");
     await waitForWaiting(gateway);

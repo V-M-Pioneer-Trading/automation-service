@@ -171,7 +171,7 @@ describe("automation-service planner (meta#10)", () => {
   /** An armed gateway, ready to make its first assignment. */
   const armed = async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     return gateway;
   };
 
@@ -311,7 +311,7 @@ describe("automation-service planner (meta#10)", () => {
 
   it("assigns the reachable, highest-scoring asteroid field and logs the scoring inputs for replay", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     const task = await waitForAssignment(gateway);
     expect(task.asteroidWaypoint).toBe("X1-TEST-BELT-NEAR");
@@ -342,7 +342,7 @@ describe("automation-service planner (meta#10)", () => {
     await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").set("Authorization", bearer()).send({ value: 99_999 });
     credits = 100_000; // fuel cost > 1 credit for any reachable field, so every candidate would breach the floor
 
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // Give the scheduler a few ticks to run and confirm it never assigns.
     await new Promise((r) => setTimeout(r, 200));
@@ -364,7 +364,7 @@ describe("automation-service planner (meta#10)", () => {
   it("idles rather than mining when mine.taskWeight is 0, so the knob really is an off switch", async () => {
     const gateway = app();
     await request(gateway).put("/api/automation/v1/planner/knobs/mine.taskWeight").set("Authorization", bearer()).send({ value: 0 });
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     await new Promise((r) => setTimeout(r, 200));
 
@@ -382,7 +382,7 @@ describe("automation-service planner (meta#10)", () => {
     fleetShouldFail = true;
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     await waitForAssignment(gateway); // first assignment happens immediately
 

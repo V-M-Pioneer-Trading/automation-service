@@ -82,7 +82,7 @@ describe("automation-service authentication", () => {
   describe("mutating routes require a session", () => {
     type Agent = ReturnType<typeof request>;
     const mutations: [string, (agent: Agent) => request.Test][] = [
-      ["POST /autopilot/arm", (a) => a.post(`${V1}/autopilot/arm`).send({ token: "t" })],
+      ["POST /autopilot/arm", (a) => a.post(`${V1}/autopilot/arm`).send({})],
       ["POST /autopilot/pause", (a) => a.post(`${V1}/autopilot/pause`)],
       ["POST /autopilot/abort", (a) => a.post(`${V1}/autopilot/abort`)],
       [
@@ -124,7 +124,7 @@ describe("automation-service authentication", () => {
       const res = await request(app())
         .post(`${V1}/autopilot/arm`)
         .set("Authorization", bearer())
-        .send({ token: "t" });
+        .send({});
       expect(res.status).toBe(200);
     });
 
@@ -183,7 +183,7 @@ describe("automation-service authentication", () => {
       await request(gateway)
         .post(`${V1}/autopilot/arm`)
         .set("Authorization", bearer({ sub: "user_2Specific" }))
-        .send({ token: "t" });
+        .send({});
       await request(gateway).post(`${V1}/autopilot/abort`).set("Authorization", bearer());
 
       const events = (await request(gateway).get(`${V1}/autopilot/events`)).body.events;
@@ -211,11 +211,10 @@ describe("automation-service authentication", () => {
       await request(gateway)
         .post(`${V1}/autopilot/arm`)
         .set("Authorization", token)
-        .send({ token: "st-secret" });
+        .send({});
 
       const raw = JSON.stringify((await request(gateway).get(`${V1}/autopilot/events`)).body);
       expect(raw).not.toContain(token.replace("Bearer ", ""));
-      expect(raw).not.toContain("st-secret");
     });
   });
 });

@@ -395,10 +395,10 @@ stateDiagram-v2
 
 | Status | What the scheduler does |
 |---|---|
-| **disarmed** | Nothing. The service has just started and holds no token. |
+| **disarmed** | Nothing. The service has just started and nobody has armed it. |
 | **armed** | Full progression: assigns targets, dispatches actions, replans. |
 | **paused** | Lets an already-dispatched wait finish and be recorded, then stops dispatching. Never starts a new action or assignment. |
-| **aborted** | Stops immediately and forgets the token. An action already in flight can't be un-sent, so its result is discarded and logged as such, not applied. |
+| **aborted** | Stops immediately. An action already in flight can't be un-sent, so its result is discarded and logged as such, not applied. |
 
 The token only ever lives in memory, so a restart always disarms. Arming is
 valid from any status, including after an abort, and is the only way to switch
@@ -536,10 +536,10 @@ All routes are under `/api/automation/v1`. `/health` is unversioned.
 
 | | |
 |---|---|
-| `POST /autopilot/arm` | `{ token, mode? }`. `mode` is `"live"` (default) or `"shadow"`. Holds the token **in memory only**; a restart always disarms. Valid from any status, including after an abort. |
+| `POST /autopilot/arm` | `{ mode? }`. `mode` is `"live"` (default) or `"shadow"`. A stray `token` field from an older client is ignored. Valid from any status, including after an abort. |
 | `POST /autopilot/pause` | Lets an already-dispatched wait finish and be recorded, then stops dispatching. Armed only. |
-| `POST /autopilot/abort` | Clears the token and stops immediately. An action already in flight can't be un-sent, so its result is discarded and marked, not silently applied. |
-| `GET /autopilot/status` | Current status and mode (`mode` is `null` whenever no token is held). |
+| `POST /autopilot/abort` | Stops immediately. An action already in flight can't be un-sent, so its result is discarded and marked, not silently applied. |
+| `GET /autopilot/status` | Current status and mode (`mode` is `null` when disarmed or aborted). |
 | `GET /autopilot/ships/:shipSymbol` | One ship's phase, wait state, and cycle progress. |
 | `GET /autopilot/events?limit=` | The event log, newest first. |
 
@@ -624,13 +624,18 @@ write, so the audit trail records who armed, paused, aborted or retuned.
 ### Calling out
 
 The sibling services gate their own routes the same way, so this service is
-itself a caller that has to prove who it is. Every outbound call carries two
-headers, because they answer two different questions:
+itself a caller that has to prove who it is. Every outbound call carries one
+header:
 
 | Header | Carries | Answers |
 |---|---|---|
 | `Authorization` | This service's own Clerk M2M token, minted and cached for its lifetime rather than per tick | "May automation-service act here?" |
-| `X-SpaceTraders-Token` | The raw game token the operator armed with | "Which agent is this acting for?" |
+
+"Which agent is this acting for?" is no longer this service's question:
+st-gateway injects the fleet's agent token itself (auth-design.md decision 5).
+The M2M token is also what st-gateway derives queue priority from — a machine
+identity lands in the background lane, which is exactly where the autopilot
+belongs (decision 2).
 
 The M2M token comes from a real Clerk Machine in production
 (`CLERK_M2M_SECRET_KEY`) and is signed locally in dev and tests

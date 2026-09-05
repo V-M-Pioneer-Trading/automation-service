@@ -175,7 +175,7 @@ describe("automation-service fleet replan (meta#13)", () => {
 
   it("a manual replan request logs a replan_executed event", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await waitForAssignment(gateway);
 
     const res = await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
@@ -188,7 +188,7 @@ describe("automation-service fleet replan (meta#13)", () => {
 
   it("a knob change triggers a replan", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await waitForAssignment(gateway);
 
     await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").set("Authorization", bearer()).send({ value: 500 });
@@ -199,7 +199,7 @@ describe("automation-service fleet replan (meta#13)", () => {
 
   it("two replan requests inside the debounce window coalesce into one replan", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await waitForAssignment(gateway);
 
     // First trigger: runs right away (nothing has ever replanned yet).
@@ -220,7 +220,7 @@ describe("automation-service fleet replan (meta#13)", () => {
 
   it("the periodic interval triggers a replan with no external trigger", async () => {
     const gateway = app(2000); // 2s replan interval for this test
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await waitForAssignment(gateway);
 
     expect(await countReplans(gateway)).toBe(0); // not due yet, right after arm
@@ -232,7 +232,7 @@ describe("automation-service fleet replan (meta#13)", () => {
 
   it("a ship mid-task keeps its task through a replan; only idle ships are reassigned", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     const assigned = await waitForAssignment(gateway);
     expect(assigned.asteroidWaypoint).toBe("X1-TEST-BELT");
 
@@ -253,7 +253,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     // interval lets the test pin down exactly which tick a replan lands on.
     includeAsteroidField = false;
     const gateway = app(300_000, 1500);
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // Wait for the first natural tick: it creates the ship_task row via
     // getOrCreate and calls assignTarget once through the normal per-ship path
