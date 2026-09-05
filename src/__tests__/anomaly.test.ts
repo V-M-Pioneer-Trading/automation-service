@@ -133,6 +133,50 @@ describe("automation-service anomaly detection (meta#15)", () => {
     expect(res.body.anomalies.some((a: { type: string }) => a.type === type)).toBe(false);
   };
 
+  /**
+   * Regression: these four were written to the event log and then filtered out
+   * of the digest — the record existed, the page nobody reads it on did not.
+   *
+   * `contract_discovery_error` is the one with a scar: decision 19's outage
+   * took the whole autonomous loop down, and it was found by grepping the raw
+   * event log for this type, because the digest — the surface built for exactly
+   * that hourly review — was dropping it.
+   */
+  it("surfaces silent-degradation, contention and config events in the digest", async () => {
+    const gateway = app();
+    const written = [
+      ["contract_discovery_error", { message: "agent-service 401" }],
+      ["observation_write_error", { message: "insert failed" }],
+      ["dispatch_standby", { shipSymbol: "MINING-1" }],
+      ["knob_changed", { name: "mine.taskWeight", from: 1, to: 0, actor: "user_test" }],
+      ["knob_clamped", { name: "mine.taskWeight", requested: 5, clampedTo: 1 }],
+    ] as const;
+    for (const [type, detail] of written) {
+      await pool.query(`INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, $2, $3)`, [
+        clock.now(),
+        type,
+        JSON.stringify(detail),
+      ]);
+    }
+
+    const res = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
+    const types = res.body.events.map((e: { type: string }) => e.type);
+    for (const [type] of written) expect(types).toContain(type);
+  }, 10_000);
+
+  // The other half of the rule: the digest is bounded and read by a human, so
+  // routine per-tick chatter stays out of it. mining_extract is the archetype —
+  // one per cycle per ship, and the anomaly checks already summarize it.
+  it("keeps routine per-tick events out of the digest", async () => {
+    const gateway = app();
+    for (const type of ["mining_extract", "mining_sell", "mining_cooldown_wait", "contract_deliver"]) {
+      await pool.query(`INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, $2, '{}')`, [clock.now(), type]);
+    }
+
+    const res = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
+    expect(res.body.events).toHaveLength(0);
+  }, 10_000);
+
   it("fires ship_idle when a mining task hasn't changed in over the knob threshold, only while armed and live", async () => {
     await pool.query(
       `INSERT INTO ship_task (ship_symbol, phase, updated_at) VALUES ($1, 'EXTRACT', $2)`,

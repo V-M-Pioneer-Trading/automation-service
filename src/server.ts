@@ -34,18 +34,62 @@ const DEFAULT_DIGEST_EVENT_LIMIT = 50;
 const DEFAULT_DIGEST_WINDOW_MINUTES = 60;
 const MAX_DIGEST_WINDOW_MINUTES = 7 * 24 * 60;
 
-// Event types worth surfacing in the digest alongside anomalies — lifecycle
-// transitions and terminal failure/discard outcomes, not every routine
-// per-tick mining event (those are what the anomaly checks themselves summarize).
+/**
+ * Event types worth surfacing in the digest alongside anomalies.
+ *
+ * The digest is two audiences at once: an operator's hourly review, and the AI
+ * supervisor's context on its next run. The test for inclusion is therefore not
+ * "is this an error" but **"would someone be wrong about the fleet without it,
+ * and does nothing else tell them?"** Routine per-tick events stay out — the
+ * anomaly checks already summarize those, and diluting a bounded list is how a
+ * digest stops being read.
+ *
+ * The failure mode this list keeps having is the one the audit kept finding
+ * elsewhere: the record gets written, and the page nobody built never shows it.
+ * `contract_discovery_error` is the cautionary tale — decision 19's production
+ * outage, the entire autonomous loop down, was eventually found by grepping the
+ * raw event log for exactly this type, because the digest filtered it out.
+ */
 const NOTABLE_EVENT_TYPES = [
+  // Lifecycle: what the operator last said they wanted.
   "armed",
   "paused",
   "aborted",
+
+  // Terminal task outcomes — a ship gave up, or had nowhere to go.
   "planner_no_viable_target",
   "mining_task_failed",
   "mining_no_market_found",
   "mining_discarded_after_abort",
   "planner_discarded_after_abort_or_pause",
+
+  // Failures that silently degrade something rather than stopping it, which is
+  // exactly why they need surfacing: nothing else reports them, and the fleet
+  // keeps running while quietly getting worse at its job.
+  //   contract_discovery_error — the contract loop is down; mining continues,
+  //     so credits/hour sags rather than flatlining.
+  //   observation_write_error  — calibration stopped recording. The planner
+  //     goes on scoring against the last values it measured, so it looks
+  //     confident while drifting away from reality.
+  "contract_discovery_error",
+  "observation_write_error",
+
+  // An operational condition, not a failure: another replica holds the dispatch
+  // lock and this process is standing by. Logged once per spell, not per tick.
+  // Two instances contending is something an operator should learn from the
+  // digest rather than from a ship that mysteriously never moves.
+  "dispatch_standby",
+
+  // Configuration changes, which are the most consequential thing that can
+  // happen without any ship doing anything.
+  //   knob_changed — who retuned what. The supervisor may write policy knobs,
+  //     so this is also how its next run sees its own prior tuning.
+  //   knob_clamped — a deploy silently pulled a tuned value back inside new
+  //     bounds. The audit added this event precisely so that stops being
+  //     invisible; leaving it out of the digest left the fix half-finished.
+  "knob_changed",
+  "knob_clamped",
+
   // meta#19's ai-service supervisor logs these via POST /events — included
   // here so both the digest (an operator's hourly review) and the
   // supervisor's own next run (which reads this same digest for context)
