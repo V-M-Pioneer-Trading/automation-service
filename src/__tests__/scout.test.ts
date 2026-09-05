@@ -199,7 +199,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
     // Query both scores via a planner_assignment event: arm, wait for one decision.
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     const evt = await waitForEvent(gateway, "planner_assignment");
     // The planner chose mining (only X1-TEST-BELT exists as asteroid), not scouting.
@@ -218,7 +218,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
     // ship starts at X1-TEST-BELT (distance 10 to X1-TEST-MARKET), should be assigned scout.
 
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     const assignmentEvt = await waitForEvent(gateway, "planner_assignment");
     expect(assignmentEvt.detail.scoutWaypoint).toBe("X1-TEST-MARKET");
@@ -231,7 +231,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
   it("scout task travels to market, docks, calls getMarket, emits scout_market_refresh", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // Ship is at X1-TEST-BELT (not at the market), so it needs to navigate.
     await waitForTaskPhase(gateway, "SCOUT_TRAVEL");
@@ -247,7 +247,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
   it("after scout_market_refresh, market_intel is recorded and ship is handed back to the planner", async () => {
     const gateway = app();
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "test-token" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // Wait for navigate to fire (sets waitingUntil), THEN advance the clock so
     // the wait resolves — same pattern as the FSM test above.

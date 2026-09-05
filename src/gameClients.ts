@@ -3,13 +3,12 @@
  * automation-service never calls SpaceTraders directly — every ship action and
  * every read goes through these.
  *
- * Two headers per call, per auth-design.md decisions 18 and 19:
- * `Authorization` carries automation-service's own Clerk M2M token (proves
- * *this service* is authorized to act, same as a human operator's session
- * would from command-interface); `X-SpaceTraders-Token` carries the raw
- * game token the operator armed with (what actually reaches SpaceTraders).
- * automation-service holds both, but they answer different questions, so
- * they travel separately rather than one standing in for the other.
+ * One header per call, per auth-design.md decisions 5 and 19: `Authorization`
+ * carries automation-service's own Clerk M2M token, proving *this service* is
+ * authorized to act (the same way a human operator's session would from
+ * command-interface). No game credential travels: st-gateway injects the
+ * agent token itself, and a machine identity queues as background there,
+ * which is exactly the lane the autopilot belongs in (decision 2).
  */
 
 import type { M2MTokenSource } from "./m2mToken";
@@ -110,7 +109,7 @@ export function createGameClients(config: {
   fleetServiceUrl: string;
   authTokenSource: M2MTokenSource;
 }) {
-  async function callJson<T>(url: string, spaceTradersToken: string, init?: RequestInit): Promise<T> {
+  async function callJson<T>(url: string, init?: RequestInit): Promise<T> {
     const m2mToken = await config.authTokenSource.getToken();
     let res: Response;
     try {
@@ -118,7 +117,6 @@ export function createGameClients(config: {
         ...init,
         headers: {
           Authorization: `Bearer ${m2mToken}`,
-          "X-SpaceTraders-Token": spaceTradersToken,
           ...(init?.body !== undefined ? { "Content-Type": "application/json" } : {}),
         },
         // A hung navigation/agent/fleet-service call would otherwise block the
@@ -136,71 +134,67 @@ export function createGameClients(config: {
     return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
   }
 
-  const fleetAction = <T>(shipSymbol: string, action: string, spaceTradersToken: string, body?: unknown) =>
-    callJson<T>(`${config.fleetServiceUrl}/ships/${shipSymbol}/${action}`, spaceTradersToken, {
+  const fleetAction = <T>(shipSymbol: string, action: string, body?: unknown) =>
+    callJson<T>(`${config.fleetServiceUrl}/ships/${shipSymbol}/${action}`, {
       method: "POST",
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
 
   // Purchases and sells move credits, so they're owned by agent-service (which
   // records them into its transaction history) rather than fleet-service.
-  const agentShipAction = <T>(shipSymbol: string, action: string, spaceTradersToken: string, body?: unknown) =>
-    callJson<T>(`${config.agentServiceUrl}/ships/${shipSymbol}/${action}`, spaceTradersToken, {
+  const agentShipAction = <T>(shipSymbol: string, action: string, body?: unknown) =>
+    callJson<T>(`${config.agentServiceUrl}/ships/${shipSymbol}/${action}`, {
       method: "POST",
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
 
   return {
-    getShip: (shipSymbol: string, spaceTradersToken: string) =>
-      callJson<ShipSnapshot>(`${config.agentServiceUrl}/ships/${shipSymbol}`, spaceTradersToken),
+    getShip: (shipSymbol: string) =>
+      callJson<ShipSnapshot>(`${config.agentServiceUrl}/ships/${shipSymbol}`),
 
-    getAgent: (spaceTradersToken: string) => callJson<AgentSnapshot>(`${config.agentServiceUrl}/agent`, spaceTradersToken),
+    getAgent: () => callJson<AgentSnapshot>(`${config.agentServiceUrl}/agent`),
 
-    getContracts: (spaceTradersToken: string) => callJson<Contract[]>(`${config.agentServiceUrl}/contracts`, spaceTradersToken),
+    getContracts: () => callJson<Contract[]>(`${config.agentServiceUrl}/contracts`),
 
-    acceptContract: (contractId: string, spaceTradersToken: string) =>
+    acceptContract: (contractId: string) =>
       callJson<{ agent: AgentSnapshot; contract: Contract }>(
         `${config.agentServiceUrl}/contracts/${contractId}/accept`,
-        spaceTradersToken,
         { method: "POST" }
       ),
 
-    fulfillContract: (contractId: string, spaceTradersToken: string) =>
+    fulfillContract: (contractId: string) =>
       callJson<{ agent: AgentSnapshot; contract: Contract }>(
         `${config.agentServiceUrl}/contracts/${contractId}/fulfill`,
-        spaceTradersToken,
         { method: "POST" }
       ),
 
-    getSystemWaypoints: (systemSymbol: string, spaceTradersToken: string) =>
+    getSystemWaypoints: (systemSymbol: string) =>
       callJson<{ data: WaypointSummary[] }>(
-        `${config.navigationServiceUrl}/systems/${systemSymbol}/waypoints`,
-        spaceTradersToken
+        `${config.navigationServiceUrl}/systems/${systemSymbol}/waypoints`
       ).then((r) => r.data),
 
-    getMarket: (waypointSymbol: string, spaceTradersToken: string) =>
-      callJson<MarketData>(`${config.navigationServiceUrl}/waypoints/${waypointSymbol}/market`, spaceTradersToken),
+    getMarket: (waypointSymbol: string) =>
+      callJson<MarketData>(`${config.navigationServiceUrl}/waypoints/${waypointSymbol}/market`),
 
-    orbit: (shipSymbol: string, spaceTradersToken: string) => fleetAction(shipSymbol, "orbit", spaceTradersToken),
-    dock: (shipSymbol: string, spaceTradersToken: string) => fleetAction(shipSymbol, "dock", spaceTradersToken),
+    orbit: (shipSymbol: string) => fleetAction(shipSymbol, "orbit"),
+    dock: (shipSymbol: string) => fleetAction(shipSymbol, "dock"),
 
-    navigate: (shipSymbol: string, waypointSymbol: string, spaceTradersToken: string) =>
-      fleetAction<{ data: { nav: ShipSnapshot["nav"] } }>(shipSymbol, "navigate", spaceTradersToken, { waypointSymbol }),
+    navigate: (shipSymbol: string, waypointSymbol: string) =>
+      fleetAction<{ data: { nav: ShipSnapshot["nav"] } }>(shipSymbol, "navigate", { waypointSymbol }),
 
-    survey: (shipSymbol: string, spaceTradersToken: string) =>
+    survey: (shipSymbol: string) =>
       fleetAction<{ data: { surveys: SurveyData[]; cooldown: { expiration: string } } }>(
         shipSymbol,
-        "survey",
-        spaceTradersToken
+        "survey"
       ),
 
-    extractWithSurvey: (shipSymbol: string, survey: SurveyData, spaceTradersToken: string) =>
+    extractWithSurvey: (shipSymbol: string, survey: SurveyData) =>
       fleetAction<{
         data: { extraction: { yield: { symbol: string; units: number } }; cooldown: { expiration: string } };
-      }>(shipSymbol, "extract/survey", spaceTradersToken, survey),
+      }>(shipSymbol, "extract/survey", survey),
 
-    sell: (shipSymbol: string, tradeSymbol: string, units: number, spaceTradersToken: string) =>
-      agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "sell", spaceTradersToken, {
+    sell: (shipSymbol: string, tradeSymbol: string, units: number) =>
+      agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "sell", {
         symbol: tradeSymbol,
         units,
       }),
@@ -208,11 +202,11 @@ export function createGameClients(config: {
     // The transaction is optional in the type because it's only used to
     // calibrate fuel cost (observations.ts) — a refuel that reports no price
     // still refuels the ship, it just teaches us nothing.
-    refuel: (shipSymbol: string, spaceTradersToken: string) =>
-      fleetAction<{ data?: { transaction?: { units?: number; totalPrice?: number } } }>(shipSymbol, "refuel", spaceTradersToken),
+    refuel: (shipSymbol: string) =>
+      fleetAction<{ data?: { transaction?: { units?: number; totalPrice?: number } } }>(shipSymbol, "refuel"),
 
-    purchase: (shipSymbol: string, tradeSymbol: string, units: number, spaceTradersToken: string) =>
-      agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "purchase", spaceTradersToken, {
+    purchase: (shipSymbol: string, tradeSymbol: string, units: number) =>
+      agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "purchase", {
         symbol: tradeSymbol,
         units,
       }),
@@ -221,10 +215,9 @@ export function createGameClients(config: {
       contractId: string,
       shipSymbol: string,
       tradeSymbol: string,
-      units: number,
-      spaceTradersToken: string
+      units: number
     ) =>
-      callJson<{ data: { contract: Contract } }>(`${config.fleetServiceUrl}/contracts/${contractId}/deliver`, spaceTradersToken, {
+      callJson<{ data: { contract: Contract } }>(`${config.fleetServiceUrl}/contracts/${contractId}/deliver`, {
         method: "POST",
         body: JSON.stringify({ shipSymbol, tradeSymbol, units }),
       }),

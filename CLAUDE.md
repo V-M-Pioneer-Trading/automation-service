@@ -68,7 +68,7 @@ other (that cycle existed once; `transaction.ts` exists to break it).
   offer belongs to the agent, not to whichever ship is idle. `assignTarget`
   takes an already-read ship so one assignment costs one ship read.
 - **FSMs are DB-free and return the next task.** `advance*Task(ctx)` takes
-  `{task, ship, clients, clock, spaceTradersToken}` and returns `TickResult | null`
+  `{task, ship, clients, clock}` and returns `TickResult | null`
   (`null` = wait still pending). Anything worth remembering rides on
   `result.observations`; the scheduler persists it. Never query Postgres from
   an FSM.
@@ -140,7 +140,7 @@ wraps an `IntervalLoop`. Semantics you can rely on:
 
 ## Planner and scoring
 
-- `Planner.loadContext(systemSymbol, spaceTradersToken)` is one waypoint fetch, one
+- `Planner.loadContext(systemSymbol)` is one waypoint fetch, one
   agent fetch, one knob read, one calibration. Every arm of a decision scores
   against the *same* context. `assignTarget` loads it once; contract discovery
   loads one more when there is something new to evaluate (and reads every
@@ -277,13 +277,13 @@ is the Clerk `sub` only.
   go to **fleet-service** (`/ships/:s/orbit|dock|navigate|survey|extract/survey|refuel`,
   `/contracts/:id/deliver`); waypoints and markets go to
   **navigation-service**.
-- **Two headers on every outbound call** (auth-design.md decisions 18/19).
+- **One header on every outbound call** (auth-design.md decisions 5/19).
   `Authorization: Bearer <M2M token>` is *this service's own* Clerk machine
-  token, minted and cached by `m2mToken.ts` and fetched inside `callJson`;
-  `X-SpaceTraders-Token` is the raw game token the operator armed with. The
-  value threaded through the scheduler, planner and FSMs is the **raw game
-  token** (`spaceTradersToken`), never a pre-built Authorization value — do
-  not wrap it in `Bearer `. `AutopilotState.getToken()` returns it as-is.
+  token, minted and cached by `m2mToken.ts` and fetched inside `callJson`. No
+  game credential exists in this service: st-gateway injects it. Nothing is
+  threaded through the scheduler, planner or FSMs for auth — `TaskContext` has
+  no token field and `AutopilotState` holds only status and mode. Reintroducing
+  either is a regression.
 - M2M token sources: `createClerkM2MTokenSource` (production, mints via
   Clerk's Backend API against `CLERK_M2M_SECRET_KEY`, cached and refreshed at
   half its lifetime, prefers a stale-but-unexpired token over a failed

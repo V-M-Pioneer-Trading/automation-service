@@ -236,18 +236,13 @@ export function createApp(options: AppOptions) {
     "/autopilot/arm",
     requireControl,
     asyncHandler(async (req, res) => {
-      const token: unknown = req.body?.token;
-      if (typeof token !== "string" || token.length === 0) {
-        badRequest(res, "token is required");
-        return;
-      }
       const mode: unknown = req.body?.mode ?? "live";
       if (mode !== "live" && mode !== "shadow") {
         badRequest(res, 'mode must be "live" or "shadow"');
         return;
       }
       const from = state.getStatus();
-      state.arm(token, mode);
+      state.arm(mode);
       scheduler?.start();
       await events.append("armed", { from, mode, actor: actorOf(res) });
       res.json(lifecycleStatus());

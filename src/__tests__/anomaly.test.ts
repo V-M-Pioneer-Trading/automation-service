@@ -139,7 +139,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
       ["MINING-1", clock.now()]
     );
     const gateway = app({ withMining: true });
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     await expectNoAnomaly(gateway, "ship_idle"); // not idle yet (default threshold is 10 minutes)
 
@@ -250,7 +250,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
   it("fires earnings_stalled (reason: credits_flat) when agent credits show no net increase across the window", async () => {
     const gateway = app({ withMining: true });
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     // Force ticks instead of racing the real setInterval against the fake
     // clock: forceAnomalyTick() drains any tick already in flight and then
@@ -273,7 +273,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     // so push that window out of the way rather than let a second reason
     // decide the assertion.
     await pool.query("UPDATE knob SET value = 1440 WHERE name = 'anomaly.noEarningsMinutes'");
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     await gateway.locals.forceAnomalyTick(); // first snapshot, at window start
     clock.advance(2 * 60 * 60 * 1000 + 60_000);
@@ -294,7 +294,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     // jump, and a background tick landing mid-setup would judge a window the
     // test hasn't finished arranging yet.
     const gateway = app({ withMining: true, intervalMs: 100_000 });
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await request(gateway).post("/api/automation/v1/autopilot/pause").set("Authorization", bearer());
 
     clock.advance(30 * 60 * 1000); // half the default window: too early to judge
@@ -311,7 +311,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
   it("stays quiet while the fleet is still selling, and while it is aborted", async () => {
     const gateway = app({ withMining: true, intervalMs: 100_000 });
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     clock.advance(61 * 60 * 1000);
     // One sale inside the window is enough: the fleet is working. Written
@@ -373,7 +373,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
       ["MINING-1", new Date(clock.now().getTime() + 30 * 60 * 1000), clock.now()]
     );
     const gateway = app({ withMining: true });
-    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "t" });
+    await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
     clock.advance(20 * 60 * 1000); // twenty minutes into the flight
     await expectNoAnomaly(gateway, "ship_idle");
