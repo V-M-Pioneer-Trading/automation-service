@@ -97,7 +97,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
     ]);
   });
 
-  const app = (opts: { intervalMs?: number; withMining?: boolean } = {}) => {
+  const app = (opts: { intervalMs?: number; withMining?: boolean; noWebhook?: boolean } = {}) => {
     const mining = opts.withMining
       ? {
           agentServiceUrl: agentUrl,
@@ -109,7 +109,7 @@ describe("automation-service anomaly detection (meta#15)", () => {
         }
       : undefined;
     const gateway = createTestApp(pool, clock, mining, undefined, {
-      webhookUrl,
+      webhookUrl: opts.noWebhook ? null : webhookUrl,
       intervalMs: opts.intervalMs ?? 15,
     });
     gateways.push(gateway);
@@ -452,6 +452,48 @@ describe("automation-service anomaly detection (meta#15)", () => {
     );
     await gateway.locals.forceAnomalyTick();
     await expectNoAnomaly(gateway, "earnings_stalled", 0);
+  }, 10_000);
+
+  /**
+   * Regression: detection used to be gated on a webhook URL being configured,
+   * so a deployment with no consumer ran no checks and served no digest. That
+   * was production's actual state — the whole subsystem silently off, which
+   * also left the AI supervisor with no context source. Detection and delivery
+   * are now independent: no URL means the page is skipped, nothing else.
+   */
+  it("runs checks and serves the digest with no webhook configured", async () => {
+    const rows = ["mining_extract", "mining_extract", "mining_tick_error", "mining_tick_error"];
+    for (const type of rows) {
+      await pool.query(`INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, $2, '{}')`, [clock.now(), type]);
+    }
+
+    const gateway = app({ noWebhook: true });
+    const anomaly = await waitForAnomaly(gateway, "error_rate");
+
+    expect(anomaly.detail.rate).toBeCloseTo(0.5, 5);
+    expect(webhook.calls).toHaveLength(0);
+  }, 10_000);
+
+  /**
+   * "No webhook configured" is not a failed delivery. Counting it as one would
+   * burn the anomaly's MAX_DELIVERY_ROUNDS budget against a webhook nobody
+   * asked, so anything recorded before a URL was configured would already be
+   * past its ceiling and would never be sent once one appeared.
+   */
+  it("does not spend delivery attempts when there is no webhook to attempt", async () => {
+    await pool.query(`INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, 'mining_tick_error', '{}')`, [clock.now()]);
+
+    const gateway = app({ noWebhook: true });
+    await waitForAnomaly(gateway, "error_rate");
+    // Several more ticks: redelivery would otherwise pick the row up each time.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const { rows } = await pool.query(`SELECT delivery_attempts, delivered_at FROM anomaly WHERE type = 'error_rate'`);
+    expect(rows).not.toHaveLength(0);
+    for (const row of rows) {
+      expect(Number(row.delivery_attempts)).toBe(0);
+      expect(row.delivered_at).toBeNull();
+    }
   }, 10_000);
 
   it("fires market_stale for an in-use market no ship has read in person within the window, while fresh ones stay quiet", async () => {

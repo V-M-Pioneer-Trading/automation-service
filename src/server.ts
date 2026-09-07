@@ -242,7 +242,7 @@ export function createApp(options: AppOptions) {
           state,
           repo: anomalyRepo,
           checker: new AnomalyChecker(pool, clock, knobs, state, marketIntel),
-          webhook: new WebhookDelivery({ url: anomaly.webhookUrl }),
+          webhook: anomaly.webhookUrl ? new WebhookDelivery({ url: anomaly.webhookUrl }) : null,
           events,
           clock,
           knobs,
@@ -540,8 +540,12 @@ if (require.main === module) {
           auth: { clerkJwtKeyPem: config.clerkJwtKeyPem, clerkIssuer: config.clerkIssuer, aiServiceSecret: config.aiServiceSecret },
           mining: config,
           metrics: { rollupIntervalMs: config.metricsRollupIntervalMs },
-          anomaly:
-            config.anomalyWebhookUrl !== null ? { webhookUrl: config.anomalyWebhookUrl, intervalMs: config.anomalyIntervalMs } : undefined,
+          // Always on, like the metrics rollups above it. Detection used to be
+          // gated on ANOMALY_WEBHOOK_URL being set, which meant a deployment
+          // with no webhook consumer ran no checks and served no digest — the
+          // state production was actually in. The URL now only decides whether
+          // anomalies are *also* posted somewhere.
+          anomaly: { webhookUrl: config.anomalyWebhookUrl, intervalMs: config.anomalyIntervalMs },
           corsAllowedOrigin: config.corsAllowedOrigin,
           authTokenSource: resolveM2MTokenSource(),
         }).listen(config.port, () => {
