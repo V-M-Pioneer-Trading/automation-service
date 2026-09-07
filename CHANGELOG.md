@@ -7,6 +7,27 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Anomaly detection no longer needs somewhere to page
+
+Detection was gated on `ANOMALY_WEBHOOK_URL`: no URL meant no `AnomalyScheduler`,
+so no checks ran and `GET /anomalies/digest` was never registered. That coupled
+*noticing* a problem to *having somewhere to send it*.
+
+Production had been in exactly that state. ai-service is not deployed, so the
+variable was never set, so the entire subsystem was off — no checks, no digest,
+and no context source for the AI supervisor. It was invisible because a missing
+route reaches the browser as the dashboard HTML (CloudFront maps origin 404s to
+`index.html`), so it looked like a working page rather than a 404.
+
+Detection and delivery are now independent. With no URL configured the checks
+run, anomalies are recorded, and the digest serves them; only the page is
+skipped. An operator reading the digest is a perfectly good audience on its own.
+
+A missing webhook is deliberately **not** counted as a failed delivery. Doing so
+would spend the anomaly's `MAX_DELIVERY_ROUNDS` budget against a webhook nobody
+asked, so anything recorded before a URL was configured would already be past
+its ceiling and would never be sent once one appeared.
+
 ## The digest was dropping what it existed to show
 
 Five event types were written to the log and then filtered out of

@@ -10,7 +10,19 @@ import { WebhookDelivery } from "./webhookDelivery";
 
 export interface AnomalyConfig {
   intervalMs: number;
-  webhookUrl: string;
+  /**
+   * Where to page when an anomaly fires. **Optional**, and detection does not
+   * depend on it: with no URL the checks still run, anomalies are still
+   * recorded, and `/anomalies/digest` still serves them — only the outbound
+   * page is skipped.
+   *
+   * This used to be required, which quietly coupled *detecting* a problem to
+   * *having somewhere to send it*. The consequence was that the whole
+   * subsystem sat switched off in production for want of a consumer: no
+   * checks, no digest, and therefore no context for the AI supervisor either.
+   * An operator reading the digest is a perfectly good audience on its own.
+   */
+  webhookUrl?: string | null;
 }
 
 /**
@@ -35,7 +47,8 @@ export interface AnomalySchedulerDeps {
   state: AutopilotState;
   repo: AnomalyRepo;
   checker: AnomalyChecker;
-  webhook: WebhookDelivery;
+  /** Null when no webhook is configured — anomalies are recorded and served, never posted. */
+  webhook: WebhookDelivery | null;
   events: EventLog;
   clock: Clock;
   knobs: KnobRepo;
@@ -122,7 +135,10 @@ export class AnomalyScheduler {
    * it missed instead of never hearing about it.
    */
   private async redeliverMissed(): Promise<void> {
-    const { repo } = this.deps;
+    const { repo, webhook } = this.deps;
+    // Nothing to redeliver to. Skipping the query as well as the post keeps a
+    // webhook-less deployment from paying for a backlog it can never drain.
+    if (webhook === null) return;
     const pending = await repo.listUndelivered(MAX_DELIVERY_ROUNDS, REDELIVERY_BATCH);
     for (const anomaly of pending) {
       if (this.loop.stopped) return;
@@ -132,6 +148,12 @@ export class AnomalyScheduler {
 
   private async attemptDelivery(anomaly: Anomaly): Promise<void> {
     const { repo, webhook } = this.deps;
+    // No webhook configured is not a failed delivery, so the attempt counter is
+    // deliberately left alone. Incrementing it would burn the anomaly's
+    // MAX_DELIVERY_ROUNDS budget against a webhook that was never asked — and
+    // then, if one were configured later, everything recorded in the meantime
+    // would already be past its ceiling and would never be sent.
+    if (webhook === null) return;
     if (await webhook.deliver(anomaly)) await repo.markDelivered(anomaly.id);
     else await repo.incrementDeliveryAttempts(anomaly.id);
   }

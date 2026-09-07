@@ -577,7 +577,7 @@ Invalid lifecycle transitions return `409` naming the current status.
 | `MINING_SHIP_SYMBOL` | Ship to fly (**required**) |
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
 | `REPLAN_INTERVAL_MS` | Periodic replan fallback (default `300000`) |
-| `ANOMALY_WEBHOOK_URL` | Anomaly delivery target. Anomaly detection is disabled entirely if unset |
+| `ANOMALY_WEBHOOK_URL` | Where to page when an anomaly fires. **Optional** — unset means anomalies are still detected, recorded and served from `/anomalies/digest`, and only the outbound POST is skipped |
 | `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
 | `METRICS_ROLLUP_INTERVAL_MS` | Rollup cadence (default `60000`) |
 | `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |
