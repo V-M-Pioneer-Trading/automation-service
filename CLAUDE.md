@@ -45,7 +45,7 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
 | `auth.ts` | Networkless Clerk JWT verification, service-secret guard | jose |
 | `config.ts` | `configFromEnv()`; every numeric env var validated positive | fs |
-| `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout, dual auth headers | m2mToken, fetch |
+| `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | m2mToken, fetch |
 | `m2mToken.ts` | Mints/caches this service's own Clerk M2M token for outbound `Authorization` | fetch, crypto |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs |
 
@@ -94,11 +94,40 @@ other (that cycle existed once; `transaction.ts` exists to break it).
   market for mining and the procurement market for contracts; `tradeSymbol` is
   the extracted good or the deliverable. Renaming the columns means a
   migration plus a change to the `/autopilot/ships/:s` response shape.
-- **`failureCount` resets to 0 on any successful action** and increments on any
-  FSM throw. At `mine.failureRetryLimit` the task is abandoned via `idleTask`
-  *unless* cargo is at stake: for mining that's `tradeSymbol !== null`; for
-  contracts it's phase `CONTRACT_TRAVEL_TO_DESTINATION` or later (a purchase
-  has happened). An abandoned contract goes back to status `accepted`.
+- **`failureCount` counts evidence about the target, not throws.** It resets to
+  0 on any successful action, and increments only on a `rejected` or
+  `malformed` verdict (see below). At `mine.failureRetryLimit` the task is
+  abandoned via `idleTask` — immediately for `malformed`, which is
+  deterministic — *unless* cargo is at stake: for mining that's `tradeSymbol
+  !== null`; for contracts it's phase `CONTRACT_TRAVEL_TO_DESTINATION` or later
+  (a purchase has happened). An abandoned contract goes back to status
+  `accepted`.
+- **The verdict, not the status code, is what anything branches on.**
+  `gameClients.ts` classifies every failed call once, where the transport error
+  and the response are both still in hand, into `unavailable` (never reached
+  the game), `credentials` (we cannot authenticate), `malformed` (our request
+  was wrong) or `rejected` (the game refused the action). `handleTickFailure`
+  is the only consumer that branches. `statusCode` is kept on the error as the
+  raw fact it was classified from, and **nothing reads it** — `server.ts`'s
+  error handler used to, which was both unreachable (no route calls an upstream
+  service) and misleading, since it implied an operator's `401` might be the
+  fleet's own expired token.
+
+  This exists because all four used to be one thing: an expired M2M token or a
+  ten-minute fleet-service outage ticked `failureCount` on every ship until the
+  retry limit abandoned every task in the fleet, then re-planned them onto
+  targets that were never the problem (auth-design.md decision 19).
+
+  Two classification details are load-bearing and match documented upstream
+  contracts, not guesses. `400` is `rejected` unless the body carries
+  `error.fields`, because the sibling services pass the game's own status and
+  message through and add `fields` only on *their* validation failures
+  (fleet-service README). `503` is `credentials` only when the message says the
+  credential is not configured, which is the sole thing separating st-gateway's
+  two different 503s (st-gateway README). A throw that isn't an
+  `UpstreamCallError` is a logic error — FSMs are DB-free, so there is no
+  transient third case — and is treated as `rejected`, which is what the
+  foreign-phase throw below was written for.
 - **A foreign phase throws.** `advanceMiningTask` on a `SCOUT_*` phase throws
   rather than returning `null`, so a corrupt row is counted as a failure and
   eventually reassigned instead of stalling silently forever.
@@ -265,6 +294,10 @@ Scheduler-level errors are logged as `mining_tick_error` for every task kind —
 the name is historical and means "a tick failed", not "a mining tick failed".
 Renaming it would strand every historical row, so it stays; what must not
 happen again is a *denominator* that reads the name literally.
+`mining_tick_error`, `mining_task_failed` and `contract_discovery_error` each
+carry a `failureKind` — the verdict above — so a digest can say *why* the fleet
+is failing without anyone re-deriving it from a message string.
+
 Event `detail` must never contain a token or anything token-shaped; `actor`
 is the Clerk `sub` only.
 
@@ -313,7 +346,8 @@ is the Clerk `sub` only.
 - Refuel responses may or may not include `transaction.units`/`totalPrice`;
   absence means no fuel observation, never an error.
 - Every upstream call has a 15s timeout (`AbortSignal.timeout`) so a hung
-  service can't wedge the one-tick-at-a-time guard forever.
+  service can't wedge the one-tick-at-a-time guard forever. A timeout is
+  `unavailable`, so it costs the ship a tick and nothing else.
 
 ## Testing
 
@@ -358,6 +392,13 @@ is the Clerk `sub` only.
 - `contract.test.ts`'s `makeFlakyPool` proxies a `Pool` to fail exactly one
   matching query, including inside a transaction; reuse it for
   "crash between two writes" cases.
+- **A stub that fails a ship action must pick a status that means what the test
+  means.** A `500` is `unavailable` and deliberately costs the target nothing,
+  so "this target keeps failing" simulated with one asserts nothing; a `404` is
+  `malformed` and reassigns on the *first* failure, which will empty a task a
+  test expected to survive. Use a `400` with the game's envelope
+  (`{ error: { message } }`) for a refusal. All three mistakes were in this
+  suite before the taxonomy existed to expose them.
 
 ## Conventions
 

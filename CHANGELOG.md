@@ -7,6 +7,42 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Upstream failures are classified, and the retry limit means what it says
+
+`mine.failureRetryLimit` answers one question — "is this target not working
+out?" — but every failure used to count toward it. `UpstreamCallError` carried
+a status code that nothing branched on, so an expired M2M token, st-gateway
+holding no SpaceTraders credential, a fleet-service outage and the game
+refusing an action in this ship state were all the same event to the scheduler:
+three or four ticks each, then every task in the fleet abandoned and re-planned
+onto targets that were never the problem. That is the failure mode
+auth-design.md decision 19 describes, and it is worst exactly when it is least
+recoverable, because a re-plan needs the same upstream that is down.
+
+`gameClients.ts` now classifies each failure once, at the call, into a
+`UpstreamFailureKind`: `unavailable`, `credentials`, `malformed` or `rejected`.
+`handleTickFailure` branches on the verdict. `rejected` keeps the old
+retry-then-reassign policy — it is the only verdict that is evidence about the
+target. `malformed` reassigns on the first failure, since an identical request
+fails identically forever. `unavailable` and `credentials` leave the task
+untouched: the ship keeps its target and retries next tick for as long as the
+condition lasts. Cargo in the hold still outranks all four. Every failure is
+still logged with its verdict, so the error-rate alarm is as loud as before.
+
+Two of the four boundaries rest on documented upstream behaviour rather than on
+status alone. `400` means the game said no, unless the body carries
+`error.fields` — the sibling services pass the game's status and message
+through and add `fields` only on their own validation failures. `503` means a
+missing credential only when the message says so, which is the sole difference
+between st-gateway's two 503s.
+
+Three existing tests simulated a bad target with a `500` or a `404`, which the
+taxonomy immediately exposed as testing something else: two proved
+"reassignment happens" using an outage that now correctly doesn't cause one,
+and the replan suite's fleet stub 404'd every call, so its ships were being
+reassigned on their first dispatch behind assertions about tasks surviving.
+All three now use a `400` game refusal.
+
 ## The test suite stops racing a wall clock
 
 Both loops now expose a way to force exactly one tick, and tests use it instead

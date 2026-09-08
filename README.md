@@ -372,10 +372,26 @@ stale what the other calls fresh.
 
 ### When a target keeps failing
 
-After `mine.failureRetryLimit` consecutive failures the ship is reset for a
-fresh assignment, **unless it's holding cargo it hasn't disposed of**, in which
-case it keeps retrying rather than stranding it. An abandoned contract is
+What happens after a failure depends on *why* it failed, because
+`mine.failureRetryLimit` answers exactly one question — "is this target not
+working out?" — and most failures are not evidence about the target at all.
+Every upstream call is classified once, where it happens:
+
+| Verdict | What it means | What the ship does |
+|---|---|---|
+| `rejected` | The game understood the action and refused it in this state: cooldown, wrong nav status, not enough credits | Counts against the target; reassigned after `mine.failureRetryLimit` in a row |
+| `malformed` | We asked for something the upstream service would not accept or could not find. Our bug, and deterministic | Reassigned immediately — the identical request would fail identically forever |
+| `unavailable` | The request never reached the game: network, timeout, 5xx, gateway backpressure | Keeps its target and retries next tick, for as long as the outage lasts |
+| `credentials` | Our M2M token was rejected, or st-gateway holds no SpaceTraders credential | Same: no target and no retry count fixes this, an operator has to |
+
+Reassignment resets the ship for a fresh assignment, **unless it's holding
+cargo it hasn't disposed of**, in which case it keeps retrying rather than
+stranding it — true whichever verdict applies. An abandoned contract is
 released back to the pool rather than left claimed by a ship that gave up.
+
+Every failure is logged as `mining_tick_error` with its verdict either way, so
+an outage is still loud on the error-rate alarm; what it no longer does is
+abandon good targets across the whole fleet while it lasts.
 
 ---
 

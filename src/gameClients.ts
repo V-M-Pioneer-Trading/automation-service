@@ -95,8 +95,84 @@ export interface Contract {
   deadlineToAccept: string;
 }
 
+/**
+ * Why an upstream call failed, in the only four flavours that lead anywhere
+ * different.
+ *
+ * A status code is not a verdict. `502` from a hung fleet-service, `503` from
+ * st-gateway holding no SpaceTraders credential, and `400` for "ship is not
+ * currently docked" are three unrelated problems that the scheduler used to
+ * treat identically: each one ticked `failureCount` until
+ * `mine.failureRetryLimit` abandoned the target. So an expired M2M token or a
+ * ten-minute fleet-service outage would quietly abandon every task in the
+ * fleet and re-plan them onto targets that were never the problem — the exact
+ * production failure auth-design decision 19 warns about.
+ *
+ * Classification happens here, once, at the only place that still holds both
+ * the transport error and the response. Callers branch on the verdict and
+ * never on `statusCode`.
+ *
+ * - `unavailable` — the request never reached the game. Network, timeout,
+ *   5xx, or gateway backpressure. Nothing about the target is wrong, so it is
+ *   not the target's fault and retrying later is the whole remedy.
+ * - `credentials` — the fleet cannot authenticate. Our M2M token was rejected
+ *   (401/403), or st-gateway has no SpaceTraders credential to inject. No
+ *   target and no amount of retrying fixes this; an operator has to.
+ * - `malformed` — this service asked for something the upstream service would
+ *   not accept or could not find. A bug or a stale configuration on our side:
+ *   the identical request will fail identically forever.
+ * - `rejected` — the game understood the action and refused it in this state:
+ *   cooldown, wrong nav status, not enough credits. This is the failure the
+ *   retry-then-abandon policy was actually designed for.
+ */
+export type UpstreamFailureKind = "unavailable" | "credentials" | "malformed" | "rejected";
+
+/**
+ * The gateway answers `503` both for "auth-service has no agent token yet" and
+ * for "auth-service is down", and only says which in the message (st-gateway
+ * README, "Errors the gateway generates itself"). The first is a credential
+ * problem an operator must fix; the second resolves on its own. There is no
+ * machine-readable discriminator to read instead, so this matches the word the
+ * gateway puts in exactly one of the two sentences.
+ */
+const CREDENTIAL_UNCONFIGURED = /credential not configured/i;
+
+/**
+ * Decides the verdict from what an upstream answer actually carries.
+ *
+ * `400` defaults to `rejected` because that is what SpaceTraders returns for
+ * nearly every gameplay refusal, and fleet-, agent- and navigation-service
+ * pass the game's status and message straight through. Our own bad request
+ * looks different: the services' own validation failures add `error.fields`
+ * (fleet-service README, "Errors"), which is the one documented signal that
+ * separates "you sent nonsense" from "the game said no".
+ *
+ * `404` is `malformed` rather than `rejected`: every ship and waypoint we name
+ * comes from configuration or our own database, so a missing one means we are
+ * asking about something that does not exist, not that the game refused us.
+ */
+export function classifyUpstreamStatus(status: number, body = ""): UpstreamFailureKind {
+  if (status === 401 || status === 403) return "credentials";
+  if (status === 503 && CREDENTIAL_UNCONFIGURED.test(body)) return "credentials";
+  // 429 is the gateway's token bucket telling us to come back, not a refusal.
+  if (status === 429 || status >= 500) return "unavailable";
+  if (status === 400) return hasValidationFields(body) ? "malformed" : "rejected";
+  if (status === 409 || status === 422) return "rejected";
+  if (status >= 400) return "malformed";
+  return "unavailable";
+}
+
+function hasValidationFields(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as { error?: { fields?: unknown } };
+    return parsed?.error?.fields !== undefined;
+  } catch {
+    return false; // not our envelope at all; fall back to the status
+  }
+}
+
 export class UpstreamCallError extends Error {
-  constructor(message: string, public statusCode: number) {
+  constructor(message: string, public statusCode: number, public kind: UpstreamFailureKind) {
     super(message);
   }
 }
@@ -125,11 +201,11 @@ export function createGameClients(config: {
         signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
       });
     } catch (err) {
-      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: ${String(err)}`, 502);
+      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: ${String(err)}`, 502, "unavailable");
     }
     const text = await res.text();
     if (!res.ok) {
-      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: ${res.status} ${text}`, res.status);
+      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: ${res.status} ${text}`, res.status, classifyUpstreamStatus(res.status, text));
     }
     return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
   }

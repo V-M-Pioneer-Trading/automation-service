@@ -6,7 +6,7 @@ import { ContractRepo } from "./contractRepo";
 import { DispatchLock } from "./dispatchLock";
 import { advanceContractTask } from "./contractTask";
 import { EventLog } from "./eventLog";
-import { GameClients, ShipSnapshot } from "./gameClients";
+import { GameClients, ShipSnapshot, UpstreamCallError } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
 import { KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
@@ -309,7 +309,7 @@ export class FleetScheduler {
     try {
       await discoverAndEvaluateContracts({ contracts, events, clients, planner, ship});
     } catch (err) {
-      await events.append("contract_discovery_error", { message: String(err) });
+      await events.append("contract_discovery_error", { message: String(err), failureKind: err instanceof UpstreamCallError ? err.kind : "rejected" });
     }
   }
 
@@ -366,16 +366,30 @@ export class FleetScheduler {
   }
 
   /**
-   * A real upstream failure while working a target (not a planner/infra error —
-   * those are caught by the loop's error handler). After `mine.failureRetryLimit`
-   * consecutive failures on the same target, the planner reassigns on the
-   * ship's next tick instead of retrying the same target forever.
+   * A real failure while working a target (not a planner/infra error — those
+   * are caught by the loop's error handler).
+   *
+   * What happens next depends on *why* it failed, not just on how often it
+   * has. `mine.failureRetryLimit` answers exactly one question — "is this
+   * target not working out?" — and only a `rejected` verdict is evidence about
+   * the target. An unreachable service or a rejected credential says nothing
+   * about where the ship was sent, so counting those there abandons good
+   * targets across the whole fleet for a reason no reassignment can fix; that
+   * is the failure auth-design decision 19 describes. A `malformed` request is
+   * our own bug and deterministic, so serving out the retry limit only delays
+   * the inevitable reassignment by `retryLimit` ticks.
    */
   private async handleTickFailure(task: ShipTask, err: unknown): Promise<void> {
     const { events, knobs, tasks, contracts, shipSymbol } = this.deps;
-    const failureCount = task.failureCount + 1;
-    const retryLimit = await knobs.get("mine.failureRetryLimit");
-    await events.append("mining_tick_error", { shipSymbol, message: String(err), failureCount });
+    // Anything thrown off the upstream seam is a logic error here — a foreign
+    // phase, a contract row that vanished. FSMs are DB-free, so there is no
+    // third possibility. `rejected` keeps those on the retry-then-reassign
+    // path the foreign-phase throw was written for.
+    const kind = err instanceof UpstreamCallError ? err.kind : "rejected";
+    // Only failures that say something about the target count against it.
+    const blamesTarget = kind === "rejected" || kind === "malformed";
+    const failureCount = blamesTarget ? task.failureCount + 1 : task.failureCount;
+    await events.append("mining_tick_error", { shipSymbol, message: String(err), failureCount, failureKind: kind });
 
     // Same discard invariant as the success path: an abort or a switch to
     // shadow mode mid-flight must stop this failure from mutating ship_task.
@@ -394,7 +408,18 @@ export class FleetScheduler {
         ? task.phase === "CONTRACT_TRAVEL_TO_DESTINATION" || task.phase === "CONTRACT_DELIVER" || task.phase === "CONTRACT_FULFILL"
         : task.tradeSymbol !== null;
 
-    if (failureCount < retryLimit || cargoAtStake) {
+    // `unavailable` and `credentials` leave the task untouched: the ship keeps
+    // its target and retries it next tick, for as long as the outage or the
+    // credential problem lasts. The event above is what tells anyone — and the
+    // error-rate alarm still counts it, so an outage is not silent.
+    if (!blamesTarget) return;
+
+    // A `malformed` request fails identically every tick, so there is nothing
+    // to learn from retrying it; reassign now. Cargo still wins either way —
+    // abandoning a target with goods in the hold strands them.
+    const retryLimit = await knobs.get("mine.failureRetryLimit");
+    const giveUp = kind === "malformed" || failureCount >= retryLimit;
+    if (!giveUp || cargoAtStake) {
       await tasks.save({ ...task, failureCount });
       return;
     }
@@ -409,6 +434,7 @@ export class FleetScheduler {
       asteroidWaypoint: task.asteroidWaypoint,
       contractId: task.contractId,
       failureCount,
+      failureKind: kind,
     });
   }
 }
