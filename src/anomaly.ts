@@ -1,7 +1,7 @@
 import { Pool } from "pg";
 import { AutopilotState } from "./autopilotState";
 import { Clock } from "./clock";
-import { KnobRepo } from "./knobs";
+import { KnobValues } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
 import { ShipTask } from "./shipTaskRepo";
 import { EventLog } from "./eventLog";
@@ -130,36 +130,49 @@ type Reason = { reason: string; detail: Record<string, unknown> };
  * webhook delivery are the caller's (AnomalyScheduler's) job, so these checks
  * stay simple functions of "what does the data say right now."
  *
- * It has no `Pool`. It used to, and used it to run six queries against
- * `event_log` and two against `metrics_rollup` — tables owned by `EventLog` and
- * `MetricsRepo`, whose vocabulary it therefore had to know and keep in step by
- * hand. Both of those modules now answer the questions instead, so this file
- * contains the *judgement* (what counts as flat, stale, too many) and none of
- * the retrieval.
+ * It has no `Pool` and no `KnobRepo`. It used to have both, and used them to run
+ * six queries against `event_log`, two against `metrics_rollup`, and eight
+ * separate reads of the knob table — tables owned by `EventLog`, `MetricsRepo`
+ * and `KnobRepo`, whose vocabulary it therefore had to know and keep in step by
+ * hand. Those modules answer the questions instead, and the thresholds arrive as
+ * one snapshot, so this file contains the *judgement* (what counts as flat,
+ * stale, too many) and none of the retrieval.
  */
 export class AnomalyChecker {
   constructor(
     private clock: Clock,
-    private knobs: KnobRepo,
     private state: AutopilotState,
     private marketIntel: MarketIntelRepo,
     private events: EventLog,
     private metrics: MetricsRepo
   ) {}
 
-  async runChecks(shipSymbol: string, task: ShipTask | null): Promise<AnomalyCandidate[]> {
+  /**
+   * `knobs` is one snapshot, read once by the caller for the whole tick — the
+   * same rule `DecisionContext` enforces for the planner, which exists so every
+   * arm of a decision scores against one set of numbers.
+   *
+   * This used to be eight separate reads, all of them concurrent, plus a ninth
+   * for the dedupe window after the checks returned. No single threshold was
+   * ever read twice, so the hazard is not one alarm disagreeing with itself; it
+   * is two *different* knobs coming from either side of an operator's edits.
+   * The ninth read is the plainest case: a cooldown change landing while the
+   * checks ran meant a tick that judged the fleet under one policy and
+   * suppressed under another.
+   */
+  async runChecks(shipSymbol: string, task: ShipTask | null, knobs: KnobValues): Promise<AnomalyCandidate[]> {
     const now = this.clock.now();
     const miningActive = this.state.getStatus() === "armed" && this.state.getMode() === "live";
 
-    // Independent reads (different tables and knobs), so run them concurrently.
+    // Independent reads (different tables), so run them concurrently.
     const [idle, earnings, failures, errorRate, marketStale] = await Promise.all([
-      miningActive && task !== null ? this.checkShipIdle(shipSymbol, task, now) : Promise.resolve(null),
-      this.checkEarningsStalled(now),
+      miningActive && task !== null ? this.checkShipIdle(shipSymbol, task, now, knobs) : Promise.resolve(null),
+      this.checkEarningsStalled(now, knobs),
       // The sum, not either counter: this check's question is "has this ship
       // stopped getting anywhere", and it does not care whose fault that is.
-      this.checkConsecutiveFailures(shipSymbol, (task?.failureCount ?? 0) + (task?.unrelatedFailureCount ?? 0)),
-      this.checkErrorRate(now),
-      this.checkMarketStaleness(now),
+      this.checkConsecutiveFailures(shipSymbol, (task?.failureCount ?? 0) + (task?.unrelatedFailureCount ?? 0), knobs),
+      this.checkErrorRate(now, knobs),
+      this.checkMarketStaleness(now, knobs),
     ]);
     return [idle, earnings, failures, errorRate, ...marketStale].filter((c): c is AnomalyCandidate => c !== null);
   }
@@ -170,8 +183,8 @@ export class AnomalyChecker {
    * idleness, so a long transit doesn't page; the clock starts when the wait
    * ends and the row still hasn't moved.
    */
-  private async checkShipIdle(shipSymbol: string, task: ShipTask, now: Date): Promise<AnomalyCandidate | null> {
-    const thresholdMinutes = await this.knobs.get("anomaly.shipIdleMinutes");
+  private async checkShipIdle(shipSymbol: string, task: ShipTask, now: Date, knobs: KnobValues): Promise<AnomalyCandidate | null> {
+    const thresholdMinutes = knobs["anomaly.shipIdleMinutes"];
     const idleSince = task.waitingUntil !== null && task.waitingUntil > task.updatedAt ? task.waitingUntil : task.updatedAt;
     const idleMinutes = (now.getTime() - idleSince.getTime()) / 60_000;
     if (idleMinutes <= thresholdMinutes) return null;
@@ -204,8 +217,12 @@ export class AnomalyChecker {
    *    reach zero stops tripping them. This one is absolute, so it keeps
    *    firing for as long as the problem lasts.
    */
-  private async checkEarningsStalled(now: Date): Promise<AnomalyCandidate | null> {
-    const readings = await Promise.all([this.detectProfitDrop(now), this.detectCreditsFlat(now), this.detectNoEarnings(now)]);
+  private async checkEarningsStalled(now: Date, knobs: KnobValues): Promise<AnomalyCandidate | null> {
+    const readings = await Promise.all([
+      this.detectProfitDrop(now, knobs),
+      this.detectCreditsFlat(now, knobs),
+      this.detectNoEarnings(now, knobs),
+    ]);
     const reasons = readings.filter((r): r is Reason => r !== null);
     if (reasons.length === 0) return null;
     return {
@@ -215,13 +232,13 @@ export class AnomalyChecker {
     };
   }
 
-  private async detectProfitDrop(now: Date): Promise<Reason | null> {
+  private async detectProfitDrop(now: Date, knobs: KnobValues): Promise<Reason | null> {
     const trend = await this.metrics.latestAgainstTrailingAverage(now, PROFIT_TREND_WINDOW_MS);
     if (trend === null) return null;
     if (trend.sampleCount < 2) return null; // not enough history to judge a drop yet
     if (trend.trailingAverage <= 0) return null;
 
-    const fraction = await this.knobs.get("anomaly.profitDropFraction");
+    const fraction = knobs["anomaly.profitDropFraction"];
     if (trend.latest >= trend.trailingAverage * fraction) return null;
     return {
       reason: "profit_drop",
@@ -229,8 +246,8 @@ export class AnomalyChecker {
     };
   }
 
-  private async detectCreditsFlat(now: Date): Promise<Reason | null> {
-    const windowHours = await this.knobs.get("anomaly.creditsFlatWindowHours");
+  private async detectCreditsFlat(now: Date, knobs: KnobValues): Promise<Reason | null> {
+    const windowHours = knobs["anomaly.creditsFlatWindowHours"];
     const since = new Date(now.getTime() - windowHours * 60 * 60 * 1000);
 
     const [earliest, baseline, current] = await Promise.all([
@@ -270,11 +287,11 @@ export class AnomalyChecker {
    * now, so a freshly armed fleet is given the full window to earn something
    * before it is called stalled.
    */
-  private async detectNoEarnings(now: Date): Promise<Reason | null> {
+  private async detectNoEarnings(now: Date, knobs: KnobValues): Promise<Reason | null> {
     const status = this.state.getStatus();
     if (status !== "armed" && status !== "paused") return null;
 
-    const windowMinutes = await this.knobs.get("anomaly.noEarningsMinutes");
+    const windowMinutes = knobs["anomaly.noEarningsMinutes"];
     const since = new Date(now.getTime() - windowMinutes * 60_000);
 
     const [enteredStateAt, earnings] = await Promise.all([
@@ -297,19 +314,19 @@ export class AnomalyChecker {
     };
   }
 
-  private async checkConsecutiveFailures(shipSymbol: string, failureCount: number): Promise<AnomalyCandidate | null> {
-    const limit = await this.knobs.get("anomaly.consecutiveFailureLimit");
+  private async checkConsecutiveFailures(shipSymbol: string, failureCount: number, knobs: KnobValues): Promise<AnomalyCandidate | null> {
+    const limit = knobs["anomaly.consecutiveFailureLimit"];
     if (failureCount < limit) return null;
     return { type: "consecutive_failures", dedupeKey: `consecutive_failures:${shipSymbol}`, detail: { shipSymbol, failureCount, limit } };
   }
 
-  private async checkErrorRate(now: Date): Promise<AnomalyCandidate | null> {
-    const windowMinutes = await this.knobs.get("anomaly.errorRateWindowMinutes");
+  private async checkErrorRate(now: Date, knobs: KnobValues): Promise<AnomalyCandidate | null> {
+    const windowMinutes = knobs["anomaly.errorRateWindowMinutes"];
     const since = new Date(now.getTime() - windowMinutes * 60_000);
     const { total, errors } = await this.events.taskOutcomesBetween(since, now);
     if (total === 0) return null;
     const rate = errors / total;
-    const threshold = await this.knobs.get("anomaly.errorRateThreshold");
+    const threshold = knobs["anomaly.errorRateThreshold"];
     if (rate <= threshold) return null;
     return { type: "error_rate", dedupeKey: "error_rate", detail: { rate, threshold, windowMinutes, totalEvents: total, errorEvents: errors } };
   }
@@ -322,8 +339,8 @@ export class AnomalyChecker {
    * comes from `market_intel`, the same store the planner scouts against, so
    * the alert and the planner can never disagree about what stale means.
    */
-  private async checkMarketStaleness(now: Date): Promise<AnomalyCandidate[]> {
-    const thresholdMinutes = await this.knobs.get("anomaly.marketStalenessMinutes");
+  private async checkMarketStaleness(now: Date, knobs: KnobValues): Promise<AnomalyCandidate[]> {
+    const thresholdMinutes = knobs["anomaly.marketStalenessMinutes"];
     const activeSince = new Date(now.getTime() - MARKET_ACTIVE_USE_LOOKBACK_MS);
     const marketsInUse = await this.events.marketsPricedSince(activeSince);
     if (marketsInUse.length === 0) return [];

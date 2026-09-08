@@ -78,7 +78,14 @@ export class AnomalyScheduler {
   private readonly loop: IntervalLoop;
 
   constructor(private readonly deps: AnomalySchedulerDeps) {
-    this.loop = new IntervalLoop(deps.intervalMs, () => this.tick());
+    // The fleet loop has always had an error callback; this one did not, so a
+    // throwing tick was swallowed by `IntervalLoop`'s default and anomaly
+    // detection stopped dead with nothing in the log to say so. The tick now
+    // depends on the whole knob table through one `getValues()`, which is one
+    // more way to throw, so the silence had to go.
+    this.loop = new IntervalLoop(deps.intervalMs, () => this.tick(), (err) =>
+      deps.events.append("mining_tick_error", { message: String(err), failureKind: "internal", source: "anomaly" })
+    );
   }
 
   start(): void {
@@ -101,11 +108,17 @@ export class AnomalyScheduler {
     // a tick that was told to stop must not go on to read or write state.
     if (this.loop.stopped) return;
 
+    // One snapshot for the whole tick, the same rule `DecisionContext` enforces
+    // for the planner. Nine separate reads meant an operator changing a
+    // threshold mid-tick could have one alarm judged against the old value, the
+    // next against the new one, and the dedupe window against a third state.
+    const knobValues = await knobs.getValues();
+
     const task = shipSymbol === null ? null : await tasks.get(shipSymbol);
-    const candidates = await checker.runChecks(shipSymbol ?? "unknown", task);
+    const candidates = await checker.runChecks(shipSymbol ?? "unknown", task, knobValues);
     if (this.loop.stopped) return;
 
-    const cooldownMs = (await knobs.get("anomaly.dedupeCooldownMinutes")) * 60_000;
+    const cooldownMs = knobValues["anomaly.dedupeCooldownMinutes"] * 60_000;
     const now = clock.now();
 
     for (const candidate of candidates) {

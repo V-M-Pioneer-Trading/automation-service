@@ -7,6 +7,8 @@ import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { KNOB_NAMES, KnobRepo } from "../knobs";
+import { AnomalyChecker } from "../anomaly";
 
 function startStubServer(handler: (req: http.IncomingMessage, body: string, res: http.ServerResponse) => void) {
   const calls: { method: string; url: string; body: string }[] = [];
@@ -105,6 +107,68 @@ describe("automation-service anomaly detection (meta#15)", () => {
     gateways.push(gateway);
     return gateway;
   };
+
+  /**
+   * One tick, one set of thresholds — the rule `DecisionContext` already enforces
+   * for the planner, arriving here (meta#75 B6).
+   *
+   * Counting reads rather than racing a write, because the failure it prevents
+   * is a race: eight `get`s inside the checks, all concurrent, plus a ninth for
+   * the dedupe window after they returned. No threshold was read twice, so the
+   * hazard is two *different* knobs arriving from either side of an operator's
+   * edits — a tick judging the fleet under one policy and suppressing under
+   * another.
+   *
+   * The arrangement matters as much as the assertion. Three of the eight reads
+   * sit behind early returns — `checkShipIdle` needs a live ship,
+   * `detectNoEarnings` an armed autopilot, `detectProfitDrop` enough rollups to
+   * compare against — so on an idle, shipless fixture a check reading its own
+   * knob goes unnoticed. This one reaches all eight.
+   */
+  it("reads the knob table exactly once per anomaly tick, and every check gets that snapshot", async () => {
+    const getValues = jest.spyOn(KnobRepo.prototype, "getValues");
+    const get = jest.spyOn(KnobRepo.prototype, "get");
+    const runChecks = jest.spyOn(AnomalyChecker.prototype, "runChecks");
+    try {
+      const gateway = app({ withMining: true });
+      await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
+      // A ship with a target, so `checkShipIdle` runs rather than returning on
+      // a null task.
+      await pool.query(
+        `INSERT INTO ship_task (ship_symbol, phase, asteroid_waypoint, updated_at) VALUES ($1, 'TRAVEL_TO_ASTEROID', 'X1-BELT', $2)`,
+        ["MINING-1", clock.now()]
+      );
+      // Three rollups: `detectProfitDrop` needs a latest plus at least two
+      // behind it before it reads `profitDropFraction`.
+      for (let h = 3; h >= 1; h--) {
+        const end = new Date(clock.now().getTime() - h * 3_600_000);
+        await pool.query(
+          `INSERT INTO metrics_rollup (window_start, window_end, computed_at, credits_per_hour, extraction_units, error_rate)
+           VALUES ($1, $2, $2, $3, 0, 0)`,
+          [new Date(end.getTime() - 3_600_000), end, 1000]
+        );
+      }
+
+      getValues.mockClear();
+      get.mockClear();
+      runChecks.mockClear();
+
+      await gateway.locals.forceAnomalyTick();
+
+      // Called at all: without this the count below is satisfied by a tick that
+      // never ran a check.
+      expect(runChecks).toHaveBeenCalledTimes(1);
+      const snapshot = runChecks.mock.calls[0][2];
+      expect(Object.keys(snapshot).sort()).toEqual([...KNOB_NAMES].sort());
+
+      expect(getValues).toHaveBeenCalledTimes(1);
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      getValues.mockRestore();
+      get.mockRestore();
+      runChecks.mockRestore();
+    }
+  }, 15_000);
 
   const waitForAnomaly = async (gateway: ReturnType<typeof createTestApp>, type: string, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {

@@ -37,7 +37,7 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `intervalLoop.ts` | `IntervalLoop`: the one guarded timer every scheduler runs on | nothing |
 | `dispatchLock.ts` | `DispatchLock`: Postgres advisory lock making "one process drives this ship" true across processes | pg, crypto |
 | `fleetEvents.ts` | The event vocabulary: task progress, failed actions, credits arriving. SQL predicates only, no I/O | nothing |
-| `anomaly.ts` | `AnomalyRepo` (owns the `anomaly` table), and `AnomalyChecker` — five read-only checks that take **no `Pool`**: they judge, they don't retrieve | knobs, marketIntel, eventLog, metrics |
+| `anomaly.ts` | `AnomalyRepo` (owns the `anomaly` table), and `AnomalyChecker` — five read-only checks that take **no `Pool` and no `KnobRepo`**: they judge, they don't retrieve | knobs (types only), marketIntel, eventLog, metrics |
 | `anomalyScheduler.ts` | Runs checks, dedupes, persists, delivers, requests replans | anomaly, webhookDelivery |
 | `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table, fleetEvents |
 | `testSupport/fakeClock.ts`, `testSupport/fakeGameClients.ts` | The adapters for the `Clock` and `GameClients` seams. One each, shared — not one per test file | test-only |
@@ -310,6 +310,24 @@ Both the planner's scout scoring and the `market_stale` check read
 - `resetDatabase()` in tests resets all knobs to defaults **and sets
   `scout.creditsPerRefresh` to 0** unless `{ enableScouting: true }`; a test
   that unexpectedly sees a scout assignment usually forgot this.
+- **One snapshot per unit of work**, where the unit is a planner *decision* and
+  an anomaly *tick*. Both read the knob table once through `getValues()` and
+  pass the values down: `DecisionContext` for the planner,
+  `AnomalyScheduler.tick` for the checks — which is why `AnomalyChecker` takes
+  a `KnobValues` rather than a `KnobRepo`. Nine separate reads let an
+  operator's edits land between two of them, so a tick could judge the fleet
+  under one policy and suppress the result under another. A new check takes the
+  snapshot as an argument; a `knobs.get()` inside one is a regression, and
+  `anomaly.test.ts` fails on it.
+
+  **The fleet tick is not yet one unit**, and knowing that is the point of
+  writing the rule down. A replan calls `assignTarget` per idle ship, each of
+  which loads its own `DecisionContext` with HTTP calls in between, and
+  `maybeReplan` and `handleTickFailure` read a knob apiece. One replan is
+  therefore N snapshots spread over seconds — a far wider window than the one
+  the anomaly tick just closed, and the reason it is not fixed here is only
+  that hoisting a snapshot through `Planner.loadContext` is a change to the
+  planner's own contract, not a change to this one.
 
 ## Events
 
