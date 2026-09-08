@@ -1,9 +1,9 @@
 import { Clock } from "../clock";
 import { ContractRecord } from "../contractRepo";
-import { advanceContractTask } from "../contractTask";
+import { advanceContractTask, startContractTask } from "../contractTask";
 import { ShipSnapshot } from "../gameClients";
-import { advanceMiningTask } from "../miningTask";
-import { advanceScoutTask } from "../scoutTask";
+import { advanceMiningTask, startMiningTask } from "../miningTask";
+import { advanceScoutTask, startScoutTask } from "../scoutTask";
 import { ShipTask } from "../shipTaskRepo";
 import { refuelIfNeeded, resolveWaitIfElapsed, TaskContext } from "../taskFsm";
 import { fakeGameClients } from "../testSupport/fakeGameClients";
@@ -199,5 +199,101 @@ describe("mining", () => {
       task: { cycleRevenue: 90 },
       observations: { marketsRefreshed: ["X1-MARKET"] },
     });
+  });
+});
+
+/**
+ * How a task of each kind *begins*, pinned beside how it proceeds.
+ *
+ * These shapes used to be written inline in `FleetScheduler.assignTarget`, so
+ * the scheduler was the author of column meanings the FSMs interpret —
+ * `tradeSymbol` is the deliverable for a contract and the extracted good for
+ * mining, `asteroidWaypoint` is a market for a scout. What each kind means is
+ * now decided in one module per kind, and asserted here.
+ */
+describe("how each task kind starts", () => {
+  // A finished cycle's leftovers: whatever a new assignment is built on top of
+  // has to clear these, or the observation written at the end of the next cycle
+  // counts the previous one's takings (see idleTask).
+  const finished = task({
+    taskKind: "contract",
+    phase: "CONTRACT_FULFILL",
+    tradeSymbol: "COPPER_ORE",
+    marketWaypoint: "X1-OLD-MARKET",
+    contractId: "C-OLD",
+    destinationWaypoint: "X1-OLD-DEST",
+    unitsDelivered: 7,
+    failureCount: 3,
+    unrelatedFailureCount: 9,
+    cycleRevenue: 5000,
+    cycleTravelDistance: 40,
+    cycleUnitsExtracted: 12,
+    cycleStartedAt: new Date("2025-12-31T00:00:00Z"),
+    survey: { signature: "SIG", symbol: "X1-OLD", deposits: [], expiration: "", size: "MODERATE" },
+  });
+
+  const carriedOver = (t: ShipTask) => ({
+    failureCount: t.failureCount,
+    unrelatedFailureCount: t.unrelatedFailureCount,
+    cycleRevenue: t.cycleRevenue,
+    cycleTravelDistance: t.cycleTravelDistance,
+    cycleUnitsExtracted: t.cycleUnitsExtracted,
+    cycleStartedAt: t.cycleStartedAt,
+    survey: t.survey,
+  });
+
+  const blank = {
+    failureCount: 0,
+    unrelatedFailureCount: 0,
+    cycleRevenue: 0,
+    cycleTravelDistance: 0,
+    cycleUnitsExtracted: 0,
+    cycleStartedAt: null,
+    survey: null,
+  };
+
+  it("mining: the field to work, and nothing carried over", () => {
+    const started = startMiningTask(finished, "X1-BELT");
+    expect(started).toMatchObject({
+      taskKind: "mining",
+      phase: "TRAVEL_TO_ASTEROID",
+      asteroidWaypoint: "X1-BELT",
+      // Cleared: a mining task's tradeSymbol is what it has extracted, and it
+      // has extracted nothing yet — which is also what makes it usable as
+      // "is cargo at stake?".
+      tradeSymbol: null,
+      contractId: null,
+      unitsDelivered: 0,
+    });
+    expect(carriedOver(started)).toEqual(blank);
+  });
+
+  it("scout: the market to refresh, in the column every kind uses for its target", () => {
+    const started = startScoutTask(finished, "X1-MARKET-2");
+    expect(started).toMatchObject({
+      taskKind: "scout",
+      phase: "SCOUT_TRAVEL",
+      asteroidWaypoint: "X1-MARKET-2",
+      tradeSymbol: null,
+      contractId: null,
+    });
+    expect(carriedOver(started)).toEqual(blank);
+  });
+
+  it("contract: four columns meaning something other than they do for mining", () => {
+    const started = startContractTask(finished, contract);
+    expect(started).toMatchObject({
+      taskKind: "contract",
+      phase: "CONTRACT_TRAVEL_TO_MARKET",
+      // The deliverable, set before anything is bought (meta#27) — which is why
+      // contractCargoAtStake reads the phase and not this.
+      tradeSymbol: "IRON_ORE",
+      // Where to buy, not where to sell.
+      marketWaypoint: "X1-MARKET",
+      destinationWaypoint: "X1-DEST",
+      contractId: "C-1",
+      unitsDelivered: 0,
+    });
+    expect(carriedOver(started)).toEqual(blank);
   });
 });

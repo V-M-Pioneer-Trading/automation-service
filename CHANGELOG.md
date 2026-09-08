@@ -20,11 +20,15 @@ difference in order to decide something: whether abandoning a target would
 strand cargo, worked out by enumerating contract phase names inline. A scheduler
 reading FSM internals to make a decision the FSMs are the authority on.
 
-`assignTarget` is the mirror half and is deliberately left: it writes
-`tradeSymbol`, `marketWaypoint` and the opening phase per kind inline, so the
-scheduler is still the *author* of the meanings the FSMs now interpret. Fixing
-that means the FSM modules construct their own opening task, which is a bigger
-change and closer to the row split the issue actually asks for.
+`assignTarget` was the mirror half — it wrote `tradeSymbol`,
+`marketWaypoint` and the opening phase per kind inline, making the scheduler the
+*author* of the meanings the FSMs interpret — and it now calls a `start*Task`
+per kind instead. Each module owns how its tasks begin, proceed, and interpret
+the shared columns; the scheduler owns when to write and the transaction a
+contract assignment goes inside (meta#30), which is a different thing.
+
+What remains of B7 is the row itself: three kinds sharing one 17-field shape,
+which needs a migration and a change to the `/autopilot/ships/:s` response.
 
 Each FSM module exports its own predicate now — `miningCargoAtStake`,
 `contractCargoAtStake`, `scoutCargoAtStake` — and the scheduler switches over

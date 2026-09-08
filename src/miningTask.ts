@@ -235,3 +235,20 @@ async function dispatchSell(ctx: TaskContext): Promise<TickResult> {
     ...(cycleHours > 0 ? { observations: { miningCycle: summary } } : {}),
   };
 }
+
+/**
+ * The opening task for a ship the planner has sent to an asteroid field.
+ *
+ * Written here rather than in the scheduler, beside the FSM that reads it and
+ * the predicate that interprets it: `asteroidWaypoint` means "the field to
+ * mine" only to this module, and a scheduler that fills it in is the author of
+ * a meaning it does not own.
+ *
+ * Built on `idleTask`, which is what resets the cycle tallies — carrying a
+ * previous cycle's revenue into a new one corrupts the observation written at
+ * its end.
+ */
+export const startMiningTask = (task: ShipTask, asteroidWaypoint: string): ShipTask => ({
+  ...idleTask(task),
+  asteroidWaypoint,
+});

@@ -4,16 +4,16 @@ import { Clock } from "./clock";
 import { discoverAndEvaluateContracts } from "./contractDiscovery";
 import { ContractRepo } from "./contractRepo";
 import { DispatchLock } from "./dispatchLock";
-import { advanceContractTask, contractCargoAtStake } from "./contractTask";
+import { advanceContractTask, contractCargoAtStake, startContractTask } from "./contractTask";
 import { EventLog } from "./eventLog";
 import { GameClients, ShipSnapshot, UpstreamCallError, UpstreamFailureKind } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
 import { KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
-import { advanceMiningTask, miningCargoAtStake } from "./miningTask";
+import { advanceMiningTask, miningCargoAtStake, startMiningTask } from "./miningTask";
 import { ObservationRepo } from "./observations";
 import { Planner } from "./planner";
-import { advanceScoutTask, scoutCargoAtStake } from "./scoutTask";
+import { advanceScoutTask, scoutCargoAtStake, startScoutTask } from "./scoutTask";
 import { idleTask, isIdle, ShipTask, ShipTaskRepo } from "./shipTaskRepo";
 import { TickObservations, TickResult } from "./taskFsm";
 import { withTransaction } from "./transaction";
@@ -401,10 +401,10 @@ export class FleetScheduler {
         await events.append("planner_no_viable_target", { shipSymbol: task.shipSymbol });
         return;
       case "mine":
-        await tasks.save({ ...idleTask(task), asteroidWaypoint: assignment.asteroidWaypoint });
+        await tasks.save(startMiningTask(task, assignment.asteroidWaypoint));
         return;
       case "scout":
-        await tasks.save({ ...idleTask(task), taskKind: "scout", phase: "SCOUT_TRAVEL", asteroidWaypoint: assignment.scoutWaypoint });
+        await tasks.save(startScoutTask(task, assignment.scoutWaypoint));
         return;
       case "contract": {
         const { contract } = assignment;
@@ -413,15 +413,7 @@ export class FleetScheduler {
         // it, and assigned contracts are never re-offered to the planner.
         await withTransaction(pool, async (client) => {
           await new ContractRepo(client, clock).setStatus(contract.contractId, "assigned");
-          await new ShipTaskRepo(client, clock).save({
-            ...idleTask(task),
-            taskKind: "contract",
-            phase: "CONTRACT_TRAVEL_TO_MARKET",
-            tradeSymbol: contract.tradeSymbol,
-            marketWaypoint: contract.procurementMarket,
-            contractId: contract.contractId,
-            destinationWaypoint: contract.destinationWaypoint,
-          });
+          await new ShipTaskRepo(client, clock).save(startContractTask(task, contract));
         });
         return;
       }
