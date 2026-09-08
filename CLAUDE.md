@@ -29,7 +29,7 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `routeCost.ts` | `fuelAwareRoute`: Dijkstra over waypoints with fuel constraints. Pure | nothing |
 | `contractDiscovery.ts` | See/evaluate/accept contracts, called inline by the scheduler before each assignment | planner, contractRepo |
 | `taskFsm.ts` | Shared FSM pieces: `TickResult`, `TaskContext`, travel/dock/refuel/wait resolution | gameClients, shipTaskRepo |
-| `miningTask.ts`, `contractTask.ts`, `scoutTask.ts` | One `advance*Task(ctx)` each, one action per call | taskFsm |
+| `miningTask.ts`, `contractTask.ts`, `scoutTask.ts` | One `advance*Task(ctx)` each, one action per call, and one `*CargoAtStake(task)` each — what this kind means by the shared columns is the kind's own business | taskFsm |
 | `observations.ts` | `ObservationRepo` + `calibrate()`: measured model with priors as fallback | knobs (types only) |
 | `knobs.ts` | `KNOB_DEFINITIONS` (source of `KnobName`), `KnobRepo`, `syncKnobDefinitions` | transaction |
 | `db.ts` | `createPool`, `migrate` (idempotent DDL) | knobs (for the sync) |
@@ -107,10 +107,8 @@ for callers who look there first.
   (`unavailable`, `credentials`) and is spent against
   `mine.failureRetryLimit × UNRELATED_FAILURE_RETRY_MULTIPLIER`. Both reset to
   0 on any successful action. At either limit the task is abandoned via
-  `idleTask` *unless* cargo is at stake: for mining that's `tradeSymbol !==
-  null`; for contracts it's phase `CONTRACT_TRAVEL_TO_DESTINATION` or later (a
-  purchase has happened). An abandoned contract goes back to status `accepted`.
-
+  `idleTask` *unless* cargo is at stake. An abandoned contract goes back to
+  status `accepted`.
   They are two columns and not one because one number cannot be spent against
   two budgets. Five ticks of an outage on a shared counter leaves the next
   genuine refusal one strike from abandoning a target it has never once failed
@@ -124,6 +122,28 @@ for callers who look there first.
   justify retrying forever. It is a tick count, not a duration: dropped timer
   fires and the 15s call timeout make 300 ticks anywhere from 25 minutes to a
   few hours, all of which outlast a deploy.
+- **"Is cargo at stake?" is answered by the task kind, not by the scheduler.**
+  Each FSM module exports its own predicate — `miningCargoAtStake` (is
+  `tradeSymbol` set), `contractCargoAtStake` (phase
+  `CONTRACT_TRAVEL_TO_DESTINATION` or later, because a contract's `tradeSymbol`
+  is set at assignment time and says nothing about the hold, meta#27), and
+  `scoutCargoAtStake` (never) — and `FleetScheduler.cargoAtStake` is a switch
+  over the three, the same shape as `advance`. Adding a task kind fails to
+  compile until it answers, via the explicit `boolean` return type rather than
+  `noImplicitReturns`, which this tsconfig does not set: widen the return to
+  include `undefined` and the check silently goes away.
+
+  This was a conditional in the scheduler enumerating contract phase names:
+  the scheduler reading FSM internals to make a decision the FSMs are the
+  authority on. It also applied mining's rule to every non-contract task, which
+  was right for a scout only by luck — nothing sets `tradeSymbol` on one, and a
+  row that carried it would have been retried on the same target forever, on
+  the strength of cargo a scout cannot hold.
+
+  `assignTarget` is the other half of the same coupling and is **not** fixed:
+  it writes `tradeSymbol`, `marketWaypoint` and the opening phase per kind
+  inline, so the scheduler is still the author of the meanings the FSMs now
+  interpret. Splitting the row would settle both; see meta#75 B7.
 - **A failed tick must not stamp `updated_at`.** `ShipTaskRepo.recordFailure`
   writes the counters and nothing else, because `updated_at` is what
   `ship_idle` measures from: stamping it made a ship that had been failing for
@@ -484,8 +504,11 @@ is the Clerk `sub` only.
 - Schedulers take a deps object (`FleetSchedulerDeps`, `AnomalySchedulerDeps`).
 - New background work goes on an `IntervalLoop`. New task kinds add a phase
   union to `shipTaskRepo.ts`, a `PHASE_AFTER_WAIT` entry per waiting phase, an
-  `advance*Task`, a `case` in `FleetScheduler.advance`, and a `resetDatabase`
-  consideration if they need a knob to compete.
+  `advance*Task`, a `*CargoAtStake` predicate beside it, a `case` in each of
+  `FleetScheduler.advance` and `FleetScheduler.cargoAtStake`, and a
+  `resetDatabase` consideration if they need a knob to compete. The two
+  switches are exhaustive, so the compiler asks for the cases; nothing asks for
+  the predicate except this line.
 - Update README (human-facing) and this file (implementation) together with
   the code; add a CHANGELOG entry for anything a reviewer of a later PR would
   want explained.

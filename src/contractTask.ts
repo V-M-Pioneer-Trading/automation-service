@@ -1,5 +1,5 @@
 import { ContractRecord } from "./contractRepo";
-import { idleTask } from "./shipTaskRepo";
+import { ContractPhase, idleTask, ShipTask, TaskPhase } from "./shipTaskRepo";
 import {
   dockIfNeeded,
   refuelIfNeeded,
@@ -39,6 +39,31 @@ export async function advanceContractTask(ctx: TaskContext & { contract: Contrac
       throw new Error(`contract task cannot advance from phase ${ctx.task.phase}`);
   }
 }
+
+/**
+ * The phases from a *confirmed* purchase onward — the phase advances only once
+ * the purchase call has returned. `tradeSymbol` cannot answer "is cargo
+ * aboard?" for a contract the way it does for mining: it is set at assignment
+ * time, before anything has been bought (meta#27), so the phase is the only
+ * thing that says goods were acquired.
+ *
+ * The gap that leaves is meta#27's known one, not a new one: a purchase that
+ * reached the game but whose response was lost leaves the row at
+ * `CONTRACT_PURCHASE`, and the target can then be abandoned with cargo actually
+ * aboard. Widening this list to cover it would strand the far commoner case —
+ * a purchase that never happened — on a target it can never complete.
+ *
+ * `satisfies` is load-bearing: the `readonly TaskPhase[]` annotation alone
+ * would accept `"SURVEY"` here.
+ */
+const CARGO_HELD_PHASES: readonly TaskPhase[] = [
+  "CONTRACT_TRAVEL_TO_DESTINATION",
+  "CONTRACT_DELIVER",
+  "CONTRACT_FULFILL",
+] satisfies readonly ContractPhase[];
+
+/** See `miningCargoAtStake` for why each kind answers this itself. */
+export const contractCargoAtStake = (task: ShipTask): boolean => CARGO_HELD_PHASES.includes(task.phase);
 
 const heldUnits = (ctx: TaskContext, tradeSymbol: string): number =>
   ctx.ship.cargo.inventory.find((i) => i.symbol === tradeSymbol)?.units ?? 0;

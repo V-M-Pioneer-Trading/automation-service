@@ -4,16 +4,16 @@ import { Clock } from "./clock";
 import { discoverAndEvaluateContracts } from "./contractDiscovery";
 import { ContractRepo } from "./contractRepo";
 import { DispatchLock } from "./dispatchLock";
-import { advanceContractTask } from "./contractTask";
+import { advanceContractTask, contractCargoAtStake } from "./contractTask";
 import { EventLog } from "./eventLog";
 import { GameClients, ShipSnapshot, UpstreamCallError, UpstreamFailureKind } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
 import { KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
-import { advanceMiningTask } from "./miningTask";
+import { advanceMiningTask, miningCargoAtStake } from "./miningTask";
 import { ObservationRepo } from "./observations";
 import { Planner } from "./planner";
-import { advanceScoutTask } from "./scoutTask";
+import { advanceScoutTask, scoutCargoAtStake } from "./scoutTask";
 import { idleTask, isIdle, ShipTask, ShipTaskRepo } from "./shipTaskRepo";
 import { TickObservations, TickResult } from "./taskFsm";
 import { withTransaction } from "./transaction";
@@ -241,6 +241,29 @@ export class FleetScheduler {
     await events.append(result.event, result.detail);
   }
 
+  /**
+   * Whether abandoning this target would strand cargo, asked of the task kind
+   * rather than worked out here.
+   *
+   * The three kinds mean different things by the same columns — `tradeSymbol`
+   * is the extracted good for mining and the deliverable for a contract, set at
+   * different moments — so this used to be a conditional in the scheduler
+   * enumerating contract phase names, which is the scheduler reading FSM
+   * internals to make a decision the FSMs own. Same shape as `advance` below:
+   * one switch, three modules, and adding a kind fails to compile until it
+   * answers (meta#75 B7).
+   */
+  private cargoAtStake(task: ShipTask): boolean {
+    switch (task.taskKind) {
+      case "mining":
+        return miningCargoAtStake(task);
+      case "contract":
+        return contractCargoAtStake(task);
+      case "scout":
+        return scoutCargoAtStake(task);
+    }
+  }
+
   /** One FSM step for whatever kind of task the ship is running. */
   private async advance(task: ShipTask, ship: ShipSnapshot): Promise<TickResult | null> {
     const { clients, clock, contracts } = this.deps;
@@ -449,14 +472,7 @@ export class FleetScheduler {
     // sold, or purchased but not delivered) — abandoning the target now would
     // strand it with no code path back to selling or delivering it. Keep
     // retrying the same target instead while cargo is at stake.
-    //
-    // For contract tasks, tradeSymbol is set at assignment time, not after a
-    // purchase — so cargo is only at stake once a purchase has been dispatched
-    // (meta#27), i.e. CONTRACT_TRAVEL_TO_DESTINATION or later.
-    const cargoAtStake =
-      task.taskKind === "contract"
-        ? task.phase === "CONTRACT_TRAVEL_TO_DESTINATION" || task.phase === "CONTRACT_DELIVER" || task.phase === "CONTRACT_FULFILL"
-        : task.tradeSymbol !== null;
+    const cargoAtStake = this.cargoAtStake(task);
 
     // The whole branch: a failure that says nothing about the target buys the
     // ship a far longer budget on it, rather than none at all.

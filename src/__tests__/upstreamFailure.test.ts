@@ -30,6 +30,7 @@ import { resetDatabase } from "../testSupport/resetDatabase";
  */
 
 const SHIP = "MINING-1";
+const CONTRACT = "CONTRACT-1";
 const NOW = new Date("2026-01-01T00:00:00Z");
 
 describe("classifyUpstreamStatus", () => {
@@ -92,12 +93,12 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     await scheduler?.stop();
   });
 
-  const ship = (): ShipSnapshot => ({
+  const ship = (inventory: { symbol: string; units: number }[] = []): ShipSnapshot => ({
     symbol: SHIP,
     nav: { systemSymbol: "X1", waypointSymbol: "X1-MARKET", status: "DOCKED", route: { arrival: NOW.toISOString() } },
     cooldown: { expiration: null },
     fuel: { current: 100, capacity: 100 },
-    cargo: { units: 0, capacity: 10, inventory: [] },
+    cargo: { units: inventory.reduce((n, i) => n + i.units, 0), capacity: 10, inventory },
   });
 
   /**
@@ -110,20 +111,28 @@ describe("the scheduler branches on the verdict, not the status code", () => {
   };
 
   /**
-   * Every tick's first dispatch (`orbit`, on the way to the belt) fails. `err`
-   * is either the one failure to throw every time, or a function of the tick
-   * number for the cases about a run of failures changing character.
+   * Every dispatch fails; only `getShip` answers. `err` is either the one
+   * failure to throw every time, or a function of the tick number for the cases
+   * about a run of failures changing character.
+   *
+   * Every call and not just `orbit`, because these cases cover several task
+   * kinds at several phases and each reaches for a different method — a
+   * contract at CONTRACT_DELIVER never orbits, so an orbit-only stub let it
+   * succeed and made the test about something else entirely.
    */
-  const arrange = (err: unknown | ((tick: number) => unknown), override?: GameClients) => {
+  const arrange = (err: unknown | ((tick: number) => unknown), override?: GameClients, hold: { symbol: string; units: number }[] = []) => {
     let n = 0;
+    const nextError = () => (typeof err === "function" ? (err as (tick: number) => unknown)(n++) : err);
     const clients =
       override ??
-      fakeGameClients({
-        getShip: async () => ship(),
-        orbit: async () => {
-          throw typeof err === "function" ? (err as (tick: number) => unknown)(n++) : err;
-        },
-      });
+      (new Proxy({} as GameClients, {
+        get: (_target, prop: string) =>
+          prop === "getShip"
+            ? async () => ship(hold)
+            : async () => {
+                throw nextError();
+              },
+      }) as GameClients);
     const tasks = new ShipTaskRepo(pool, clock);
     const events = new EventLog(pool, clock);
     const knobs = new KnobRepo(pool);
@@ -151,7 +160,7 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     });
     scheduler = s;
     s.start();
-    return { tasks, events, knobs, scheduler: s };
+    return { tasks, contracts, events, knobs, scheduler: s };
   };
 
   const tick = async (s: FleetScheduler, times: number): Promise<void> => {
@@ -295,6 +304,83 @@ describe("the scheduler branches on the verdict, not the status code", () => {
 
     expect(await eventTypes(events)).not.toContain("mining_task_failed");
     expect((await tasks.get(SHIP))?.asteroidWaypoint).toBe("X1-BELT");
+  });
+
+  /** A real contract row, so the tick reaches the contract FSM rather than throwing on a missing one. */
+  const seedContract = async (contracts: ContractRepo) =>
+    contracts.record({
+      contractId: CONTRACT,
+      tradeSymbol: "IRON_ORE",
+      destinationWaypoint: "X1-DEST",
+      unitsRequired: 10,
+      totalPayment: 20_000,
+      status: "assigned",
+      expectedProfit: 15_000,
+      cycleHours: 1,
+      travelDistance: 30,
+      procurementMarket: "X1-MARKET",
+    });
+
+  it.each(["CONTRACT_TRAVEL_TO_DESTINATION", "CONTRACT_DELIVER", "CONTRACT_FULFILL"] as const)(
+    "keeps retrying a contract task at %s, where a purchase has already completed",
+    async (phase) => {
+      // Every phase from the purchase onward, not just the first. A contract's
+      // tradeSymbol is set at assignment time (meta#27), so the phase is the
+      // only thing that says goods are aboard - and dropping one from that list
+      // strands whatever was bought, with no path back to delivering it.
+      // The good actually aboard: at CONTRACT_DELIVER an empty hold is a
+      // legitimate redirect back to the market, not a failure, so without this
+      // the test would be about that path instead.
+      const { tasks, contracts, events, scheduler: s } = arrange(
+        new UpstreamCallError("POST /ships/MINING-1/deliver: 400 Ship is in transit.", "rejected"),
+        undefined,
+        [{ symbol: "IRON_ORE", units: 10 }]
+      );
+      await seedContract(contracts);
+      await seedTask(tasks, { taskKind: "contract", phase, contractId: CONTRACT, tradeSymbol: "IRON_ORE" });
+
+      await tick(s, 6); // twice the retry limit
+
+      expect(await eventTypes(events)).not.toContain("mining_task_failed");
+      const task = await tasks.get(SHIP);
+      expect(task?.phase).toBe(phase);
+      // Counted every time: without this the assertions above are satisfied by
+      // a tick that did nothing at all.
+      expect(task?.failureCount).toBe(6);
+      expect((await detailsOf(events, "mining_tick_error"))[0].failureKind).toBe("rejected");
+    }
+  );
+
+  it("gives up on a contract task that has not bought anything yet", async () => {
+    // The other side of the same rule: before a purchase there is nothing to
+    // strand, so the target is abandoned and the contract released (meta#27).
+    const { tasks, contracts, events, scheduler: s } = arrange(
+      new UpstreamCallError("POST /ships/MINING-1/orbit: 400 Ship is in transit.", "rejected")
+    );
+    await seedContract(contracts);
+    await seedTask(tasks, { taskKind: "contract", phase: "CONTRACT_PURCHASE", contractId: CONTRACT, tradeSymbol: "IRON_ORE" });
+
+    await tick(s, 3);
+
+    expect(await eventTypes(events)).toContain("mining_task_failed");
+    expect((await tasks.get(SHIP))?.contractId).toBeNull();
+  });
+
+  it("a scout is never held back by cargo it cannot hold", async () => {
+    // The scheduler used to apply mining's rule - tradeSymbol !== null - to
+    // every non-contract task. That gave the right answer for a scout only
+    // because nothing sets that column on one; a row that carried it would have
+    // been retried on the same target forever, on the strength of cargo a scout
+    // cannot have. Each kind answers for itself now (meta#75 B7).
+    const { tasks, events, scheduler: s } = arrange(
+      new UpstreamCallError("POST /ships/MINING-1/orbit: 400 Ship is in transit.", "rejected")
+    );
+    await seedTask(tasks, { taskKind: "scout", phase: "SCOUT_TRAVEL", tradeSymbol: "IRON_ORE" });
+
+    await tick(s, 3); // the retry limit
+
+    expect(await eventTypes(events)).toContain("mining_task_failed");
+    expect((await tasks.get(SHIP))?.asteroidWaypoint).toBeNull();
   });
 
   it("our own code throwing is `internal`, and stays on the target's budget", async () => {
