@@ -156,7 +156,10 @@ describe("automation-service contract loop (meta#11)", () => {
         respondJson(res, 200, { agent: { credits: 100_000 + contract.terms.payment.onFulfilled }, contract });
       } else if (req.url === "/ships/MINING-1/purchase") {
         if (failPurchase) {
-          respondJson(res, 500, { error: "simulated purchase failure" });
+          // The game refusing the purchase (not enough credits, market gone),
+          // which is what "this contract target is not working out" looks
+          // like. A 5xx would be an outage and must not burn the retry budget.
+          respondJson(res, 400, { error: { message: "Market does not sell IRON_ORE." } });
           return;
         }
         const existing = ship.cargo.inventory.find((i) => i.symbol === parsed.symbol);

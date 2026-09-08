@@ -7,6 +7,71 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Upstream failures are classified, and the retry limit means what it says
+
+`mine.failureRetryLimit` answers one question — "is this target not working
+out?" — but every failure used to count toward it. `UpstreamCallError` carried
+a status code whose only reader was an error handler no route could reach, so
+an expired M2M token, st-gateway holding no SpaceTraders credential, a
+fleet-service outage and the game refusing an action in this ship state were
+all the same event to the scheduler: three or four ticks each, then every task
+in the fleet abandoned and re-planned onto targets that were never the problem.
+That is the failure mode auth-design.md decision 19 describes, and it is worst
+exactly when it is least recoverable, because a re-plan needs the same upstream
+that is down.
+
+`gameClients.ts` now classifies each failure once, at the call, into an
+`UpstreamFailureKind`: `unavailable`, `credentials`, `malformed` or `rejected`;
+`scheduler.ts` adds `internal` for "our own code threw". Every failure still
+counts — their sum is what lets the `consecutive_failures` alarm name a stuck
+ship whatever is stucking it — but on *two* counters, against two budgets.
+`rejected`, `malformed` and `internal` spend `mine.failureRetryLimit`,
+unchanged. `unavailable` and `credentials` spend a hundred times that on
+`ship_task.unrelated_failure_count`, a new column. Cargo in the hold still
+outranks all five.
+
+Two counters and not one, because one number cannot be spent against two
+budgets: five ticks of an outage would leave the next genuine refusal one
+strike from abandoning a target it had never once failed against — and a
+recovery is precisely when refusals arrive, since the game state moved on while
+the ship sat there. That is the same fleet-wide storm, one tick later.
+
+300 ticks is at least 25 minutes and can be hours: a dropped timer fire during
+an in-flight tick and the 15s call timeout both stretch it, and the retry-limit
+knob goes to 20. All of them outlast a deploy, a restart or a credential
+refresh, which is the whole requirement.
+
+A failed tick also stopped stamping `ship_task.updated_at`, via a new
+`recordFailure`. `ship_idle` measures from that column, so writing it on every
+failure hid the longest stuck state this service can enter behind the one check
+whose job is to notice it. That masking lasted three ticks before; with the new
+budget it would have lasted the whole outage.
+
+Not "retry forever", because an upstream can be permanently broken in a way
+that looks transient — navigation-service serves a deterministic 500 for a
+corrupt cached market until an operator clears it, and a scout has no cargo at
+stake to justify sitting on it for the rest of the run.
+
+Not a *shorter* fuse for `malformed` either, tempting as it is for a request
+that will fail identically forever: fleet-service and agent-service answer
+`404` for any unrouted path, so a rolling deploy produces one, and it is
+indistinguishable from a permanently wrong request at every layer. Zero retries
+there would abandon the whole fleet on a single bad tick — the same failure
+reached another way.
+
+Two boundaries use documented upstream behaviour on top of the status, both as
+bonus precision rather than as the rule. `400` means the game said no unless
+the body carries `error.fields`, which only fleet-service emits (agent-service
+answers plain text, navigation-service RFC 9457). `503` means a missing
+credential only when the message says so — the sole difference between
+st-gateway's two 503s, and a signal that does not survive navigation-service,
+which collapses every upstream 5xx into its own `502`. Both gaps cost a
+`failureKind` label, never safety.
+
+Two existing tests simulated a bad target with a `500`, which the taxonomy
+exposed as testing something else: they proved "reassignment happens" from an
+outage that now correctly doesn't cause one. Both use a `400` game refusal now.
+
 ## The test suite stops racing a wall clock
 
 Both loops now expose a way to force exactly one tick, and tests use it instead

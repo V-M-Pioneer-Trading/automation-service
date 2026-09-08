@@ -11,7 +11,7 @@ import { ServiceConfig, configFromEnv, resolveM2MTokenSource } from "./config";
 import { ContractRepo } from "./contractRepo";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
-import { createGameClients, UpstreamCallError } from "./gameClients";
+import { createGameClients } from "./gameClients";
 import { isKnobClass, KnobClass, KnobClassForbiddenError, KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
 import { createLocalM2MTokenSource, M2MTokenSource } from "./m2mToken";
 import { MarketIntelRepo } from "./marketIntelRepo";
@@ -499,9 +499,14 @@ export function createApp(options: AppOptions) {
 
   app.use("/api/automation/v1", api);
 
+  // No route here calls an upstream service: every one of them reads Postgres
+  // or flips in-memory state, and the game is only ever touched from a
+  // scheduler tick, whose failures are classified and handled there. This used
+  // to re-serve an `UpstreamCallError`'s status code, which was unreachable and
+  // told a reader the opposite — that an operator's 401 might be the fleet's
+  // own expired token rather than their session.
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    const status = err instanceof UpstreamCallError ? err.statusCode : 500;
-    res.status(status).json({ error: { message: err.message || "internal error" } });
+    res.status(500).json({ error: { message: err.message || "internal error" } });
   });
 
   // Metrics and anomaly detection run independent of autopilot arm/abort by

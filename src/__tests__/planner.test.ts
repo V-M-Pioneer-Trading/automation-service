@@ -88,7 +88,11 @@ describe("automation-service planner (meta#10)", () => {
 
     fleet = startStubServer((_req, _body, res) => {
       if (fleetShouldFail) {
-        respondJson(res, 500, { error: "upstream boom" });
+        // A game refusal, not a 500: the retry limit is about "is this target
+        // working out?", and only the game saying no is evidence about the
+        // target. A 5xx classifies as `unavailable` and deliberately does not
+        // count, so simulating a bad target with one would test nothing.
+        respondJson(res, 400, { error: { message: "Ship is not currently in orbit." } });
         return;
       }
       respondJson(res, 404, { error: "unused in this suite" });

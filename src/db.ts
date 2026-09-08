@@ -46,6 +46,14 @@ export async function migrate(pool: Pool): Promise<KnobClamp[]> {
   // failure_count drives reassignment away from a target that keeps erroring.
   await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS asteroid_waypoint TEXT`);
   await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS failure_count INTEGER NOT NULL DEFAULT 0`);
+  // Failures that say nothing about the target — an unreachable upstream, a
+  // rejected credential — are counted separately, because they are spent
+  // against a much longer budget. One counter cannot be spent against two
+  // budgets: three ticks of an outage would otherwise leave the next genuine
+  // refusal one strike from abandoning a target it had never failed against.
+  await pool.query(
+    `ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS unrelated_failure_count INTEGER NOT NULL DEFAULT 0`
+  );
 
   // Contract loop (meta#11): a ship's task can be either 'mining' (the existing
   // phases above) or 'contract' (phases in contractTask.ts), sharing the same

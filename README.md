@@ -372,10 +372,44 @@ stale what the other calls fresh.
 
 ### When a target keeps failing
 
-After `mine.failureRetryLimit` consecutive failures the ship is reset for a
-fresh assignment, **unless it's holding cargo it hasn't disposed of**, in which
-case it keeps retrying rather than stranding it. An abandoned contract is
+`mine.failureRetryLimit` answers exactly one question — "is this target not
+working out?" — and most failures are no answer to it. Every failure is
+classified once, where it happens, and how long the ship persists with its
+target follows from the verdict:
+
+| Verdict | What it means | Patience |
+|---|---|---|
+| `rejected` | The game understood the action and refused it in this state: cooldown, wrong nav status, not enough credits | `mine.failureRetryLimit` |
+| `malformed` | We asked for something the service would not accept or could not find: a bug, a stale config, a waypoint that is gone | `mine.failureRetryLimit` |
+| `internal` | Our own code threw — a corrupt task row, a contract that vanished | `mine.failureRetryLimit` |
+| `unavailable` | The request never reached the game: network, timeout, 5xx, gateway backpressure | 100× that |
+| `credentials` | Our M2M token was rejected, or st-gateway holds no SpaceTraders credential | 100× that |
+
+The first three are evidence about the target. The last two are evidence about
+the fleet's plumbing, and are counted on their own tally, so an outage never
+eats into the patience the next real refusal needs — otherwise a fleet coming
+back from one would abandon every target at once, on the first "ship is in
+transit" of the recovery.
+
+100× is 300 ticks at the default retry limit: at least 25 minutes, nearer 75
+against a service that hangs rather than refusing (a tick that waits out the
+15s call timeout is still one tick), and hours if the limit is raised. Any of
+those outlasts a deploy, a restart or a credential refresh, which is all it has
+to do. It is a finite number rather than "wait forever" because an upstream can
+be permanently broken in a way that looks transient — navigation-service serves
+a deterministic 500 for a market whose cached row it cannot parse, and nothing
+here asks it to refresh — and a scout with no cargo aboard would otherwise sit
+on that one waypoint for the rest of the run.
+
+Reassignment resets the ship for a fresh assignment, **unless it's holding
+cargo it hasn't disposed of**, in which case it keeps retrying rather than
+stranding it — true whichever verdict applies. An abandoned contract is
 released back to the pool rather than left claimed by a ship that gave up.
+
+Every failure is logged as `mining_tick_error` carrying its verdict, and a
+failed tick no longer touches the task's `updated_at` — a failure is the
+absence of progress, and stamping it there was hiding a stuck ship from the
+one check whose job is to notice one.
 
 ---
 

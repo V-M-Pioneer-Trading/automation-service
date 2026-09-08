@@ -28,6 +28,7 @@ const task = (overrides: Partial<ShipTask> = {}): ShipTask => ({
   marketWaypoint: null,
   asteroidWaypoint: "X1-BELT",
   failureCount: 0,
+  unrelatedFailureCount: 0,
   contractId: null,
   destinationWaypoint: null,
   unitsDelivered: 0,

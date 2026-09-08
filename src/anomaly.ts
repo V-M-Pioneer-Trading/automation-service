@@ -143,7 +143,9 @@ export class AnomalyChecker {
     const [idle, earnings, failures, errorRate, marketStale] = await Promise.all([
       miningActive && task !== null ? this.checkShipIdle(shipSymbol, task, now) : Promise.resolve(null),
       this.checkEarningsStalled(now),
-      this.checkConsecutiveFailures(shipSymbol, task?.failureCount ?? 0),
+      // The sum, not either counter: this check's question is "has this ship
+      // stopped getting anywhere", and it does not care whose fault that is.
+      this.checkConsecutiveFailures(shipSymbol, (task?.failureCount ?? 0) + (task?.unrelatedFailureCount ?? 0)),
       this.checkErrorRate(now),
       this.checkMarketStaleness(now),
     ]);
