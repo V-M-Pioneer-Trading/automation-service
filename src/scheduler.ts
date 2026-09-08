@@ -417,6 +417,15 @@ export class FleetScheduler {
         });
         return;
       }
+      default: {
+        // Unlike `advance` and `cargoAtStake`, this switch returns void, so
+        // TypeScript is content to let a missing arm fall straight through: a
+        // new task kind would be planned, match nothing, save nothing, and
+        // leave the ship idle to be replanned every tick with no event and no
+        // error. This makes the omission a compile error instead.
+        const unreachable: never = assignment;
+        throw new Error(`planner returned an unknown assignment kind: ${JSON.stringify(unreachable)}`);
+      }
     }
   }
 

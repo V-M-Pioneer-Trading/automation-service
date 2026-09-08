@@ -232,68 +232,59 @@ describe("how each task kind starts", () => {
     survey: { signature: "SIG", symbol: "X1-OLD", deposits: [], expiration: "", size: "MODERATE" },
   });
 
-  const carriedOver = (t: ShipTask) => ({
-    failureCount: t.failureCount,
-    unrelatedFailureCount: t.unrelatedFailureCount,
-    cycleRevenue: t.cycleRevenue,
-    cycleTravelDistance: t.cycleTravelDistance,
-    cycleUnitsExtracted: t.cycleUnitsExtracted,
-    cycleStartedAt: t.cycleStartedAt,
-    survey: t.survey,
-  });
-
-  const blank = {
+  /**
+   * Every column, not a subset. `toMatchObject` ignores extras, which is how a
+   * `waitingUntil` or a stray `marketWaypoint` on a fresh assignment slips
+   * through — a task that starts already waiting never dispatches anything.
+   */
+  const opening = (overrides: Partial<ShipTask>): ShipTask => ({
+    shipSymbol: finished.shipSymbol,
+    taskKind: "mining",
+    phase: "TRAVEL_TO_ASTEROID",
+    waitingUntil: null,
+    survey: null,
+    tradeSymbol: null,
+    marketWaypoint: null,
+    asteroidWaypoint: null,
     failureCount: 0,
     unrelatedFailureCount: 0,
+    contractId: null,
+    destinationWaypoint: null,
+    unitsDelivered: 0,
+    cycleStartedAt: null,
     cycleRevenue: 0,
     cycleTravelDistance: 0,
     cycleUnitsExtracted: 0,
-    cycleStartedAt: null,
-    survey: null,
-  };
+    updatedAt: finished.updatedAt,
+    ...overrides,
+  });
 
   it("mining: the field to work, and nothing carried over", () => {
-    const started = startMiningTask(finished, "X1-BELT");
-    expect(started).toMatchObject({
-      taskKind: "mining",
-      phase: "TRAVEL_TO_ASTEROID",
-      asteroidWaypoint: "X1-BELT",
-      // Cleared: a mining task's tradeSymbol is what it has extracted, and it
-      // has extracted nothing yet — which is also what makes it usable as
-      // "is cargo at stake?".
-      tradeSymbol: null,
-      contractId: null,
-      unitsDelivered: 0,
-    });
-    expect(carriedOver(started)).toEqual(blank);
+    // tradeSymbol cleared: for mining it is what the ship has extracted, and it
+    // has extracted nothing yet - which is also what makes it usable as
+    // "is cargo at stake?".
+    expect(startMiningTask(finished, "X1-BELT")).toEqual(opening({ asteroidWaypoint: "X1-BELT" }));
   });
 
   it("scout: the market to refresh, in the column every kind uses for its target", () => {
-    const started = startScoutTask(finished, "X1-MARKET-2");
-    expect(started).toMatchObject({
-      taskKind: "scout",
-      phase: "SCOUT_TRAVEL",
-      asteroidWaypoint: "X1-MARKET-2",
-      tradeSymbol: null,
-      contractId: null,
-    });
-    expect(carriedOver(started)).toEqual(blank);
+    expect(startScoutTask(finished, "X1-MARKET-2")).toEqual(
+      opening({ taskKind: "scout", phase: "SCOUT_TRAVEL", asteroidWaypoint: "X1-MARKET-2" })
+    );
   });
 
   it("contract: four columns meaning something other than they do for mining", () => {
-    const started = startContractTask(finished, contract);
-    expect(started).toMatchObject({
-      taskKind: "contract",
-      phase: "CONTRACT_TRAVEL_TO_MARKET",
-      // The deliverable, set before anything is bought (meta#27) — which is why
-      // contractCargoAtStake reads the phase and not this.
-      tradeSymbol: "IRON_ORE",
-      // Where to buy, not where to sell.
-      marketWaypoint: "X1-MARKET",
-      destinationWaypoint: "X1-DEST",
-      contractId: "C-1",
-      unitsDelivered: 0,
-    });
-    expect(carriedOver(started)).toEqual(blank);
+    expect(startContractTask(finished, contract)).toEqual(
+      opening({
+        taskKind: "contract",
+        phase: "CONTRACT_TRAVEL_TO_MARKET",
+        // The deliverable, set before anything is bought (meta#27) - which is
+        // why contractCargoAtStake reads the phase and not this.
+        tradeSymbol: "IRON_ORE",
+        // Where to buy, not where to sell.
+        marketWaypoint: "X1-MARKET",
+        destinationWaypoint: "X1-DEST",
+        contractId: "C-1",
+      })
+    );
   });
 });

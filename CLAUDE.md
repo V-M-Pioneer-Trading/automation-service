@@ -149,7 +149,7 @@ for callers who look there first.
   is a different thing: when to write, not what.
 
   What is left of meta#75 B7 is the row itself — three kinds sharing one
-  17-field shape. That needs a migration and a change to the
+  18-field shape. That needs a migration and a change to the
   `/autopilot/ships/:s` response.
 - **A failed tick must not stamp `updated_at`.** `ShipTaskRepo.recordFailure`
   writes the counters and nothing else, because `updated_at` is what
@@ -513,9 +513,12 @@ is the Clerk `sub` only.
   union to `shipTaskRepo.ts`, a `PHASE_AFTER_WAIT` entry per waiting phase, an
   `advance*Task`, a `start*Task` and a `*CargoAtStake` beside it, a `case` in
   each of `FleetScheduler.advance`, `cargoAtStake` and `assignTarget`, and a
-  `resetDatabase` consideration if they need a knob to compete. The switches
-  are exhaustive, so the compiler asks for the cases; nothing asks for the three
-  functions except this line.
+  `resetDatabase` consideration if they need a knob to compete. All three
+  switches are exhaustive, but not for the same reason: the first two because
+  they return a value, the third because it carries a `never` guard — a `void`
+  switch would otherwise let a missing arm fall through and leave the ship
+  silently unassigned, replanned every tick with nothing logged. Nothing asks
+  for the three functions except this line.
 - Update README (human-facing) and this file (implementation) together with
   the code; add a CHANGELOG entry for anything a reviewer of a later PR would
   want explained.

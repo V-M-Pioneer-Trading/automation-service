@@ -7,6 +7,31 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Each task kind writes its own opening shape too
+
+The entry below stopped the scheduler *interpreting* per-kind column meanings,
+and named `assignTarget` as the mirror half it was leaving. That half: the
+scheduler wrote the opening task inline per kind — `tradeSymbol`,
+`marketWaypoint`, `destinationWaypoint` and the starting phase — so the module
+deciding that `tradeSymbol` is the deliverable for a contract and the extracted
+good for mining was the scheduler, while the modules reading it were the FSMs.
+
+Each kind exports a `start*Task` now, built on `idleTask`, and `assignTarget`
+calls one of the three. The scheduler keeps the transaction a contract
+assignment is written inside (meta#30) — the task and the contract's `assigned`
+status have to land together — which is *when* to write, not *what*.
+
+`assignTarget`'s switch also gained an exhaustiveness guard. Unlike `advance`
+and `cargoAtStake` it returns `void`, so TypeScript was content to let a missing
+arm fall straight through: a new task kind would have been planned, matched
+nothing, saved nothing, and left the ship idle to be replanned every tick with
+no event and no error. The contributor checklist had started claiming the
+compiler catches this, which it did not.
+
+What remains of meta#75 B7 is the row itself: three kinds sharing one 18-field
+shape, which needs a migration and a change to the `/autopilot/ships/:s`
+response.
+
 ## Each task kind says what it means by the shared columns
 
 Three task kinds share one `ship_task` row, and they mean different things by
@@ -20,15 +45,11 @@ difference in order to decide something: whether abandoning a target would
 strand cargo, worked out by enumerating contract phase names inline. A scheduler
 reading FSM internals to make a decision the FSMs are the authority on.
 
-`assignTarget` was the mirror half — it wrote `tradeSymbol`,
-`marketWaypoint` and the opening phase per kind inline, making the scheduler the
-*author* of the meanings the FSMs interpret — and it now calls a `start*Task`
-per kind instead. Each module owns how its tasks begin, proceed, and interpret
-the shared columns; the scheduler owns when to write and the transaction a
-contract assignment goes inside (meta#30), which is a different thing.
-
-What remains of B7 is the row itself: three kinds sharing one 17-field shape,
-which needs a migration and a change to the `/autopilot/ships/:s` response.
+`assignTarget` is the mirror half and is deliberately left: it writes
+`tradeSymbol`, `marketWaypoint` and the opening phase per kind inline, so the
+scheduler is still the *author* of the meanings the FSMs now interpret. Fixing
+that means the FSM modules construct their own opening task, which is a bigger
+change and closer to the row split the issue actually asks for.
 
 Each FSM module exports its own predicate now — `miningCargoAtStake`,
 `contractCargoAtStake`, `scoutCargoAtStake` — and the scheduler switches over
