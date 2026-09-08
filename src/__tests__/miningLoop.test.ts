@@ -2,21 +2,11 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
+import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
-import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
-
-class FakeClock implements Clock {
-  constructor(private current: Date) {}
-  now(): Date {
-    return this.current;
-  }
-  advance(ms: number) {
-    this.current = new Date(this.current.getTime() + ms);
-  }
-}
 
 /** Minimal mutable SpaceTraders-shaped ship the agent-service stub serves. */
 function makeShip(overrides: Record<string, unknown> = {}) {
@@ -269,29 +259,32 @@ describe("automation-service mining loop", () => {
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
-      schedulerIntervalMs: 15,
+      schedulerIntervalMs: 100_000, // never fires on its own; forceFleetTick drives every tick
       replanIntervalMs: 300_000,
     });
     gateways.push(gateway);
     return gateway;
   };
 
-  const waitForPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, timeoutMs = 2000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  /** Run the fleet loop exactly `times`, in place of sleeping and hoping. */
+  const tick = async (gateway: ReturnType<typeof createTestApp>, times = 1) => {
+    for (let t = 0; t < times; t++) await gateway.locals.forceFleetTick();
+  };
+
+  const waitForPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.phase === phase) return res.body.task;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error(`timed out waiting for phase ${phase}`);
   };
 
-  const waitForWaiting = async (gateway: ReturnType<typeof createTestApp>, timeoutMs = 2000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  const waitForWaiting = async (gateway: ReturnType<typeof createTestApp>, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.waitingUntil !== null) return res.body.task;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error("timed out waiting for a wait to be set");
   };
@@ -303,15 +296,14 @@ describe("automation-service mining loop", () => {
   const waitForNewWait = async (
     gateway: ReturnType<typeof createTestApp>,
     previousWaitingUntil: string | null,
-    timeoutMs = 2000
+    maxTicks = 200
   ) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.waitingUntil !== null && res.body.task.waitingUntil !== previousWaitingUntil) {
         return res.body.task;
       }
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error("timed out waiting for a new wait to be set");
   };
@@ -408,7 +400,10 @@ describe("automation-service mining loop", () => {
     await waitForPhase(gateway, "SURVEY"); // pause still lets this one wait resolve
 
     const callsAfterResolve = fleet.calls.length;
-    await new Promise((r) => setTimeout(r, 150)); // several scheduler ticks' worth of real time
+    // Ticks, not a sleep. Sleeping proved only that time passed; the assertion
+    // below is that the loop *ran and chose not to dispatch*, which needs it to
+    // have actually run.
+    await tick(gateway, 5);
     expect(fleet.calls.length).toBe(callsAfterResolve); // no new action dispatched while paused and idle
 
     await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
@@ -432,7 +427,7 @@ describe("automation-service mining loop", () => {
     const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
     expect(task.phase).toBe("SURVEY"); // resumed, not reset to TRAVEL_TO_ASTEROID
 
-    await new Promise((r) => setTimeout(r, 60));
+    await tick(restarted, 5);
     // Never re-dispatches orbit/navigate (already-completed steps) on resume.
     const dispatchedAgain = fleet.calls
       .slice(callsBeforeRestart)
@@ -469,10 +464,14 @@ describe("automation-service mining loop", () => {
     const gateway = app();
 
     await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
-    await new Promise((r) => setTimeout(r, 30)); // let the first tick start (and block on the slow getShip call)
-    await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
 
-    await new Promise((r) => setTimeout(r, 400)); // let the delayed response land and the tick finish
+    // Start a tick without awaiting it: it blocks on the slow getShip call, so
+    // the abort below genuinely lands mid-flight. This used to be two sleeps
+    // sized by guess — 30ms to hope the tick had started, 400ms to hope it had
+    // finished. Holding the promise makes both exact.
+    const inFlight = gateway.locals.forceFleetTick();
+    await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
+    await inFlight;
 
     expect(fleet.calls.some((c) => c.url === "/ships/MINING-1/orbit")).toBe(true); // dispatch really happened
 
@@ -521,13 +520,13 @@ describe("automation-service mining loop", () => {
 
     // Sells IRON_ORE, then discovers this market won't buy the remaining
     // COPPER_ORE and re-shops instead of erroring (mining_market_reselect).
-    await waitForPhase(gateway, "TRAVEL_TO_MARKET", 4000);
+    await waitForPhase(gateway, "TRAVEL_TO_MARKET");
 
     // Second market stop: COPPER_ORE's market — cargo empties, cycle completes.
     await waitForWaiting(gateway);
     clock.advance(1000);
     await waitForPhase(gateway, "SELL");
-    await waitForPhase(gateway, "TRAVEL_TO_ASTEROID", 6000);
+    await waitForPhase(gateway, "TRAVEL_TO_ASTEROID");
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
     const eventTypes = eventsRes.body.events.map((e: { type: string }) => e.type).reverse();

@@ -2,18 +2,11 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
+import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
-import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
-
-class FakeClock implements Clock {
-  constructor(private current: Date) {}
-  now(): Date {
-    return this.current;
-  }
-}
 
 function makeShip(overrides: Record<string, unknown> = {}) {
   return {
@@ -132,7 +125,7 @@ describe("automation-service shadow mode (meta#21)", () => {
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
-      schedulerIntervalMs: 15,
+      schedulerIntervalMs: 100_000, // never fires on its own; forceFleetTick drives every tick
       replanIntervalMs: 300_000,
     });
     gateways.push(gateway);
@@ -161,7 +154,7 @@ describe("automation-service shadow mode (meta#21)", () => {
     while (Date.now() < deadline && shadowEvents < 2) {
       const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
       shadowEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "planner_shadow_assignment").length;
-      if (shadowEvents < 2) await new Promise((r) => setTimeout(r, 5));
+      if (shadowEvents < 2) await gateway.locals.forceFleetTick();
     }
     expect(shadowEvents).toBeGreaterThanOrEqual(2); // the cycle replays every tick, not just once
 
@@ -189,7 +182,7 @@ describe("automation-service shadow mode (meta#21)", () => {
 
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline && fleet.calls.length === 0) {
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     // Live mode really does dispatch a ship-action call — specifically the
     // orbit dispatch toward the newly (live-)assigned target, not just any

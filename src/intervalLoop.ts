@@ -53,7 +53,20 @@ export class IntervalLoop {
     if (this.inFlight !== null) await this.inFlight;
   }
 
+  /**
+   * Throws on a stopped loop rather than doing nothing.
+   *
+   * `run()` returns early when stopped, so this used to drain the in-flight
+   * tick and then silently skip the one it promised to run: a test that called
+   * `stop()` and then forced a tick passed without ever ticking. That is the
+   * exact failure mode this method exists to prevent, so it fails loudly
+   * instead. Drive a loop manually by giving it an interval long enough never
+   * to fire, not by stopping it.
+   */
   async runOnce(): Promise<void> {
+    if (this.stopRequested) {
+      throw new Error("IntervalLoop.runOnce() on a stopped loop: it would not tick");
+    }
     if (this.inFlight !== null) await this.inFlight;
     await this.run();
   }

@@ -2,21 +2,11 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
+import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
-import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
-
-class FakeClock implements Clock {
-  constructor(private current: Date) {}
-  now(): Date {
-    return this.current;
-  }
-  advance(ms: number) {
-    this.current = new Date(this.current.getTime() + ms);
-  }
-}
 
 function makeShip(overrides: Record<string, unknown> = {}) {
   return {
@@ -249,40 +239,37 @@ describe("automation-service contract loop (meta#11)", () => {
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
-      schedulerIntervalMs: 15,
+      schedulerIntervalMs: 100_000, // never fires on its own; forceFleetTick drives every tick
       replanIntervalMs: 300_000,
     });
     gateways.push(gateway);
     return gateway;
   };
 
-  const waitForEvent = async (gateway: ReturnType<typeof createTestApp>, type: string, timeoutMs = 6000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  const waitForEvent = async (gateway: ReturnType<typeof createTestApp>, type: string, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
       const found = res.body.events.find((e: { type: string }) => e.type === type);
       if (found !== undefined) return found;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error(`timed out waiting for event ${type}`);
   };
 
-  const waitForTaskPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, timeoutMs = 6000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  const waitForTaskPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.phase === phase) return res.body.task;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error(`timed out waiting for phase ${phase}`);
   };
 
-  const waitForWaiting = async (gateway: ReturnType<typeof createTestApp>, timeoutMs = 3000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  const waitForWaiting = async (gateway: ReturnType<typeof createTestApp>, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.waitingUntil !== null) return res.body.task;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error("timed out waiting for a wait to be set");
   };
@@ -474,7 +461,7 @@ describe("automation-service contract loop (meta#11)", () => {
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
-      schedulerIntervalMs: 15,
+      schedulerIntervalMs: 100_000, // never fires on its own; forceFleetTick drives every tick
       replanIntervalMs: 300_000,
     });
     gateways.push(gateway);
@@ -523,7 +510,7 @@ describe("automation-service contract loop (meta#11)", () => {
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
-      schedulerIntervalMs: 15,
+      schedulerIntervalMs: 100_000, // never fires on its own; forceFleetTick drives every tick
       replanIntervalMs: 300_000,
     });
     gateways.push(gateway);

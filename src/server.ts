@@ -515,11 +515,18 @@ export function createApp(options: AppOptions) {
     await Promise.all([metricsScheduler?.stop(), anomalyScheduler?.stop()]);
   };
 
-  // Test-only escape hatch from the anomaly scheduler's real interval — lets
-  // a test force exactly one deterministic tick instead of racing FakeClock
-  // jumps against wall-clock ticks.
+  // Test-only escape hatches from the real intervals — a test forces exactly
+  // one deterministic tick instead of racing FakeClock jumps against
+  // wall-clock ticks and then polling to find out what happened.
+  //
+  // Give the scheduler an interval long enough never to fire rather than
+  // stopping it: `runOnce()` on a stopped loop throws, deliberately, because
+  // silently not ticking is the bug these exist to prevent.
   app.locals.forceAnomalyTick = async () => {
     await anomalyScheduler?.forceTick();
+  };
+  app.locals.forceFleetTick = async () => {
+    await scheduler?.forceTick();
   };
 
   return app;

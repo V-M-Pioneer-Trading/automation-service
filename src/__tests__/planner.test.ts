@@ -2,21 +2,11 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
+import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer, TEST_SERVICE_SECRET } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
-import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
-
-class FakeClock implements Clock {
-  constructor(private current: Date) {}
-  now(): Date {
-    return this.current;
-  }
-  advance(ms: number) {
-    this.current = new Date(this.current.getTime() + ms);
-  }
-}
 
 function makeShip(overrides: Record<string, unknown> = {}) {
   return {
@@ -151,19 +141,23 @@ describe("automation-service planner (meta#10)", () => {
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
-      schedulerIntervalMs: 15,
+      schedulerIntervalMs: 100_000, // never fires on its own; forceFleetTick drives every tick
       replanIntervalMs: 300_000,
     });
     gateways.push(gateway);
     return gateway;
   };
 
-  const waitForAssignment = async (gateway: ReturnType<typeof createTestApp>, timeoutMs = 2000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  /** Run the fleet loop exactly `times`, in place of sleeping and hoping. */
+  const tick = async (gateway: ReturnType<typeof createTestApp>, times = 1) => {
+    for (let t = 0; t < times; t++) await gateway.locals.forceFleetTick();
+  };
+
+  const waitForAssignment = async (gateway: ReturnType<typeof createTestApp>, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.asteroidWaypoint !== null) return res.body.task;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error("timed out waiting for a planner assignment");
   };
@@ -344,8 +338,10 @@ describe("automation-service planner (meta#10)", () => {
 
     await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
-    // Give the scheduler a few ticks to run and confirm it never assigns.
-    await new Promise((r) => setTimeout(r, 200));
+    // Give the scheduler a few ticks and confirm it never assigns. Ticks, not a
+    // sleep: the point is that the loop *ran* and still declined, which sleeping
+    // never established.
+    await tick(gateway, 3);
 
     const task = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
     expect(task.asteroidWaypoint).toBeNull();
@@ -366,7 +362,7 @@ describe("automation-service planner (meta#10)", () => {
     await request(gateway).put("/api/automation/v1/planner/knobs/mine.taskWeight").set("Authorization", bearer()).send({ value: 0 });
     await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
-    await new Promise((r) => setTimeout(r, 200));
+    await tick(gateway, 3);
 
     // Pre-fix a zero-weight field scored 0, which still beat "nothing else on
     // offer" and got assigned — the weight demoted mining instead of disabling it.
@@ -386,23 +382,21 @@ describe("automation-service planner (meta#10)", () => {
 
     await waitForAssignment(gateway); // first assignment happens immediately
 
-    const deadline = Date.now() + 3000;
     let failedEventSeen = false;
-    while (Date.now() < deadline && !failedEventSeen) {
+    for (let t = 0; t < 200 && !failedEventSeen; t++) {
       const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
       failedEventSeen = eventsRes.body.events.some((e: { type: string }) => e.type === "mining_task_failed");
-      if (!failedEventSeen) await new Promise((r) => setTimeout(r, 20));
+      if (!failedEventSeen) await gateway.locals.forceFleetTick();
     }
     expect(failedEventSeen).toBe(true);
 
     // Reassignment happens on the very next tick after the failure, not a separate sweep:
     // a second planner_assignment shows up without any extra external trigger.
-    const secondAssignmentDeadline = Date.now() + 2000;
     let assignmentCount = 0;
-    while (Date.now() < secondAssignmentDeadline && assignmentCount < 2) {
+    for (let t = 0; t < 200 && assignmentCount < 2; t++) {
       const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
       assignmentCount = eventsRes.body.events.filter((e: { type: string }) => e.type === "planner_assignment").length;
-      if (assignmentCount < 2) await new Promise((r) => setTimeout(r, 20));
+      if (assignmentCount < 2) await gateway.locals.forceFleetTick();
     }
     expect(assignmentCount).toBeGreaterThanOrEqual(2);
   }, 10_000);

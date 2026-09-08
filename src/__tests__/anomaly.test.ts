@@ -2,21 +2,11 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
+import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
-import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
-
-class FakeClock implements Clock {
-  constructor(private current: Date) {}
-  now(): Date {
-    return this.current;
-  }
-  advance(ms: number) {
-    this.current = new Date(this.current.getTime() + ms);
-  }
-}
 
 function startStubServer(handler: (req: http.IncomingMessage, body: string, res: http.ServerResponse) => void) {
   const calls: { method: string; url: string; body: string }[] = [];
@@ -110,25 +100,27 @@ describe("automation-service anomaly detection (meta#15)", () => {
       : undefined;
     const gateway = createTestApp(pool, clock, mining, undefined, {
       webhookUrl: opts.noWebhook ? null : webhookUrl,
-      intervalMs: opts.intervalMs ?? 15,
+      intervalMs: opts.intervalMs ?? 100_000, // never fires on its own; forceAnomalyTick drives every tick
     });
     gateways.push(gateway);
     return gateway;
   };
 
-  const waitForAnomaly = async (gateway: ReturnType<typeof createTestApp>, type: string, timeoutMs = 2000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  const waitForAnomaly = async (gateway: ReturnType<typeof createTestApp>, type: string, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
       const found = res.body.anomalies.find((a: { type: string }) => a.type === type);
       if (found !== undefined) return found;
-      await new Promise((r) => setTimeout(r, 10));
+      await gateway.locals.forceAnomalyTick();
     }
     throw new Error(`timed out waiting for anomaly type ${type}`);
   };
 
-  const expectNoAnomaly = async (gateway: ReturnType<typeof createTestApp>, type: string, settleMs = 100) => {
-    await new Promise((r) => setTimeout(r, settleMs));
+  // `settleTicks` rather than a settle *delay*: proving a negative needs the
+  // loop to have actually had its chances, and sleeping only ever proved that
+  // wall-clock time passed on a loop that might not have ticked at all.
+  const expectNoAnomaly = async (gateway: ReturnType<typeof createTestApp>, type: string, settleTicks = 3) => {
+    for (let tick = 0; tick < settleTicks; tick++) await gateway.locals.forceAnomalyTick();
     const res = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
     expect(res.body.anomalies.some((a: { type: string }) => a.type === type)).toBe(false);
   };
@@ -514,14 +506,15 @@ describe("automation-service anomaly detection (meta#15)", () => {
     const gateway = app();
     // Anomalies are persisted one at a time, each followed by its webhook
     // delivery, so wait for both stale markets rather than the first to land.
-    const deadline = Date.now() + 2000;
     let flagged: { detail: { market: string; staleMinutes: number | null; lastRefreshedAt: string | null } }[] = [];
-    while (Date.now() < deadline && flagged.length < 2) {
+    for (let t = 0; t < 200 && flagged.length < 2; t++) {
       const digest = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
       flagged = digest.body.anomalies.filter((a: { type: string }) => a.type === "market_stale");
-      if (flagged.length < 2) await new Promise((r) => setTimeout(r, 10));
+      if (flagged.length < 2) await gateway.locals.forceAnomalyTick();
     }
-    await new Promise((r) => setTimeout(r, 50)); // a few more ticks: FRESH must stay unflagged
+    // A few more real ticks: FRESH must stay unflagged even once the loop has
+    // had further chances at it. Sleeping never gave it those chances.
+    for (let t = 0; t < 3; t++) await gateway.locals.forceAnomalyTick();
     const digest = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
     flagged = digest.body.anomalies.filter((a: { type: string }) => a.type === "market_stale");
     const byMarket = Object.fromEntries(flagged.map((a) => [a.detail.market, a.detail]));
@@ -560,8 +553,9 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
     // Persisted as soon as it's detected, before delivery (which retries with
     // backoff — default 3 attempts, ~200ms + ~400ms of delay — has finished).
+    // No sleep needed for the backoff: forcing a tick awaits it to completion,
+    // and WebhookDelivery's retries happen inside that tick.
     await waitForAnomaly(gateway, "consecutive_failures");
-    await new Promise((r) => setTimeout(r, 800)); // let the full retry/backoff sequence finish
     const attemptsAfterFailure = webhook.calls.length;
     expect(attemptsAfterFailure).toBeGreaterThanOrEqual(3); // default maxAttempts
 
@@ -573,12 +567,11 @@ describe("automation-service anomaly detection (meta#15)", () => {
     // lost permanently — the record sat in Postgres looking fine, and no later
     // firing would ever replace it.
     webhookStatus = 200;
-    const deadline = Date.now() + 3000;
     let delivered = null;
-    while (Date.now() < deadline && delivered === null) {
+    for (let t = 0; t < 200 && delivered === null; t++) {
       const digest = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
       delivered = digest.body.anomalies[0].deliveredAt;
-      if (delivered === null) await new Promise((r) => setTimeout(r, 20));
+      if (delivered === null) await gateway.locals.forceAnomalyTick();
     }
     expect(delivered).not.toBeNull();
     expect(webhook.calls.length).toBeGreaterThan(attemptsAfterFailure);

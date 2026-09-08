@@ -1,18 +1,8 @@
 import { Pool } from "pg";
-import { Clock } from "../clock";
 import { createPool, migrate } from "../db";
 import { ObservationRepo, decayWeight, weightedMean, weightedRatio } from "../observations";
+import { FakeClock } from "../testSupport/fakeClock";
 import { resetDatabase } from "../testSupport/resetDatabase";
-
-class FakeClock implements Clock {
-  constructor(private current: Date) {}
-  now(): Date {
-    return this.current;
-  }
-  advance(ms: number) {
-    this.current = new Date(this.current.getTime() + ms);
-  }
-}
 
 const PRIORS = {
   creditsPerCyclePrior: 5000,

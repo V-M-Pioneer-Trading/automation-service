@@ -40,6 +40,7 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `anomaly.ts` | `AnomalyRepo`, `AnomalyChecker` (five read-only checks) | knobs, marketIntel, fleetEvents |
 | `anomalyScheduler.ts` | Runs checks, dedupes, persists, delivers, requests replans | anomaly, webhookDelivery |
 | `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table, fleetEvents |
+| `testSupport/fakeClock.ts`, `testSupport/fakeGameClients.ts` | The adapters for the `Clock` and `GameClients` seams. One each, shared — not one per test file | test-only |
 | `shipTaskRepo.ts`, `contractRepo.ts`, `marketIntelRepo.ts`, `eventLog.ts` | Row ↔ object repos. Repos taking `Pool \| PoolClient` can join a transaction | clock |
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
 | `auth.ts` | Networkless Clerk JWT verification, service-secret guard | jose |
@@ -328,15 +329,29 @@ is the Clerk `sub` only.
 - Cleanup order matters: `afterEach` must `stopBackgroundSchedulers()` (metrics
   and anomaly loops are *not* tied to abort) and `POST /autopilot/abort` (which
   awaits the fleet loop's drain) before closing stubs or truncating.
-- Timing pitfalls that have caused flakes before: mutating state across a
-  `FakeClock` jump while the real interval is still ticking, so a background
-  tick judges a half-arranged window (set `intervalMs` high and drive with
-  `forceAnomalyTick`); polling for a phase that
-  resolves within a single tick (poll for the *next* one instead); reusing a
-  "wait is set" check across two consecutive waits (`waitForNewWait`); polling
-  for the first of several anomalies when the assertion needs all of them
-  (anomalies persist one at a time with a webhook delivery in between); a real
-  tick spanning a `FakeClock` jump (use `forceAnomalyTick`).
+- **Tests drive every tick; nothing runs on a wall clock.** Both loops are
+  created with an interval long enough never to fire, and the test advances
+  them explicitly with `app.locals.forceFleetTick()` and
+  `app.locals.forceAnomalyTick()`. Each forces exactly one tick and awaits it to
+  completion, so a `FakeClock` jump can never be straddled by a background tick
+  judging a half-arranged window.
+
+  This replaced ~20 `while (Date.now() < deadline)` polls across eight files,
+  which were the source of every flake this suite has had: `669b101` (poll and
+  tick periods aliasing, so a one-tick phase was invisible), `649d266`
+  (`credits_flat` racing a `FakeClock` jump), and a 2026-09-06 recurrence where
+  two `taskFsm` assertions failed only in full runs.
+
+  Two rules follow. **Never sleep to let the loop work** — a sleep proves time
+  passed, not that anything ticked, so an assertion that "nothing happened"
+  passes vacuously. Force the ticks instead. And **never `stop()` a loop and
+  then force a tick**: `runOnce()` throws on a stopped loop rather than
+  silently not ticking, which is the trap it exists to catch.
+- Remaining timing pitfalls: polling for a phase that resolves within a single
+  tick (poll for the *next* one instead); reusing a "wait is set" check across
+  two consecutive waits (`waitForNewWait`); polling for the first of several
+  anomalies when the assertion needs all of them (anomalies persist one at a
+  time with a webhook delivery in between).
 - Auth is never bypassed in tests: `createTestApp` supplies an ephemeral RSA
   keypair (`authTokens.ts`) and `bearer()` signs real tokens with it.
 - `contract.test.ts`'s `makeFlakyPool` proxies a `Pool` to fail exactly one
