@@ -29,8 +29,20 @@ export interface ShipTask {
    * or the moment its last one completed. See `isIdle`.
    */
   asteroidWaypoint: string | null;
-  /** Consecutive tick failures against the current target; resets on any successful tick. */
+  /**
+   * Consecutive failures that are evidence about the current target — the game
+   * refusing the action, a request it would not accept, our own code throwing.
+   * Resets on any successful tick.
+   */
   failureCount: number;
+  /**
+   * Consecutive failures that are evidence about the fleet's plumbing instead:
+   * an unreachable upstream, a rejected credential. Kept apart from
+   * `failureCount` because it is spent against a budget a hundred times longer
+   * (see `UNRELATED_FAILURE_RETRY_MULTIPLIER`), and one number cannot be spent
+   * against two budgets. Resets on any successful tick.
+   */
+  unrelatedFailureCount: number;
   /** Contract loop: the contract this task is working, and its delivery destination/progress. */
   contractId: string | null;
   destinationWaypoint: string | null;
@@ -73,6 +85,7 @@ export const idleTask = (task: ShipTask): ShipTask => ({
   destinationWaypoint: null,
   unitsDelivered: 0,
   failureCount: 0,
+  unrelatedFailureCount: 0,
   cycleStartedAt: null,
   cycleRevenue: 0,
   cycleTravelDistance: 0,
@@ -80,7 +93,7 @@ export const idleTask = (task: ShipTask): ShipTask => ({
 });
 
 const TASK_COLUMNS = `ship_symbol, task_kind, phase, waiting_until, survey, trade_symbol, market_waypoint,
-       asteroid_waypoint, failure_count, contract_id, destination_waypoint, units_delivered,
+       asteroid_waypoint, failure_count, unrelated_failure_count, contract_id, destination_waypoint, units_delivered,
        cycle_started_at, cycle_revenue, cycle_travel_distance, cycle_units_extracted, updated_at`;
 
 function rowToTask(row: {
@@ -93,6 +106,7 @@ function rowToTask(row: {
   market_waypoint: string | null;
   asteroid_waypoint: string | null;
   failure_count: number;
+  unrelated_failure_count: number;
   contract_id: string | null;
   destination_waypoint: string | null;
   units_delivered: number;
@@ -112,6 +126,7 @@ function rowToTask(row: {
     marketWaypoint: row.market_waypoint,
     asteroidWaypoint: row.asteroid_waypoint,
     failureCount: row.failure_count,
+    unrelatedFailureCount: row.unrelated_failure_count,
     contractId: row.contract_id,
     destinationWaypoint: row.destination_waypoint,
     unitsDelivered: row.units_delivered,
@@ -169,7 +184,7 @@ export class ShipTaskRepo {
        SET task_kind = $2, phase = $3, waiting_until = $4, survey = $5, trade_symbol = $6, market_waypoint = $7,
            asteroid_waypoint = $8, failure_count = $9, contract_id = $10, destination_waypoint = $11,
            units_delivered = $12, cycle_started_at = $13, cycle_revenue = $14, cycle_travel_distance = $15,
-           cycle_units_extracted = $16, updated_at = $17
+           cycle_units_extracted = $16, unrelated_failure_count = $17, updated_at = $18
        WHERE ship_symbol = $1`,
       [
         task.shipSymbol,
@@ -188,8 +203,27 @@ export class ShipTaskRepo {
         task.cycleRevenue,
         task.cycleTravelDistance,
         task.cycleUnitsExtracted,
+        task.unrelatedFailureCount,
         this.clock.now(),
       ]
+    );
+  }
+
+  /**
+   * Persists a failed tick's counters and **nothing else** — in particular not
+   * `updated_at`.
+   *
+   * A failure is the absence of progress, and `updated_at` is what the
+   * `ship_idle` check measures from, so stamping it here made a ship that had
+   * been failing for half an hour look like one that had just done something.
+   * The masking used to last the three ticks it took to abandon the target; it
+   * would now last the whole outage budget, which is exactly the stretch the
+   * check exists to notice.
+   */
+  async recordFailure(task: ShipTask): Promise<void> {
+    await this.pool.query(
+      `UPDATE ship_task SET failure_count = $2, unrelated_failure_count = $3 WHERE ship_symbol = $1`,
+      [task.shipSymbol, task.failureCount, task.unrelatedFailureCount]
     );
   }
 }

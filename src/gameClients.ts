@@ -115,8 +115,9 @@ export interface Contract {
  * - `unavailable` — the request never reached the game. Network, timeout,
  *   5xx, or gateway backpressure. Nothing about the target is wrong.
  * - `credentials` — the fleet cannot authenticate. Our M2M token was rejected
- *   (401/403), or st-gateway has no SpaceTraders credential to inject. No
- *   target and no amount of retrying fixes this; an operator has to.
+ *   (401/403), or st-gateway has no SpaceTraders credential to inject. Nothing
+ *   about the target is wrong here either; the difference from `unavailable`
+ *   is who has to act, not what the ship should do next.
  * - `malformed` — this service asked for something the upstream service would
  *   not accept or could not find: a bug, a stale configuration, or a waypoint
  *   that no longer exists.
@@ -175,8 +176,9 @@ const CREDENTIAL_UNCONFIGURED = /credential not configured/i;
 export function classifyUpstreamStatus(status: number, body = ""): UpstreamFailureKind {
   if (status === 401 || status === 403) return "credentials";
   if (status === 503 && CREDENTIAL_UNCONFIGURED.test(body)) return "credentials";
-  // 429 is the gateway's token bucket telling us to come back, not a refusal.
-  if (status === 429 || status >= 500) return "unavailable";
+  // 429 is the gateway's token bucket telling us to come back, not a refusal;
+  // 408 and 425 are a proxy talking about the connection, not about the game.
+  if (status === 408 || status === 425 || status === 429 || status >= 500) return "unavailable";
   if (status === 400) return hasValidationFields(body) ? "malformed" : "rejected";
   if (status === 409 || status === 422) return "rejected";
   if (status >= 400) return "malformed";

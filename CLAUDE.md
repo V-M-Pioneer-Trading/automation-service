@@ -94,20 +94,35 @@ other (that cycle existed once; `transaction.ts` exists to break it).
   market for mining and the procurement market for contracts; `tradeSymbol` is
   the extracted good or the deliverable. Renaming the columns means a
   migration plus a change to the `/autopilot/ships/:s` response shape.
-- **`failureCount` resets to 0 on any successful action** and increments on
-  every failed one. What the verdict changes is the *budget*: `rejected`,
-  `malformed` and `internal` spend `mine.failureRetryLimit`, while
-  `unavailable` and `credentials` spend
-  `mine.failureRetryLimit × UNRELATED_FAILURE_RETRY_MULTIPLIER`. At the limit
-  the task is abandoned via `idleTask` *unless* cargo is at stake: for mining
-  that's `tradeSymbol !== null`; for contracts it's phase
-  `CONTRACT_TRAVEL_TO_DESTINATION` or later (a purchase has happened). An
-  abandoned contract goes back to status `accepted`.
+- **Two failure counters, two budgets.** `failureCount` counts consecutive
+  failures that are evidence about the target (`rejected`, `malformed`,
+  `internal`) and is spent against `mine.failureRetryLimit`;
+  `unrelatedFailureCount` counts the ones that are evidence about the plumbing
+  (`unavailable`, `credentials`) and is spent against
+  `mine.failureRetryLimit × UNRELATED_FAILURE_RETRY_MULTIPLIER`. Both reset to
+  0 on any successful action. At either limit the task is abandoned via
+  `idleTask` *unless* cargo is at stake: for mining that's `tradeSymbol !==
+  null`; for contracts it's phase `CONTRACT_TRAVEL_TO_DESTINATION` or later (a
+  purchase has happened). An abandoned contract goes back to status `accepted`.
+
+  They are two columns and not one because one number cannot be spent against
+  two budgets. Five ticks of an outage on a shared counter leaves the next
+  genuine refusal one strike from abandoning a target it has never once failed
+  against — and a recovery is exactly when refusals arrive, because the game
+  state has moved on while the ship sat there. Fleet-wide, on the same tick.
 
   The multiplier is a number rather than "never give up" on purpose. A ship
   pinned to a permanently broken upstream answer is real — navigation-service
-  serves a deterministic 500 for a corrupt cached market until an operator
-  clears it — and a scout has no cargo at stake to justify retrying forever.
+  serves a deterministic 500 for a market whose cached row it cannot parse, and
+  nothing here ever asks it to refresh — and a scout has no cargo at stake to
+  justify retrying forever. It is a tick count, not a duration: dropped timer
+  fires and the 15s call timeout make 300 ticks anywhere from 25 minutes to a
+  few hours, all of which outlast a deploy.
+- **A failed tick must not stamp `updated_at`.** `ShipTaskRepo.recordFailure`
+  writes the counters and nothing else, because `updated_at` is what
+  `ship_idle` measures from: stamping it made a ship that had been failing for
+  half an hour look like one that had just done something. Use `save()` for a
+  state change and `recordFailure()` for a failure.
 - **The verdict, not the status code, is what anything branches on.**
   `gameClients.ts` classifies every failed call once, where the transport error
   and the response are both still in hand, into `unavailable` (never reached
@@ -314,7 +329,9 @@ carry a `failureKind` — the verdict above — so a digest can say *why* the fl
 is failing without anyone re-deriving it from a message string. That includes
 the `mining_tick_error`s written by the loop's own error callback, which are
 most of them during an outage (every `getShip` and planner call fails there,
-before any FSM runs).
+before any FSM runs) — though only `mining_task_failed` and
+`contract_discovery_error` are in `NOTABLE_EVENT_TYPES`, so the digest sees
+those two and the raw event feed carries the rest.
 
 Event `detail` must never contain a token or anything token-shaped; `actor`
 is the Clerk `sub` only.
@@ -330,7 +347,8 @@ is the Clerk `sub` only.
 - Numeric columns come back from `pg` as strings for `NUMERIC` and as numbers
   for `DOUBLE PRECISION`; the row mappers `Number(...)` everything to be safe.
 - `ship_task.updated_at` is stamped by every `save()` and is what `ship_idle`
-  measures from (together with `waiting_until`).
+  measures from (together with `waiting_until`). `recordFailure()` deliberately
+  does not stamp it — see the invariant above.
 
 ## Upstream services and SpaceTraders facts
 

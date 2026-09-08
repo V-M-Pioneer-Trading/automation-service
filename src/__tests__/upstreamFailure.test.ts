@@ -41,6 +41,8 @@ describe("classifyUpstreamStatus", () => {
     [502, "", "unavailable"],
     [504, "", "unavailable"],
     [429, "", "unavailable"], // the gateway's token bucket, not a refusal
+    [408, "", "unavailable"], // a proxy talking about the connection, not the game
+    [425, "", "unavailable"],
     [400, '{"error":{"message":"Ship is not currently docked."}}', "rejected"],
     [409, "", "rejected"], // cooldown
     [422, "", "rejected"],
@@ -107,14 +109,19 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     await tasks.save({ ...base, taskKind: "mining", phase: "TRAVEL_TO_ASTEROID", asteroidWaypoint: "X1-BELT", ...overrides });
   };
 
-  /** Every tick's first dispatch (`orbit`, on the way to the belt) fails with `err`. */
-  const arrange = (err: unknown, override?: GameClients) => {
+  /**
+   * Every tick's first dispatch (`orbit`, on the way to the belt) fails. `err`
+   * is either the one failure to throw every time, or a function of the tick
+   * number for the cases about a run of failures changing character.
+   */
+  const arrange = (err: unknown | ((tick: number) => unknown), override?: GameClients) => {
+    let n = 0;
     const clients =
       override ??
       fakeGameClients({
         getShip: async () => ship(),
         orbit: async () => {
-          throw err;
+          throw typeof err === "function" ? (err as (tick: number) => unknown)(n++) : err;
         },
       });
     const tasks = new ShipTaskRepo(pool, clock);
@@ -167,8 +174,10 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     expect(task?.asteroidWaypoint).toBe("X1-BELT"); // still working the same target
     expect(await eventTypes(events)).not.toContain("mining_task_failed");
     // It still counts - that is what lets the consecutive-failures alarm name
-    // this ship - it just counts against a budget a hundred times longer.
-    expect(task?.failureCount).toBe(10);
+    // this ship - but on its own counter, against a budget a hundred times
+    // longer. The target's own budget is untouched.
+    expect(task?.unrelatedFailureCount).toBe(10);
+    expect(task?.failureCount).toBe(0);
     const errors = await detailsOf(events, "mining_tick_error");
     expect(errors.length).toBeGreaterThanOrEqual(10);
     expect(errors[0].failureKind).toBe("unavailable");
@@ -238,6 +247,42 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     await tick(s, 2);
     expect(await eventTypes(events)).toContain("mining_task_failed");
     expect((await detailsOf(events, "mining_task_failed"))[0].failureKind).toBe("malformed");
+  });
+
+  it("an outage does not eat into the budget the next real refusal needs", async () => {
+    // The whole reason there are two counters. One number spent against two
+    // budgets abandons the target on the *first* refusal after an outage, which
+    // is exactly the shape of a recovery: the ship comes back to a game state
+    // that has moved on, and fleet-service's first answer is "ship is in
+    // transit". After a long enough outage every ship in the fleet would
+    // abandon its target on the same tick - the storm this all exists to stop.
+    const outage = new UpstreamCallError("fleet-service: connect ECONNREFUSED", "unavailable");
+    const refusal = new UpstreamCallError("POST /ships/MINING-1/orbit: 400 Ship is in transit.", "rejected");
+    const { tasks, events, scheduler: s } = arrange((t: number) => (t < 5 ? outage : refusal));
+    await seedTask(tasks);
+
+    await tick(s, 5 + 2); // five ticks of outage, then two refusals, limit 3
+    expect(await eventTypes(events)).not.toContain("mining_task_failed");
+    expect((await tasks.get(SHIP))?.failureCount).toBe(2); // the outage cost the target nothing
+
+    await tick(s, 1);
+    expect(await eventTypes(events)).toContain("mining_task_failed");
+  });
+
+  it("a failed tick does not look like progress to the ship-idle check", async () => {
+    // `ship_idle` measures from `updated_at`, so stamping it on every failed
+    // tick hid the longest stuck state the service can enter behind the one
+    // check whose job is to notice it.
+    const { tasks, scheduler: s } = arrange(new UpstreamCallError("fleet-service: connect ECONNREFUSED", "unavailable"));
+    await seedTask(tasks);
+    const before = (await tasks.get(SHIP))!.updatedAt;
+
+    clock.advance(20 * 60_000);
+    await tick(s, 3);
+
+    const after = await tasks.get(SHIP);
+    expect(after?.updatedAt).toEqual(before); // twenty minutes of failing is not an update
+    expect(after?.unrelatedFailureCount).toBe(3); // ...but the counters still moved
   });
 
   it("cargo in the hold still outranks every verdict", async () => {

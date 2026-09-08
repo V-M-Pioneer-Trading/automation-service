@@ -32,15 +32,24 @@ export const verdictOf = (err: unknown): FailureVerdict =>
 /**
  * `rejected`, `malformed` and `internal` are evidence about the target, and
  * spend `mine.failureRetryLimit` directly. `unavailable` and `credentials` are
- * evidence about the fleet's plumbing and get this multiple of it instead.
+ * evidence about the fleet's plumbing and get this multiple of it instead,
+ * counted separately on `ship_task.unrelated_failure_count`.
  *
- * Not infinity, and that is the point of the number rather than a boolean.
- * A permanently broken upstream answer is real — navigation-service serves a
- * deterministic 500 for a corrupt cached market until an operator clears it —
- * and a scout pinned to that waypoint with no failure budget would retry it
- * forever with nothing at stake and nothing to show. At the default 5s tick
- * and a retry limit of 3, this is about 25 minutes: far longer than any
- * deploy, restart or credential refresh, and still an exit.
+ * Not infinity, and that is the point of the number rather than a boolean. A
+ * permanently broken upstream answer is real — navigation-service serves a
+ * deterministic 500 for a market whose cached row it cannot parse, and this
+ * service never asks for a forced refresh, so a scout pinned to that waypoint
+ * with no failure budget would retry it forever with nothing at stake and
+ * nothing to show for it.
+ *
+ * It is a tick count, not a duration, and the two are not the same here: a
+ * timer fire during an in-flight tick is dropped, and the failure this budget
+ * is for is often a *hung* upstream costing the full 15s call timeout. At the
+ * default 5s tick and a retry limit of 3 that is 300 ticks — at least 25
+ * minutes, nearer 75 against a hung service, and proportionally more if the
+ * knob is raised (its maximum, 20, gives hours). Every one of those comfortably
+ * outlasts a deploy, a restart or a credential refresh, which is all the number
+ * has to do.
  */
 export const UNRELATED_FAILURE_RETRY_MULTIPLIER = 100;
 
@@ -224,8 +233,8 @@ export class FleetScheduler {
     if (result.event === "contract_fulfilled" && task.contractId !== null) {
       await this.deps.contracts.setStatus(task.contractId, "fulfilled");
     }
-    // Any successful action clears the consecutive-failure count.
-    await tasks.save({ ...result.task, failureCount: 0 });
+    // Any successful action clears both consecutive-failure counts.
+    await tasks.save({ ...result.task, failureCount: 0, unrelatedFailureCount: 0 });
     // Observations and the event land after the task write, so anything
     // reading them can trust the state they describe is already visible.
     await this.recordObservations(result.observations);
@@ -412,11 +421,25 @@ export class FleetScheduler {
   private async handleTickFailure(task: ShipTask, err: unknown): Promise<void> {
     const { events, knobs, tasks, contracts, shipSymbol } = this.deps;
     const kind = verdictOf(err);
-    // Every failure counts. What changes is how many it takes: keeping the
-    // count moving is also what lets the `consecutive_failures` alarm name a
-    // stuck ship, whatever is stucking it.
-    const failureCount = task.failureCount + 1;
-    await events.append("mining_tick_error", { shipSymbol, message: String(err), failureCount, failureKind: kind });
+    // Which budget this failure is spent against. Both counters keep moving —
+    // their sum is what lets the `consecutive_failures` alarm name a stuck
+    // ship, whatever is stucking it — but they are separate numbers, because
+    // one number cannot be spent against two budgets: three ticks of an outage
+    // would otherwise leave the next genuine refusal one strike away from
+    // abandoning a target it had never once failed against.
+    const blamesTarget = kind !== "unavailable" && kind !== "credentials";
+    const counted: ShipTask = {
+      ...task,
+      failureCount: task.failureCount + (blamesTarget ? 1 : 0),
+      unrelatedFailureCount: task.unrelatedFailureCount + (blamesTarget ? 0 : 1),
+    };
+    await events.append("mining_tick_error", {
+      shipSymbol,
+      message: String(err),
+      failureKind: kind,
+      failureCount: counted.failureCount,
+      unrelatedFailureCount: counted.unrelatedFailureCount,
+    });
 
     // Same discard invariant as the success path: an abort or a switch to
     // shadow mode mid-flight must stop this failure from mutating ship_task.
@@ -437,11 +460,11 @@ export class FleetScheduler {
 
     // The whole branch: a failure that says nothing about the target buys the
     // ship a far longer budget on it, rather than none at all.
-    const blamesTarget = kind !== "unavailable" && kind !== "credentials";
     const retryLimit =
       (await knobs.get("mine.failureRetryLimit")) * (blamesTarget ? 1 : UNRELATED_FAILURE_RETRY_MULTIPLIER);
-    if (failureCount < retryLimit || cargoAtStake) {
-      await tasks.save({ ...task, failureCount });
+    const spent = blamesTarget ? counted.failureCount : counted.unrelatedFailureCount;
+    if (spent < retryLimit || cargoAtStake) {
+      await tasks.recordFailure(counted);
       return;
     }
     // Release an abandoned contract back to the pool rather than leaving it
@@ -454,7 +477,8 @@ export class FleetScheduler {
       shipSymbol,
       asteroidWaypoint: task.asteroidWaypoint,
       contractId: task.contractId,
-      failureCount,
+      failureCount: counted.failureCount,
+      unrelatedFailureCount: counted.unrelatedFailureCount,
       failureKind: kind,
     });
   }

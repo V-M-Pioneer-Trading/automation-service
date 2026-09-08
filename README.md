@@ -386,20 +386,30 @@ target follows from the verdict:
 | `credentials` | Our M2M token was rejected, or st-gateway holds no SpaceTraders credential | 100× that |
 
 The first three are evidence about the target. The last two are evidence about
-the fleet's plumbing, so at the default 5s tick a ship sits out roughly 25
-minutes of outage before giving up on a target it has no reason to doubt —
-long enough to outlast any deploy, restart or credential refresh, and still an
-exit, because an upstream can be permanently broken in a way that looks
-transient (navigation-service serves a deterministic 500 for a corrupt cached
-market until an operator clears it).
+the fleet's plumbing, and are counted on their own tally, so an outage never
+eats into the patience the next real refusal needs — otherwise a fleet coming
+back from one would abandon every target at once, on the first "ship is in
+transit" of the recovery.
+
+100× is 300 ticks at the default retry limit: at least 25 minutes, nearer 75
+against a service that hangs rather than refusing (a tick that waits out the
+15s call timeout is still one tick), and hours if the limit is raised. Any of
+those outlasts a deploy, a restart or a credential refresh, which is all it has
+to do. It is a finite number rather than "wait forever" because an upstream can
+be permanently broken in a way that looks transient — navigation-service serves
+a deterministic 500 for a market whose cached row it cannot parse, and nothing
+here asks it to refresh — and a scout with no cargo aboard would otherwise sit
+on that one waypoint for the rest of the run.
 
 Reassignment resets the ship for a fresh assignment, **unless it's holding
 cargo it hasn't disposed of**, in which case it keeps retrying rather than
 stranding it — true whichever verdict applies. An abandoned contract is
 released back to the pool rather than left claimed by a ship that gave up.
 
-Every failure is logged as `mining_tick_error` carrying its verdict, so both
-alarms see an outage exactly as they did before.
+Every failure is logged as `mining_tick_error` carrying its verdict, and a
+failed tick no longer touches the task's `updated_at` — a failure is the
+absence of progress, and stamping it there was hiding a stuck ship from the
+one check whose job is to notice one.
 
 ---
 

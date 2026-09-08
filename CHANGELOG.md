@@ -11,23 +11,41 @@ Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/is
 
 `mine.failureRetryLimit` answers one question — "is this target not working
 out?" — but every failure used to count toward it. `UpstreamCallError` carried
-a status code that nothing branched on, so an expired M2M token, st-gateway
-holding no SpaceTraders credential, a fleet-service outage and the game
-refusing an action in this ship state were all the same event to the scheduler:
-three or four ticks each, then every task in the fleet abandoned and re-planned
-onto targets that were never the problem. That is the failure mode
-auth-design.md decision 19 describes, and it is worst exactly when it is least
-recoverable, because a re-plan needs the same upstream that is down.
+a status code whose only reader was an error handler no route could reach, so
+an expired M2M token, st-gateway holding no SpaceTraders credential, a
+fleet-service outage and the game refusing an action in this ship state were
+all the same event to the scheduler: three or four ticks each, then every task
+in the fleet abandoned and re-planned onto targets that were never the problem.
+That is the failure mode auth-design.md decision 19 describes, and it is worst
+exactly when it is least recoverable, because a re-plan needs the same upstream
+that is down.
 
 `gameClients.ts` now classifies each failure once, at the call, into an
 `UpstreamFailureKind`: `unavailable`, `credentials`, `malformed` or `rejected`;
 `scheduler.ts` adds `internal` for "our own code threw". Every failure still
-counts — that is what lets the `consecutive_failures` alarm name a stuck ship
-whatever is stucking it — but the budget it counts against depends on the
-verdict. `rejected`, `malformed` and `internal` spend `mine.failureRetryLimit`,
-unchanged. `unavailable` and `credentials` spend a hundred times that: about 25
-minutes at the default 5s tick, which outlasts any deploy, restart or
-credential refresh. Cargo in the hold still outranks all five.
+counts — their sum is what lets the `consecutive_failures` alarm name a stuck
+ship whatever is stucking it — but on *two* counters, against two budgets.
+`rejected`, `malformed` and `internal` spend `mine.failureRetryLimit`,
+unchanged. `unavailable` and `credentials` spend a hundred times that on
+`ship_task.unrelated_failure_count`, a new column. Cargo in the hold still
+outranks all five.
+
+Two counters and not one, because one number cannot be spent against two
+budgets: five ticks of an outage would leave the next genuine refusal one
+strike from abandoning a target it had never once failed against — and a
+recovery is precisely when refusals arrive, since the game state moved on while
+the ship sat there. That is the same fleet-wide storm, one tick later.
+
+300 ticks is at least 25 minutes and can be hours: a dropped timer fire during
+an in-flight tick and the 15s call timeout both stretch it, and the retry-limit
+knob goes to 20. All of them outlast a deploy, a restart or a credential
+refresh, which is the whole requirement.
+
+A failed tick also stopped stamping `ship_task.updated_at`, via a new
+`recordFailure`. `ship_idle` measures from that column, so writing it on every
+failure hid the longest stuck state this service can enter behind the one check
+whose job is to notice it. That masking lasted three ticks before; with the new
+budget it would have lasted the whole outage.
 
 Not "retry forever", because an upstream can be permanently broken in a way
 that looks transient — navigation-service serves a deterministic 500 for a
