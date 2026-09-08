@@ -146,3 +146,27 @@ async function dispatchFulfill(ctx: TaskContext, contract: ContractRecord): Prom
     },
   };
 }
+
+/**
+ * The opening task for a contract the planner has chosen to work.
+ *
+ * Four columns mean something different here than they do for mining, and this
+ * is where that is decided: `tradeSymbol` is the deliverable rather than the
+ * extracted good (which is why it cannot answer "is cargo aboard?" — see
+ * `contractCargoAtStake`), `marketWaypoint` is where to buy rather than where
+ * to sell, `destinationWaypoint` is where to deliver, and the phase starts at
+ * the market leg.
+ *
+ * The scheduler still owns the transaction this is written inside — the task
+ * and the contract's `assigned` status have to land together (meta#30) — but
+ * not the shape of what is written.
+ */
+export const startContractTask = (task: ShipTask, contract: ContractRecord): ShipTask => ({
+  ...idleTask(task),
+  taskKind: "contract",
+  phase: "CONTRACT_TRAVEL_TO_MARKET",
+  tradeSymbol: contract.tradeSymbol,
+  marketWaypoint: contract.procurementMarket,
+  contractId: contract.contractId,
+  destinationWaypoint: contract.destinationWaypoint,
+});

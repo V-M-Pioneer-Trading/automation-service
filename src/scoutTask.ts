@@ -55,3 +55,17 @@ async function dispatchRefresh(ctx: TaskContext, market: string): Promise<TickRe
  * Takes the task it ignores, so all three predicates share one shape.
  */
 export const scoutCargoAtStake = (_task: ShipTask): boolean => false;
+
+/**
+ * The opening task for a ship the planner has sent to refresh a market.
+ *
+ * The target rides in `asteroidWaypoint` — the column every kind uses for
+ * "where the planner sent me" — which is exactly the sort of per-kind meaning
+ * that belongs next to the FSM reading it rather than in the scheduler.
+ */
+export const startScoutTask = (task: ShipTask, targetWaypoint: string): ShipTask => ({
+  ...idleTask(task),
+  taskKind: "scout",
+  phase: "SCOUT_TRAVEL",
+  asteroidWaypoint: targetWaypoint,
+});

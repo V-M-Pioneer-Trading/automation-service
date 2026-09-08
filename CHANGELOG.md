@@ -7,6 +7,31 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Each task kind writes its own opening shape too
+
+The entry below stopped the scheduler *interpreting* per-kind column meanings,
+and named `assignTarget` as the mirror half it was leaving. That half: the
+scheduler wrote the opening task inline per kind — `tradeSymbol`,
+`marketWaypoint`, `destinationWaypoint` and the starting phase — so the module
+deciding that `tradeSymbol` is the deliverable for a contract and the extracted
+good for mining was the scheduler, while the modules reading it were the FSMs.
+
+Each kind exports a `start*Task` now, built on `idleTask`, and `assignTarget`
+calls one of the three. The scheduler keeps the transaction a contract
+assignment is written inside (meta#30) — the task and the contract's `assigned`
+status have to land together — which is *when* to write, not *what*.
+
+`assignTarget`'s switch also gained an exhaustiveness guard. Unlike `advance`
+and `cargoAtStake` it returns `void`, so TypeScript was content to let a missing
+arm fall straight through: a new task kind would have been planned, matched
+nothing, saved nothing, and left the ship idle to be replanned every tick with
+no event and no error. The contributor checklist had started claiming the
+compiler catches this, which it did not.
+
+What remains of meta#75 B7 is the row itself: three kinds sharing one 18-field
+shape, which needs a migration and a change to the `/autopilot/ships/:s`
+response.
+
 ## Each task kind says what it means by the shared columns
 
 Three task kinds share one `ship_task` row, and they mean different things by

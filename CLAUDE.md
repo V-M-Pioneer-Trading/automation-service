@@ -29,7 +29,7 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `routeCost.ts` | `fuelAwareRoute`: Dijkstra over waypoints with fuel constraints. Pure | nothing |
 | `contractDiscovery.ts` | See/evaluate/accept contracts, called inline by the scheduler before each assignment | planner, contractRepo |
 | `taskFsm.ts` | Shared FSM pieces: `TickResult`, `TaskContext`, travel/dock/refuel/wait resolution | gameClients, shipTaskRepo |
-| `miningTask.ts`, `contractTask.ts`, `scoutTask.ts` | One `advance*Task(ctx)` each, one action per call, and one `*CargoAtStake(task)` each — what this kind means by the shared columns is the kind's own business | taskFsm |
+| `miningTask.ts`, `contractTask.ts`, `scoutTask.ts` | Per kind: `start*Task` (how one begins), `advance*Task(ctx)` (one action per call), `*CargoAtStake(task)` (what it means by the shared columns). All three answer for the kind; none of them lives in the scheduler | taskFsm |
 | `observations.ts` | `ObservationRepo` + `calibrate()`: measured model with priors as fallback | knobs (types only) |
 | `knobs.ts` | `KNOB_DEFINITIONS` (source of `KnobName`), `KnobRepo`, `syncKnobDefinitions` | transaction |
 | `db.ts` | `createPool`, `migrate` (idempotent DDL) | knobs (for the sync) |
@@ -140,10 +140,17 @@ for callers who look there first.
   row that carried it would have been retried on the same target forever, on
   the strength of cargo a scout cannot hold.
 
-  `assignTarget` is the other half of the same coupling and is **not** fixed:
-  it writes `tradeSymbol`, `marketWaypoint` and the opening phase per kind
-  inline, so the scheduler is still the author of the meanings the FSMs now
-  interpret. Splitting the row would settle both; see meta#75 B7.
+- **A task's opening shape is written by its own module too.** `start*Task`
+  builds it on `idleTask`, and `assignTarget` calls one of the three rather
+  than filling columns in itself — it used to write `tradeSymbol`,
+  `marketWaypoint` and the opening phase per kind inline, which made the
+  scheduler the *author* of meanings the FSMs interpret. The scheduler still
+  owns the transaction a contract assignment is written inside (meta#30), which
+  is a different thing: when to write, not what.
+
+  What is left of meta#75 B7 is the row itself — three kinds sharing one
+  18-field shape. That needs a migration and a change to the
+  `/autopilot/ships/:s` response.
 - **A failed tick must not stamp `updated_at`.** `ShipTaskRepo.recordFailure`
   writes the counters and nothing else, because `updated_at` is what
   `ship_idle` measures from: stamping it made a ship that had been failing for
@@ -504,11 +511,14 @@ is the Clerk `sub` only.
 - Schedulers take a deps object (`FleetSchedulerDeps`, `AnomalySchedulerDeps`).
 - New background work goes on an `IntervalLoop`. New task kinds add a phase
   union to `shipTaskRepo.ts`, a `PHASE_AFTER_WAIT` entry per waiting phase, an
-  `advance*Task`, a `*CargoAtStake` predicate beside it, a `case` in each of
-  `FleetScheduler.advance` and `FleetScheduler.cargoAtStake`, and a
-  `resetDatabase` consideration if they need a knob to compete. The two
-  switches are exhaustive, so the compiler asks for the cases; nothing asks for
-  the predicate except this line.
+  `advance*Task`, a `start*Task` and a `*CargoAtStake` beside it, a `case` in
+  each of `FleetScheduler.advance`, `cargoAtStake` and `assignTarget`, and a
+  `resetDatabase` consideration if they need a knob to compete. All three
+  switches are exhaustive, but not for the same reason: the first two because
+  they return a value, the third because it carries a `never` guard — a `void`
+  switch would otherwise let a missing arm fall through and leave the ship
+  silently unassigned, replanned every tick with nothing logged. Nothing asks
+  for the three functions except this line.
 - Update README (human-facing) and this file (implementation) together with
   the code; add a CHANGELOG entry for anything a reviewer of a later PR would
   want explained.
