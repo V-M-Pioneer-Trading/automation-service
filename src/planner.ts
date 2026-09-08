@@ -4,7 +4,8 @@ import { KnobRepo, KnobValues } from "./knobs";
 import { MarketIntel, MarketIntelRepo } from "./marketIntelRepo";
 import { CalibratedModel, ObservationRepo, priorsFromKnobs } from "./observations";
 import { fuelAwareRoute, RouteWaypoint } from "./routeCost";
-import { breachesReserveFloor, cycleHours, contractScore, miningScore, scoutScore } from "./scoring";
+import { breachesReserveFloor, cycleHours, contractScore, isViableCandidate, miningScore, scoutScore } from "./scoring";
+import { decisionDetail, MiningDecisionRecord, PlannerCandidate } from "./plannerDecision";
 
 /**
  * Decides what a ship should do next.
@@ -28,18 +29,11 @@ import { breachesReserveFloor, cycleHours, contractScore, miningScore, scoutScor
  * rather than merely demoting it.
  */
 
-export interface PlannerCandidate {
-  waypoint: string;
-  reachable: boolean;
-  distance?: number;
-  cycleHours?: number;
-  estimatedFuelCost?: number;
-  /** What one cycle here is expected to earn, and whether that's measured or assumed. */
-  creditsPerCycle?: number;
-  creditsPerCycleSource?: "measured-here" | "fleet-average" | "prior";
-  score?: number;
-  breachesReserveFloor?: boolean;
-}
+
+// A candidate is part of the decision record before it is part of the planner:
+// it is what a replay re-scores. Defined there so the record module depends on
+// nothing, and re-exported here because this is where callers look for it.
+export { PlannerCandidate };
 
 export interface ContractEvaluation {
   /** Null if no market in the system sells the required good, or no route reaches the destination. */
@@ -89,7 +83,7 @@ const modelSummary = (model: CalibratedModel) => ({
 
 interface MiningScoring {
   chosen: Required<PlannerCandidate> | null;
-  detail: Record<string, unknown>;
+  detail: MiningDecisionRecord;
 }
 
 export class Planner {
@@ -152,13 +146,11 @@ export class Planner {
       return {
         kind: "contract",
         contract: bestContract.record,
-        detail: {
-          chosenKind: "contract",
+        detail: decisionDetail("contract", mining.detail, {
           contractId: bestContract.record.contractId,
           ...comparison,
           taskWeight: context.knobs["contract.taskWeight"],
-          miningDetail: mining.detail,
-        },
+        }),
       };
     }
     // Ties go to scouting over contracts: it spends no credits up front, so an
@@ -167,34 +159,27 @@ export class Planner {
       return {
         kind: "scout",
         scoutWaypoint: bestScout.waypoint,
-        detail: {
-          chosenKind: "scout",
+        detail: decisionDetail("scout", mining.detail, {
           scoutWaypoint: bestScout.waypoint,
           scoutStaleHours: bestScout.elapsedHours,
           ...comparison,
-          miningDetail: mining.detail,
-        },
+        }),
       };
     }
     if (mining.chosen !== null) {
       return {
         kind: "mine",
         asteroidWaypoint: mining.chosen.waypoint,
-        detail: { chosenKind: "mine", ...mining.detail, ...comparison },
+        detail: decisionDetail("mine", mining.detail, comparison),
       };
     }
-    // Flattened (not nested under miningDetail) so consumers reading
-    // detail.candidates keep working when there are no contracts or scouts in
-    // the picture — replay.ts relies on that shape.
     return {
       kind: "none",
-      detail: {
-        chosenKind: "none",
-        ...mining.detail,
+      detail: decisionDetail("none", mining.detail, {
         ...comparison,
         contractsConsidered: acceptedContracts.length,
         marketsConsidered: context.marketplaces.length,
-      },
+      }),
     };
   }
 
@@ -248,7 +233,9 @@ export class Planner {
       });
 
     const chosen = candidates
-      .filter((c): c is Required<PlannerCandidate> => c.reachable && c.breachesReserveFloor === false && (c.score ?? 0) > 0)
+      .filter((c): c is Required<PlannerCandidate> =>
+        isViableCandidate({ reachable: c.reachable, breachesReserveFloor: c.breachesReserveFloor ?? true, score: c.score ?? 0 })
+      )
       .reduce<Required<PlannerCandidate> | null>((best, c) => (best === null || c.score > best.score ? c : best), null);
 
     return {

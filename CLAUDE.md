@@ -37,22 +37,27 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `intervalLoop.ts` | `IntervalLoop`: the one guarded timer every scheduler runs on | nothing |
 | `dispatchLock.ts` | `DispatchLock`: Postgres advisory lock making "one process drives this ship" true across processes | pg, crypto |
 | `fleetEvents.ts` | The event vocabulary: task progress, failed actions, credits arriving. SQL predicates only, no I/O | nothing |
-| `anomaly.ts` | `AnomalyRepo`, `AnomalyChecker` (five read-only checks) | knobs, marketIntel, fleetEvents |
+| `anomaly.ts` | `AnomalyRepo`, `AnomalyChecker` (five read-only checks). **No `Pool`** — the checks judge, they don't retrieve | knobs, marketIntel, eventLog, metrics |
 | `anomalyScheduler.ts` | Runs checks, dedupes, persists, delivers, requests replans | anomaly, webhookDelivery |
 | `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table, fleetEvents |
 | `testSupport/fakeClock.ts`, `testSupport/fakeGameClients.ts` | The adapters for the `Clock` and `GameClients` seams. One each, shared — not one per test file | test-only |
-| `shipTaskRepo.ts`, `contractRepo.ts`, `marketIntelRepo.ts`, `eventLog.ts` | Row ↔ object repos. Repos taking `Pool \| PoolClient` can join a transaction | clock |
+| `eventLog.ts` | Appends events, and **answers the questions asked of the log** — what the balance read, what the operator last asked for, what was earned, how much failed, which markets are priced against | clock, fleetEvents |
+| `shipTaskRepo.ts`, `contractRepo.ts`, `marketIntelRepo.ts` | Row ↔ object repos. Repos taking `Pool \| PoolClient` can join a transaction | clock |
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
 | `auth.ts` | Networkless Clerk JWT verification, service-secret guard | jose |
 | `config.ts` | `configFromEnv()`; every numeric env var validated positive | fs |
 | `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | m2mToken, fetch |
 | `m2mToken.ts` | Mints/caches this service's own Clerk M2M token for outbound `Authorization` | fetch, crypto |
-| `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs |
+| `plannerDecision.ts` | The decision record: the scoring block's type, the two `event_log.detail` layouts, and the writer/reader pair for them. Imports nothing local | nothing |
+| `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs, plannerDecision |
 
-Dependency direction is strictly downward in that table's spirit: `scoring`
-and `routeCost` import nothing local; FSMs never import repos except the
-`ShipTask` type and `idleTask`; `knobs.ts` and `db.ts` must not import each
-other (that cycle existed once; `transaction.ts` exists to break it).
+Dependency direction is strictly downward in that table's spirit: `scoring`,
+`routeCost` and `plannerDecision` import nothing local; FSMs never import repos
+except the `ShipTask` type and `idleTask`; `knobs.ts` and `db.ts` must not
+import each other (that cycle existed once; `transaction.ts` exists to break
+it). `PlannerCandidate` lives in `plannerDecision.ts` and is re-exported from
+`planner.ts`, which is why there is no cycle between them: the candidate is
+part of the logged record before it is part of the planner.
 
 ## Invariants the scheduler depends on
 
@@ -215,10 +220,19 @@ wraps an `IntervalLoop`. Semantics you can rely on:
   record). A record with `procurementMarket === null` is unworkable and is
   skipped outright; its `expectedProfit` is `-Infinity`, which Postgres float8
   accepts and `JSON.stringify` turns into `null` inside event detail.
-- **Log shape matters to `replay.ts`.** A mining or `none` decision logs
-  `candidates`, `knobsUsed`, `model`, `currentCredits`, `chosen` flat in
-  `detail`; a contract or scout decision nests all of that under
-  `detail.miningDetail`. `loadDecisions` accepts both; don't add a third shape.
+- **The decision record lives in `plannerDecision.ts`.** A mining or `none`
+  decision logs the scoring block flat in `detail`; a contract or scout
+  decision nests it under `detail.miningDetail`, because a flat `chosen` there
+  would name an asteroid field the ship was never sent to. Both layouts are
+  written by `decisionDetail()` and read by `readMiningRecord()` — use them
+  rather than reaching into `detail` yourself, and don't add a third layout.
+  Normalising the two is not available: the rows are the archive replay reads.
+- **`isViableCandidate` is the planner's assignability rule, and `replay.ts`
+  must apply the same one.** Reachable, doesn't breach the reserve floor, and
+  scores above zero. Replay used to spell out only the floor half, so under
+  `mine.taskWeight=0` it reported a chosen field for every decision the planner
+  had logged as `planner_no_viable_target` — a confidently wrong answer in the
+  one tool that exists to check a knob before turning it.
 - Scouting staleness for a never-seen market is `stalenessThresholdHours × 10`
   (finite on purpose).
 - `scoring.ts` must stay free of I/O and of imports from the rest of `src`.
@@ -304,16 +318,18 @@ ai-service); treat them as public. Things that depend on specific types:
 
 | Consumer | Reads |
 |---|---|
-| `fleetEvents.ts` | **Owns the vocabulary.** Which types mean task progress, a failed action, and credits arriving |
+| `fleetEvents.ts` | **Owns the vocabulary.** Which types mean task progress, a failed action, credits arriving, a balance reading, a market selection, and the operator's stated intent |
+| `EventLog` | The only module that queries `event_log`. Turns that vocabulary into the questions callers actually ask (`creditsAt`, `lastLifecycleTransitionAt`, `earningsBetween`, `taskOutcomesBetween`, `marketsPricedSince`) |
 | `MetricsRepo` | `mining_extract.units`, plus `fleetEvents`' revenue and error-rate predicates |
-| `AnomalyChecker.checkErrorRate` | `fleetEvents`' task-progress and error predicates |
-| `AnomalyChecker.detectCreditsFlat` | `agent_credits_snapshot.credits`, written by the anomaly scheduler only while armed & live |
-| `AnomalyChecker.detectNoEarnings` | `fleetEvents`' earning predicate, and `armed`/`paused`/`aborted` as the operator's stated intent |
-| `AnomalyChecker.checkMarketStaleness` | `mining_market_selected.marketsChecked` |
-| `replay.ts` | `planner_assignment`, `planner_shadow_assignment` (shape above) |
+| `AnomalyChecker` | Asks `EventLog` and `MetricsRepo`; issues no SQL of its own |
+| `plannerDecision.ts` | `planner_assignment`, `planner_shadow_assignment` and the layout of their `detail` |
 | `/anomalies/digest` | `NOTABLE_EVENT_TYPES` in `server.ts`. The test for inclusion is "would someone be wrong about the fleet without it, and does nothing else say it?" — not "is it an error". Routine per-tick events stay out; a bounded list nobody reads is worse than no list |
 
-**Ask `fleetEvents.ts`, never write your own `type LIKE …`.** Both alarms and
+**Ask `EventLog` for rows and `fleetEvents.ts` for the vocabulary; never write
+your own `type LIKE …` and never query `event_log` from outside `EventLog`.**
+`AnomalyChecker` used to run six of its own queries against it — reaching past
+the module that owns the table, and restating the vocabulary in the process.
+Both alarms and
 the rollup used to spell these questions out separately, and drifted into
 agreeing with each other about the wrong thing: they counted errors that every
 task kind logs against a denominator of mining events only, so a contract-only

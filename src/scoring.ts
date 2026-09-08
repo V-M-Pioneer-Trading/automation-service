@@ -125,3 +125,22 @@ export function breachesReserveFloor(params: {
 }): boolean {
   return params.currentCredits - params.estimatedCost < params.reserveFloor;
 }
+
+/**
+ * Is this candidate assignable at all? Reachable, affordable, and worth
+ * something — the last clause is why `mine.taskWeight = 0` disables mining
+ * instead of merely demoting it.
+ *
+ * One function because two callers must agree: the planner deciding, and
+ * `replay.ts` re-deciding under different knobs. Replay used to spell out only
+ * the reserve-floor half, so it would report a field as chosen where the
+ * planner had logged `planner_no_viable_target` — a silent lie in the exact
+ * tool an operator uses to check a knob change before making it.
+ */
+export function isViableCandidate(candidate: {
+  reachable: boolean;
+  breachesReserveFloor: boolean;
+  score: number;
+}): boolean {
+  return candidate.reachable && !candidate.breachesReserveFloor && candidate.score > 0;
+}

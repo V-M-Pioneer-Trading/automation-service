@@ -52,6 +52,29 @@ export const EARNING_EVENT_PREDICATE =
   "type IN ('mining_sell', 'contract_accepted', 'contract_fulfilled')";
 
 /**
+ * What the operator last said they wanted. Not a thing the fleet did — a thing
+ * the fleet was told — which is why the only check that asserts a *positive*
+ * condition (`no_earnings`) measures its window from here rather than from the
+ * last time anything happened.
+ */
+export const LIFECYCLE_EVENT_TYPES = ["armed", "paused", "aborted"];
+
+/**
+ * The fleet's own reading of its balance, written by the anomaly scheduler
+ * while armed and live. The one number in the log that is a level rather than
+ * an increment, which is what makes "credits went nowhere" answerable at all.
+ */
+export const CREDITS_SNAPSHOT_TYPE = "agent_credits_snapshot";
+
+/**
+ * A sell leg picked a market, and `detail.marketsChecked` says which ones it
+ * priced on the way. That list is how "in active use" is defined for the
+ * staleness alarm — a market nobody is pricing against cannot be deciding
+ * anything on stale numbers.
+ */
+export const MARKET_SELECTION_TYPE = "mining_market_selected";
+
+/**
  * Credits earned by one event, for summing into revenue.
  *
  * `COALESCE` on the contract payments is load-bearing for history rather than

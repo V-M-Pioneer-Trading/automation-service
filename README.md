@@ -556,6 +556,12 @@ later swing in profit to it.
 | `--limit N` | Cap on decisions (default 200) |
 | `--verbose` | Show every candidate's score rather than only the flips |
 
+A replayed decision applies the planner's own assignability rule, not a
+paraphrase of it: reachable, affordable under the reserve floor, and scoring
+above zero. So replaying `mine.taskWeight=0` reports what the planner would
+actually have done — assign nothing — rather than a field it would have
+declined.
+
 It replays the **choice between asteroid fields**, which is where the
 field-vs-field trade-off lives. It doesn't re-derive whether a contract or scout
 would have beaten mining outright; those scores were frozen from market state

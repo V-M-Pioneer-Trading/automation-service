@@ -56,6 +56,39 @@ export class MetricsRepo {
     return rollup;
   }
 
+  /**
+   * The most recent rollup at or before `at`, and the average of the rollups
+   * strictly before it within `trailingMs`.
+   *
+   * One method rather than two because the two numbers only mean anything
+   * together: the trailing average deliberately *excludes* the latest rollup,
+   * so this is "latest against its own history" rather than "latest against a
+   * window that already contains it". Split across two calls that invariant
+   * lived in the caller, which is how the profit-drop check came to own two
+   * queries against a table it does not.
+   */
+  async latestAgainstTrailingAverage(
+    at: Date,
+    trailingMs: number
+  ): Promise<{ latest: number; trailingAverage: number; sampleCount: number } | null> {
+    const { rows } = await this.pool.query(
+      `SELECT credits_per_hour, window_end FROM metrics_rollup WHERE window_end <= $1 ORDER BY window_end DESC LIMIT 1`,
+      [at]
+    );
+    if (rows.length === 0) return null;
+    const latestWindowEnd: Date = rows[0].window_end;
+    const { rows: trailing } = await this.pool.query(
+      `SELECT AVG(credits_per_hour) AS avg, COUNT(*) AS count FROM metrics_rollup
+       WHERE window_end > $1 AND window_end < $2`,
+      [new Date(at.getTime() - trailingMs), latestWindowEnd]
+    );
+    return {
+      latest: Number(rows[0].credits_per_hour),
+      trailingAverage: Number(trailing[0].avg),
+      sampleCount: Number(trailing[0].count),
+    };
+  }
+
   /** The window_end of the most recent rollup, or null if none exist yet. */
   async latestWindowEnd(): Promise<Date | null> {
     const { rows } = await this.pool.query("SELECT MAX(window_end) AS latest FROM metrics_rollup");
