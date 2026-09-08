@@ -89,6 +89,17 @@ export class FleetScheduler {
   }
 
   /**
+   * Run exactly one tick, to completion. The anomaly loop has had this since
+   * its own flake was fixed properly; the fleet loop did not, which is why
+   * every test of mining, contracts, scouting, replan and shadow mode was
+   * still racing a real timer against a FakeClock and polling a wall clock to
+   * find out what happened.
+   */
+  forceTick(): Promise<void> {
+    return this.loop.runOnce();
+  }
+
+  /**
    * Requests a fleet replan (meta#13): a knob change, a newly-recorded anomaly,
    * or the manual /planner/replan endpoint. Acted on once
    * replan.debounceSeconds has elapsed since the last replan of any kind.

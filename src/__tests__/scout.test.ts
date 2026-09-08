@@ -2,21 +2,11 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
+import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
-import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
-
-class FakeClock implements Clock {
-  constructor(private current: Date) {}
-  now(): Date {
-    return this.current;
-  }
-  advance(ms: number) {
-    this.current = new Date(this.current.getTime() + ms);
-  }
-}
 
 function makeShip(overrides: Record<string, unknown> = {}) {
   return {
@@ -157,30 +147,28 @@ describe("automation-service market scouting loop (meta#12)", () => {
       fleetServiceUrl: fleetUrl,
       navigationServiceUrl: navUrl,
       miningShipSymbol: "MINING-1",
-      schedulerIntervalMs: 15,
+      schedulerIntervalMs: 100_000, // never fires on its own; forceFleetTick drives every tick
       replanIntervalMs: 300_000,
     });
     gateways.push(gateway);
     return gateway;
   };
 
-  const waitForEvent = async (gateway: ReturnType<typeof createTestApp>, type: string, timeoutMs = 6000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  const waitForEvent = async (gateway: ReturnType<typeof createTestApp>, type: string, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
       const found = res.body.events.find((e: { type: string }) => e.type === type);
       if (found !== undefined) return found;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error(`timed out waiting for event ${type}`);
   };
 
-  const waitForTaskPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, timeoutMs = 6000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  const waitForTaskPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.phase === phase) return res.body.task;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error(`timed out waiting for phase ${phase}`);
   };
@@ -235,7 +223,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
     // Ship is at X1-TEST-BELT (not at the market), so it needs to navigate.
     await waitForTaskPhase(gateway, "SCOUT_TRAVEL");
-    await new Promise((r) => setTimeout(r, 50)); // let navigate dispatch
+    await gateway.locals.forceFleetTick(); // dispatch the navigate
     // Advance clock past the travel ETA so the wait resolves.
     clock.advance(2000);
 
@@ -263,15 +251,14 @@ describe("automation-service market scouting loop (meta#12)", () => {
     // score drops to ~0 (elapsed = 0), so the ship should be assigned mining.
     // Poll until asteroidWaypoint is filled in (not just TRAVEL_TO_ASTEROID phase,
     // which fires immediately on FRESH_MINING_TASK before assignment runs).
-    const deadline = Date.now() + 8000;
     let miningTask: Record<string, unknown> | null = null;
-    while (Date.now() < deadline) {
+    for (let t = 0; t < 200; t++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.taskKind === "mining" && res.body.task.asteroidWaypoint !== null) {
         miningTask = res.body.task;
         break;
       }
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     expect(miningTask).not.toBeNull();
     expect(miningTask!.asteroidWaypoint).toBe("X1-TEST-BELT");

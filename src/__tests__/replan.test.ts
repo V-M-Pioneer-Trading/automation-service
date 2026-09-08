@@ -2,21 +2,11 @@ import http from "http";
 import { AddressInfo } from "net";
 import request from "supertest";
 import { Pool } from "pg";
+import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
-import { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
-
-class FakeClock implements Clock {
-  constructor(private current: Date) {}
-  now(): Date {
-    return this.current;
-  }
-  advance(ms: number) {
-    this.current = new Date(this.current.getTime() + ms);
-  }
-}
 
 function makeShip(overrides: Record<string, unknown> = {}) {
   return {
@@ -130,7 +120,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     ]);
   });
 
-  const app = (replanIntervalMs = 300_000, schedulerIntervalMs = 15) => {
+  const app = (replanIntervalMs = 300_000, schedulerIntervalMs = 100_000) => { // never fires on its own; forceFleetTick drives every tick
     const gateway = createTestApp(pool, clock, {
       agentServiceUrl: agentUrl,
       fleetServiceUrl: fleetUrl,
@@ -143,12 +133,11 @@ describe("automation-service fleet replan (meta#13)", () => {
     return gateway;
   };
 
-  const waitForAssignment = async (gateway: ReturnType<typeof createTestApp>, timeoutMs = 2000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  const waitForAssignment = async (gateway: ReturnType<typeof createTestApp>, maxTicks = 200) => {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.asteroidWaypoint !== null) return res.body.task;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error("timed out waiting for a planner assignment");
   };
@@ -161,14 +150,13 @@ describe("automation-service fleet replan (meta#13)", () => {
   const waitForReplanCount = async (
     gateway: ReturnType<typeof createTestApp>,
     count: number,
-    timeoutMs = 2000
+    maxTicks = 200
   ): Promise<{ type: string; detail: Record<string, unknown> }[]> => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+    for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=1000");
       const replans = res.body.events.filter((e: { type: string }) => e.type === "replan_executed");
       if (replans.length >= count) return replans;
-      await new Promise((r) => setTimeout(r, 5));
+      await gateway.locals.forceFleetTick();
     }
     throw new Error(`timed out waiting for ${count} replan_executed events`);
   };
@@ -209,7 +197,8 @@ describe("automation-service fleet replan (meta#13)", () => {
     // Second trigger, well inside the default 30s debounce window: must NOT
     // produce a second replan_executed while the clock hasn't moved.
     await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
-    await new Promise((r) => setTimeout(r, 200));
+    // Ticks, not a sleep: the debounce has to hold across real replan attempts.
+    for (let t = 0; t < 5; t++) await gateway.locals.forceFleetTick();
     expect(await countReplans(gateway)).toBe(1);
 
     // Advance the clock past the debounce window and trigger again — now it runs.
@@ -258,9 +247,8 @@ describe("automation-service fleet replan (meta#13)", () => {
     // Wait for the first natural tick: it creates the ship_task row via
     // getOrCreate and calls assignTarget once through the normal per-ship path
     // (no replan has been requested yet).
-    const deadline1 = Date.now() + 5000;
-    while (Date.now() < deadline1 && agent.calls.filter((c) => c.url === "/contracts").length < 1) {
-      await new Promise((r) => setTimeout(r, 20));
+    for (let t = 0; t < 50 && agent.calls.filter((c) => c.url === "/contracts").length < 1; t++) {
+      await gateway.locals.forceFleetTick();
     }
     expect(agent.calls.filter((c) => c.url === "/contracts").length).toBe(1);
 
@@ -269,7 +257,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     // replan's own assignTarget call is tick 2's one atomic action for this
     // ship — the normal per-ship dispatch must NOT also fire for it this tick.
     await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
-    const replans = await waitForReplanCount(gateway, 1, 5000);
+    const replans = await waitForReplanCount(gateway, 1);
     expect(replans[0].detail.shipsConsidered).toBe(1);
 
     // Exactly one more contract-discovery round-trip should have happened

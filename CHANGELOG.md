@@ -7,6 +7,42 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## The test suite stops racing a wall clock
+
+Both loops now expose a way to force exactly one tick, and tests use it instead
+of running a 15ms interval and polling to see what happened. `IntervalLoop`
+already had `runOnce()`; the anomaly loop already exposed it as
+`forceAnomalyTick`. The fleet loop — mining, contracts, scouting, replan,
+shadow mode — did not, which is why its flakes kept coming back while the
+anomaly loop's were fixed properly.
+
+Every flake this suite has had came from that gap: `669b101` (poll and tick
+periods aliasing, so a phase lasting one tick was invisible and `contract.test`
+passed about 30% of the time), `649d266` (`credits_flat` racing a `FakeClock`
+jump), and a recurrence on 2026-09-06 where two `taskFsm` assertions failed only
+in full runs and passed in isolation — indistinguishable from a real breakage
+without re-running.
+
+Also fixed here: `runOnce()` was a silent no-op on a stopped loop, so a test
+that stopped the schedulers and then forced a tick passed without ticking. It
+throws now. That is the exact failure the method exists to prevent.
+
+Two sleeps turned out to be hiding vacuous assertions — "no dispatch while
+paused" and "no re-dispatch on resume" both slept and then asserted that nothing
+had happened, on a loop that no longer ticked at all. They force ticks now, so
+they assert what they claim to.
+
+Ten sleeps turned out to be hiding vacuous assertions of that kind, found by
+auditing every sleep that sat inside a *passing* test rather than only fixing
+the ones that failed. Each now forces ticks; the metrics resume assertion, for
+instance, fails under a mutation of the resume guard where before it could not.
+
+`FakeClock` had ten copies (nine identical, one missing `advance`) and
+`GameClients` had one good in-test fake; both are now single shared adapters
+under `testSupport/`. `MetricsScheduler` gained the `forceTick` the other two
+loops had. Suite time went from ~56s to ~35s, and three consecutive runs are
+clean.
+
 ## Anomaly detection no longer needs somewhere to page
 
 Detection was gated on `ANOMALY_WEBHOOK_URL`: no URL meant no `AnomalyScheduler`,
