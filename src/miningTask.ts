@@ -22,21 +22,6 @@ import {
  * takings become one mining observation and the ship hands itself back to the
  * planner.
  */
-/**
- * Is there cargo aboard that this task has not disposed of?
- *
- * For mining it is `tradeSymbol`: set when a survey yields, cleared when the
- * hold empties at SELL. Abandoning a target with it set strands the ore — once
- * the task is idled there is no code path back to selling it.
- *
- * Each task kind answers this for itself because each means something different
- * by the same column, and the answer decides whether the scheduler may give up
- * on a target. `scheduler.ts` used to enumerate this file's and
- * `contractTask.ts`'s phase names inline, which is the scheduler reading FSM
- * internals to make a decision the FSMs are the authority on.
- */
-export const miningCargoAtStake = (task: ShipTask): boolean => task.tradeSymbol !== null;
-
 export async function advanceMiningTask(ctx: TaskContext): Promise<TickResult | null> {
   const waiting = resolveWaitIfElapsed(ctx, "mining");
   if (waiting !== undefined) return waiting;
@@ -57,6 +42,21 @@ export async function advanceMiningTask(ctx: TaskContext): Promise<TickResult | 
       throw new Error(`mining task cannot advance from phase ${ctx.task.phase}`);
   }
 }
+
+/**
+ * Is there cargo aboard that this task has not disposed of?
+ *
+ * For mining it is `tradeSymbol`: set when a survey yields, cleared when the
+ * hold empties at SELL. Abandoning a target with it set strands the ore — once
+ * the task is idled there is no code path back to selling it.
+ *
+ * Each task kind answers this for itself because each means something different
+ * by the same column, and the answer decides whether the scheduler may give up
+ * on a target. `scheduler.ts` used to enumerate this file's and
+ * `contractTask.ts`'s phase names inline, which is the scheduler reading FSM
+ * internals to make a decision the FSMs are the authority on.
+ */
+export const miningCargoAtStake = (task: ShipTask): boolean => task.tradeSymbol !== null;
 
 const cooldownWait = (ctx: TaskContext, phase: "SURVEY" | "EXTRACT"): TickResult | null => {
   const { task, ship, clock } = ctx;

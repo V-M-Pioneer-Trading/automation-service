@@ -15,10 +15,16 @@ deliverable for a contract, set at different moments; `asteroidWaypoint` is
 wherever the planner sent the ship, including a scout's market.
 
 That is not what this change fixes — the row is still flat, and splitting it is
-migration-shaped. What it fixes is the one place the *scheduler* had to know the
-difference: deciding whether abandoning a target would strand cargo, by
-enumerating contract phase names inline. A scheduler reading FSM internals to
-make a decision the FSMs are the authority on.
+migration-shaped. What it fixes is where the *scheduler* had to know the
+difference in order to decide something: whether abandoning a target would
+strand cargo, worked out by enumerating contract phase names inline. A scheduler
+reading FSM internals to make a decision the FSMs are the authority on.
+
+`assignTarget` is the mirror half and is deliberately left: it writes
+`tradeSymbol`, `marketWaypoint` and the opening phase per kind inline, so the
+scheduler is still the *author* of the meanings the FSMs now interpret. Fixing
+that means the FSM modules construct their own opening task, which is a bigger
+change and closer to the row split the issue actually asks for.
 
 Each FSM module exports its own predicate now — `miningCargoAtStake`,
 `contractCargoAtStake`, `scoutCargoAtStake` — and the scheduler switches over

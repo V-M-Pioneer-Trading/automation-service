@@ -260,7 +260,7 @@ export class FleetScheduler {
       case "contract":
         return contractCargoAtStake(task);
       case "scout":
-        return scoutCargoAtStake();
+        return scoutCargoAtStake(task);
     }
   }
 
