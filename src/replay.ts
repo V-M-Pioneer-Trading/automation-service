@@ -1,7 +1,13 @@
 import { Pool } from "pg";
 import { createPool } from "./db";
 import { KNOB_DEFINITIONS_BY_NAME } from "./knobs";
-import { miningScore } from "./scoring";
+import {
+  DECISION_EVENT_TYPES,
+  MiningDecisionRecord,
+  readMiningRecord,
+  REPLAYABLE_DECISION_PREDICATE,
+} from "./plannerDecision";
+import { breachesReserveFloor, isViableCandidate, miningScore } from "./scoring";
 
 /**
  * "What would the fleet have done if this knob had been different?"
@@ -31,31 +37,24 @@ import { miningScore } from "./scoring";
  * from the log alone. The log line for each decision still shows what won.
  */
 
-interface ReplayCandidate {
-  waypoint: string;
-  reachable: boolean;
-  distance?: number;
-  creditsPerCycle?: number;
-  score?: number;
-  breachesReserveFloor?: boolean;
-  estimatedFuelCost?: number;
-}
-
-interface ReplayDecision {
+/**
+ * One logged decision, ready to re-score. The scoring block is
+ * `MiningDecisionRecord` — the same type the planner writes — so the two cannot
+ * drift; only the log-row identity around it is added here.
+ */
+interface ReplayDecision extends MiningDecisionRecord {
   id: string;
   occurredAt: string;
-  chosen: string | null;
   chosenKind: string | null;
-  candidates: ReplayCandidate[];
-  knobsUsed: Record<string, number>;
-  model: {
-    speedUnitsPerHour?: number;
-    overheadHours?: number;
-    fuelCreditsPerUnitDistance?: number;
-    fleetCreditsPerCycle?: number;
-  };
-  currentCredits: number;
 }
+
+/** The `model` block, read back with each field optional: old rows predate some of them. */
+type ReplayedModel = {
+  speedUnitsPerHour?: number;
+  overheadHours?: number;
+  fuelCreditsPerUnitDistance?: number;
+  fleetCreditsPerCycle?: number;
+};
 
 export interface ReplayOutcome {
   decision: ReplayDecision;
@@ -103,12 +102,12 @@ export function parseDuration(raw: string): number {
  */
 export function replayDecision(decision: ReplayDecision, overrides: Record<string, number>): ReplayOutcome {
   const knob = (name: string, fallback: number): number => overrides[name] ?? decision.knobsUsed[name] ?? fallback;
+  const model = decision.model as ReplayedModel;
 
-  const speedUnitsPerHour = decision.model.speedUnitsPerHour ?? knob("travel.speedUnitsPerHourPrior", 30);
-  const overheadHours = decision.model.overheadHours ?? knob("cycle.overheadHoursPrior", 0.3);
-  const fuelCreditsPerUnitDistance =
-    decision.model.fuelCreditsPerUnitDistance ?? knob("fuel.creditsPerUnitDistancePrior", 5);
-  const fleetCreditsPerCycle = decision.model.fleetCreditsPerCycle ?? knob("mine.creditsPerCyclePrior", 5000);
+  const speedUnitsPerHour = model.speedUnitsPerHour ?? knob("travel.speedUnitsPerHourPrior", 30);
+  const overheadHours = model.overheadHours ?? knob("cycle.overheadHoursPrior", 0.3);
+  const fuelCreditsPerUnitDistance = model.fuelCreditsPerUnitDistance ?? knob("fuel.creditsPerUnitDistancePrior", 5);
+  const fleetCreditsPerCycle = model.fleetCreditsPerCycle ?? knob("mine.creditsPerCyclePrior", 5000);
   const taskWeight = knob("mine.taskWeight", 1);
   const reserveFloor = knob("credit.reserveFloor", 0);
 
@@ -129,8 +128,24 @@ export function replayDecision(decision: ReplayDecision, overrides: Record<strin
       overheadHours,
     });
     const estimatedFuelCost = roundTripDistance * fuelCreditsPerUnitDistance;
-    if (decision.currentCredits - estimatedFuelCost < reserveFloor) {
-      return { waypoint: candidate.waypoint, score, excluded: "reserve-floor" };
+    // The planner's own predicates, not a restatement of them: replay exists to
+    // answer "what would the planner have done", so any rule it applies and
+    // this does not is a wrong answer delivered confidently.
+    //
+    // Asked twice, with the real values both times, because the report names
+    // *why* a candidate was dropped and the two reasons read very differently
+    // to an operator. `isViableCandidate` is still the one that decides.
+    const breaches = breachesReserveFloor({
+      currentCredits: decision.currentCredits,
+      estimatedCost: estimatedFuelCost,
+      reserveFloor,
+    });
+    const viable = isViableCandidate({ reachable: candidate.reachable, breachesReserveFloor: breaches, score });
+    if (!viable) {
+      // Scoring at or below zero loses to idling. Without that clause,
+      // replaying `mine.taskWeight=0` reported a chosen field for every
+      // decision the planner had logged as `planner_no_viable_target`.
+      return { waypoint: candidate.waypoint, score, excluded: breaches ? "reserve-floor" : "not-worth-it" };
     }
     return { waypoint: candidate.waypoint, score, excluded: null };
   });
@@ -152,37 +167,40 @@ export function replayDecision(decision: ReplayDecision, overrides: Record<strin
   };
 }
 
-/** Loads logged planner decisions that carry enough detail to be replayed. */
+/**
+ * Loads logged planner decisions that carry enough detail to be replayed.
+ *
+ * Which types those are, which rows qualify, and where the scoring block sits
+ * in each are all `plannerDecision.ts`'s to say — this function's own knowledge
+ * is limited to "read them oldest first, up to a limit".
+ */
 export async function loadDecisions(pool: Pool, since: Date, limit: number): Promise<ReplayDecision[]> {
   const { rows } = await pool.query(
     `SELECT id, occurred_at, detail FROM event_log
-     WHERE type IN ('planner_assignment', 'planner_shadow_assignment')
-       AND occurred_at >= $1
-       -- A mining or no-target decision logs its candidates flat; a decision a
-       -- contract or scout won nests them under miningDetail. Both are
-       -- replayable, so accept either shape and skip decisions with neither.
-       AND (detail ? 'candidates' OR detail->'miningDetail' ? 'candidates')
+     WHERE type = ANY($1::text[])
+       AND occurred_at >= $2
+       AND ${REPLAYABLE_DECISION_PREDICATE}
      ORDER BY occurred_at ASC, id ASC
-     LIMIT $2`,
-    [since, limit]
+     LIMIT $3`,
+    [DECISION_EVENT_TYPES, since, limit]
   );
 
-  return rows.map((row: { id: string | number; occurred_at: Date; detail: Record<string, unknown> }) => {
-    const detail = row.detail;
-    // A contract or scout decision nests the mining scoring one level down;
-    // a mining or no-target decision keeps it flat. Accept both.
-    const miningDetail = (detail.miningDetail as Record<string, unknown> | undefined) ?? detail;
-    return {
+  const decisions: ReplayDecision[] = [];
+  for (const row of rows as { id: string | number; occurred_at: Date; detail: Record<string, unknown> }[]) {
+    const record = readMiningRecord(row.detail);
+    // Should not happen — the SQL selects on the same condition the reader
+    // uses — but a row that satisfies one and not the other is a decision
+    // silently missing from the denominator of "X of Y would have changed",
+    // so skip rather than replay an empty candidate list as an unchanged one.
+    if (record === null) continue;
+    decisions.push({
+      ...record,
       id: String(row.id),
       occurredAt: row.occurred_at.toISOString(),
-      chosen: (miningDetail.chosen as string | null) ?? null,
-      chosenKind: (detail.chosenKind as string | undefined) ?? null,
-      candidates: (miningDetail.candidates as ReplayCandidate[] | undefined) ?? [],
-      knobsUsed: (miningDetail.knobsUsed as Record<string, number> | undefined) ?? {},
-      model: (miningDetail.model as ReplayDecision["model"] | undefined) ?? {},
-      currentCredits: Number(miningDetail.currentCredits ?? 0),
-    };
-  });
+      chosenKind: (row.detail.chosenKind as string | undefined) ?? null,
+    });
+  }
+  return decisions;
 }
 
 export function formatReport(outcomes: ReplayOutcome[], overrides: Record<string, number>, verbose: boolean): string {

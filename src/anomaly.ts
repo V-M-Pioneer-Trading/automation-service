@@ -4,7 +4,8 @@ import { Clock } from "./clock";
 import { KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
 import { ShipTask } from "./shipTaskRepo";
-import { ACTION_ERROR_PREDICATE, EARNING_EVENT_PREDICATE, TASK_EVENT_PREDICATE } from "./fleetEvents";
+import { EventLog } from "./eventLog";
+import { MetricsRepo } from "./metrics";
 
 export interface Anomaly {
   id: string;
@@ -24,6 +25,9 @@ export interface AnomalyCandidate {
 }
 
 const MARKET_ACTIVE_USE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/** How far back `profit_drop` looks for the history it judges the latest rollup against. */
+const PROFIT_TREND_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 const ANOMALY_SELECT = "SELECT id, type, dedupe_key, detected_at, detail, delivered_at, delivery_attempts FROM anomaly";
 
@@ -125,14 +129,22 @@ type Reason = { reason: string; detail: Record<string, unknown> };
  * Deliberately read-only and side-effect free — persistence, dedupe, and
  * webhook delivery are the caller's (AnomalyScheduler's) job, so these checks
  * stay simple functions of "what does the data say right now."
+ *
+ * It has no `Pool`. It used to, and used it to run six queries against
+ * `event_log` and two against `metrics_rollup` — tables owned by `EventLog` and
+ * `MetricsRepo`, whose vocabulary it therefore had to know and keep in step by
+ * hand. Both of those modules now answer the questions instead, so this file
+ * contains the *judgement* (what counts as flat, stale, too many) and none of
+ * the retrieval.
  */
 export class AnomalyChecker {
   constructor(
-    private pool: Pool,
     private clock: Clock,
     private knobs: KnobRepo,
     private state: AutopilotState,
-    private marketIntel: MarketIntelRepo
+    private marketIntel: MarketIntelRepo,
+    private events: EventLog,
+    private metrics: MetricsRepo
   ) {}
 
   async runChecks(shipSymbol: string, task: ShipTask | null): Promise<AnomalyCandidate[]> {
@@ -204,61 +216,40 @@ export class AnomalyChecker {
   }
 
   private async detectProfitDrop(now: Date): Promise<Reason | null> {
-    const { rows } = await this.pool.query(
-      `SELECT credits_per_hour, window_end FROM metrics_rollup WHERE window_end <= $1 ORDER BY window_end DESC LIMIT 1`,
-      [now]
-    );
-    if (rows.length === 0) return null;
-    const latest = Number(rows[0].credits_per_hour);
-    const latestWindowEnd: Date = rows[0].window_end;
-
-    // Trailing average excludes the latest rollup itself — this is "latest vs
-    // history", not "latest vs a window that already contains it".
-    const sixHoursAgo = new Date(now.getTime() - 6 * 60 * 60 * 1000);
-    const { rows: windowRows } = await this.pool.query(
-      `SELECT AVG(credits_per_hour) AS avg, COUNT(*) AS count FROM metrics_rollup WHERE window_end > $1 AND window_end < $2`,
-      [sixHoursAgo, latestWindowEnd]
-    );
-    if (Number(windowRows[0].count) < 2) return null; // not enough history to judge a drop yet
-    const avg6h = Number(windowRows[0].avg);
-    if (avg6h <= 0) return null;
+    const trend = await this.metrics.latestAgainstTrailingAverage(now, PROFIT_TREND_WINDOW_MS);
+    if (trend === null) return null;
+    if (trend.sampleCount < 2) return null; // not enough history to judge a drop yet
+    if (trend.trailingAverage <= 0) return null;
 
     const fraction = await this.knobs.get("anomaly.profitDropFraction");
-    if (latest >= avg6h * fraction) return null;
-    return { reason: "profit_drop", detail: { latestCreditsPerHour: latest, avg6hCreditsPerHour: avg6h, fraction } };
+    if (trend.latest >= trend.trailingAverage * fraction) return null;
+    return {
+      reason: "profit_drop",
+      detail: { latestCreditsPerHour: trend.latest, avg6hCreditsPerHour: trend.trailingAverage, fraction },
+    };
   }
 
   private async detectCreditsFlat(now: Date): Promise<Reason | null> {
     const windowHours = await this.knobs.get("anomaly.creditsFlatWindowHours");
     const since = new Date(now.getTime() - windowHours * 60 * 60 * 1000);
 
-    // Baseline is the most recent snapshot at or before the window start (not
-    // one strictly inside it) — real polling is intermittent, and a FakeClock
-    // in tests jumps discretely, so no snapshot may land exactly in-window.
-    const latestSnapshot = (before: Date) =>
-      this.pool.query(
-        `SELECT id, detail FROM event_log WHERE type = 'agent_credits_snapshot' AND occurred_at <= $1
-         ORDER BY occurred_at DESC, id DESC LIMIT 1`,
-        [before]
-      );
-    const [{ rows: earliestRows }, { rows: baselineRows }, { rows: currentRows }] = await Promise.all([
-      this.pool.query(`SELECT MIN(occurred_at) AS earliest FROM event_log WHERE type = 'agent_credits_snapshot'`),
-      latestSnapshot(since),
-      latestSnapshot(now),
+    const [earliest, baseline, current] = await Promise.all([
+      this.events.firstCreditsSnapshotAt(),
+      this.events.creditsAt(since),
+      this.events.creditsAt(now),
     ]);
 
     // Require snapshotting to have started before the window, not just within
     // it — otherwise a freshly-armed autopilot looks "flat" on its first tick
     // simply for lack of history, not because credits actually stalled.
-    const earliest = earliestRows[0].earliest;
-    if (earliest === null || new Date(earliest) > since) return null;
-    if (baselineRows.length === 0 || currentRows.length === 0) return null;
+    if (earliest === null || earliest > since) return null;
+    if (baseline === null || current === null) return null;
     // The baseline being the most recent snapshot overall means no fresh
     // reading has landed since the window opened — "no data", not "flat".
-    if (currentRows[0].id === baselineRows[0].id) return null;
+    if (current.id === baseline.id) return null;
 
-    const oldestCredits = Number((baselineRows[0].detail as { credits: number }).credits);
-    const newestCredits = Number((currentRows[0].detail as { credits: number }).credits);
+    const oldestCredits = baseline.credits;
+    const newestCredits = current.credits;
     const netChange = newestCredits - oldestCredits;
     if (netChange > 0) return null;
     return { reason: "credits_flat", detail: { netChange, windowHours, oldestCredits, newestCredits } };
@@ -286,30 +277,22 @@ export class AnomalyChecker {
     const windowMinutes = await this.knobs.get("anomaly.noEarningsMinutes");
     const since = new Date(now.getTime() - windowMinutes * 60_000);
 
-    const [{ rows: lifecycleRows }, { rows: earningRows }] = await Promise.all([
-      this.pool.query(
-        `SELECT occurred_at FROM event_log WHERE type IN ('armed', 'paused', 'aborted')
-         ORDER BY occurred_at DESC, id DESC LIMIT 1`
-      ),
-      this.pool.query(
-        `SELECT MAX(occurred_at) AS last_earned, COUNT(*) AS earnings FROM event_log
-         WHERE ${EARNING_EVENT_PREDICATE} AND occurred_at >= $1 AND occurred_at <= $2`,
-        [since, now]
-      ),
+    const [enteredStateAt, earnings] = await Promise.all([
+      this.events.lastLifecycleTransitionAt(),
+      this.events.earningsBetween(since, now),
     ]);
 
     // In this state for less than the window: too early to judge.
-    const enteredStateAt = lifecycleRows[0]?.occurred_at ?? null;
-    if (enteredStateAt === null || new Date(enteredStateAt) > since) return null;
-    if (Number(earningRows[0].earnings) > 0) return null;
+    if (enteredStateAt === null || enteredStateAt > since) return null;
+    if (earnings.count > 0) return null;
 
     return {
       reason: "no_earnings",
       detail: {
         status,
         windowMinutes,
-        lastEarnedAt: (earningRows[0].last_earned as Date | null)?.toISOString() ?? null,
-        enteredStateAt: new Date(enteredStateAt).toISOString(),
+        lastEarnedAt: earnings.lastEarnedAt?.toISOString() ?? null,
+        enteredStateAt: enteredStateAt.toISOString(),
       },
     };
   }
@@ -323,16 +306,8 @@ export class AnomalyChecker {
   private async checkErrorRate(now: Date): Promise<AnomalyCandidate | null> {
     const windowMinutes = await this.knobs.get("anomaly.errorRateWindowMinutes");
     const since = new Date(now.getTime() - windowMinutes * 60_000);
-    const { rows } = await this.pool.query(
-      `SELECT
-         COUNT(*) FILTER (WHERE ${TASK_EVENT_PREDICATE}) AS total,
-         COUNT(*) FILTER (WHERE ${ACTION_ERROR_PREDICATE}) AS errors
-       FROM event_log WHERE occurred_at >= $1 AND occurred_at <= $2`,
-      [since, now]
-    );
-    const total = Number(rows[0].total);
+    const { total, errors } = await this.events.taskOutcomesBetween(since, now);
     if (total === 0) return null;
-    const errors = Number(rows[0].errors);
     const rate = errors / total;
     const threshold = await this.knobs.get("anomaly.errorRateThreshold");
     if (rate <= threshold) return null;
@@ -350,16 +325,12 @@ export class AnomalyChecker {
   private async checkMarketStaleness(now: Date): Promise<AnomalyCandidate[]> {
     const thresholdMinutes = await this.knobs.get("anomaly.marketStalenessMinutes");
     const activeSince = new Date(now.getTime() - MARKET_ACTIVE_USE_LOOKBACK_MS);
-    const { rows } = await this.pool.query(
-      `SELECT DISTINCT jsonb_array_elements_text(COALESCE(detail->'marketsChecked', '[]'::jsonb)) AS market
-       FROM event_log WHERE type = 'mining_market_selected' AND occurred_at >= $1`,
-      [activeSince]
-    );
-    if (rows.length === 0) return [];
+    const marketsInUse = await this.events.marketsPricedSince(activeSince);
+    if (marketsInUse.length === 0) return [];
 
     const lastRefreshed = new Map((await this.marketIntel.getAll()).map((m) => [m.waypoint, m.lastRefreshedAt]));
     const candidates: AnomalyCandidate[] = [];
-    for (const { market } of rows as { market: string }[]) {
+    for (const market of marketsInUse) {
       const refreshedAt = lastRefreshed.get(market);
       const staleMinutes = refreshedAt === undefined ? null : (now.getTime() - refreshedAt.getTime()) / 60_000;
       if (staleMinutes !== null && staleMinutes <= thresholdMinutes) continue;

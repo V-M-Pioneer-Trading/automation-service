@@ -36,6 +36,9 @@ describe("replayDecision", () => {
     occurredAt: "2026-01-01T00:00:00.000Z",
     chosen: "X1-NEAR",
     chosenKind: "mine",
+    shipSymbol: "MINING-1",
+    systemSymbol: "X1-TEST",
+    shipWaypoint: "X1-MARKET",
     currentCredits: 100_000,
     knobsUsed: { "mine.taskWeight": 1, "credit.reserveFloor": 0 },
     model: { speedUnitsPerHour: 30, overheadHours: 0.3, fuelCreditsPerUnitDistance: 5, fleetCreditsPerCycle: 5000 },
@@ -59,6 +62,18 @@ describe("replayDecision", () => {
     expect(outcome.replayedChoice).toBeNull();
     expect(outcome.changed).toBe(true);
     expect(outcome.replayedCandidates.find((c) => c.waypoint === "X1-NEAR")?.excluded).toBe("reserve-floor");
+  });
+
+  it("excludes what the planner would have called unviable, not just what the floor rules out", () => {
+    // `mine.taskWeight = 0` is an off switch in the planner: a zero score loses
+    // to idling and the decision is logged as `planner_no_viable_target`.
+    // Replay used to apply only the reserve-floor half of that rule, so it
+    // reported a chosen field for every decision the planner had declined to
+    // make — a confident wrong answer in the one tool an operator uses to
+    // check a knob before turning it.
+    const outcome = replayDecision(decision, { "mine.taskWeight": 0 });
+    expect(outcome.replayedChoice).toBeNull();
+    expect(outcome.replayedCandidates.find((c) => c.waypoint === "X1-NEAR")?.excluded).toBe("not-worth-it");
   });
 
   it("never scores an unreachable candidate", () => {

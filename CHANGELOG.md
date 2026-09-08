@@ -7,6 +7,44 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## The event log answers questions instead of handing out its table
+
+`fleetEvents.ts` already owned which types mean task progress, a failed action
+and credits arriving. `AnomalyChecker` was still issuing six queries of its own
+against `event_log` and two against `metrics_rollup` — reaching past the modules
+that own those tables, and restating the vocabulary on the way through.
+
+`EventLog` now answers the questions the checks actually ask: what the balance
+read at an instant, when the fleet first started recording it, what the operator
+last said they wanted, what was earned in a window, how much of what the fleet
+did in a window failed, which markets it is pricing against. `MetricsRepo` and
+`replay.ts` still read the table directly, and both are aggregating rather than
+asking; `AnomalyChecker` now issues no SQL at all. `MetricsRepo`
+answers the one the profit-drop check asks — the latest rollup against its own
+trailing average, which is one method because the two numbers only mean
+anything together. `AnomalyChecker` has **no `Pool`**: it contains the judgement
+and none of the retrieval. `fleetEvents.ts` gained the three vocabulary items
+that were still written out as literals (`LIFECYCLE_EVENT_TYPES`,
+`CREDITS_SNAPSHOT_TYPE`, `MARKET_SELECTION_TYPE`).
+
+## The decision record is one type, and replay applies the planner's own rule
+
+A planner decision is logged in one of two layouts — flat when mining or
+nothing won, nested under `miningDetail` when a contract or scout did, because a
+flat `chosen` there would name an asteroid field the ship was never sent to.
+Both were declared independently in `planner.ts` and `replay.ts`, with a note in
+`CLAUDE.md` asking future readers not to add a third. `plannerDecision.ts` owns
+the type, both layouts, and the writer/reader pair; the layouts stay, because
+normalising them would strand the archive replay exists to read.
+
+The drift that was already there: replay spelled out the reserve-floor half of
+the planner's assignability rule and not the `score > 0` half. So a replay of
+`mine.taskWeight=0` — the knob's documented off switch — reported a chosen
+field for every decision the planner had logged as `planner_no_viable_target`.
+Both now call `isViableCandidate`, and replay calls `breachesReserveFloor`
+rather than re-deriving it. Replay is what the knob-tuning workflow rests on;
+a confident wrong answer there is worse than no answer.
+
 ## Upstream failures are classified, and the retry limit means what it says
 
 `mine.failureRetryLimit` answers one question — "is this target not working
