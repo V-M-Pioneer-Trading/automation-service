@@ -6,7 +6,7 @@ import { ContractRepo } from "./contractRepo";
 import { DispatchLock } from "./dispatchLock";
 import { advanceContractTask } from "./contractTask";
 import { EventLog } from "./eventLog";
-import { GameClients, ShipSnapshot, UpstreamCallError } from "./gameClients";
+import { GameClients, ShipSnapshot, UpstreamCallError, UpstreamFailureKind } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
 import { KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
@@ -17,6 +17,32 @@ import { advanceScoutTask } from "./scoutTask";
 import { idleTask, isIdle, ShipTask, ShipTaskRepo } from "./shipTaskRepo";
 import { TickObservations, TickResult } from "./taskFsm";
 import { withTransaction } from "./transaction";
+
+/**
+ * What the scheduler decides a failure was. `UpstreamFailureKind` plus the one
+ * case that never touched an upstream: our own code threw. FSMs are DB-free,
+ * so an `internal` failure is a foreign phase, a contract row that vanished,
+ * or a bug — deterministic, and about this task.
+ */
+export type FailureVerdict = UpstreamFailureKind | "internal";
+
+export const verdictOf = (err: unknown): FailureVerdict =>
+  err instanceof UpstreamCallError ? err.kind : "internal";
+
+/**
+ * `rejected`, `malformed` and `internal` are evidence about the target, and
+ * spend `mine.failureRetryLimit` directly. `unavailable` and `credentials` are
+ * evidence about the fleet's plumbing and get this multiple of it instead.
+ *
+ * Not infinity, and that is the point of the number rather than a boolean.
+ * A permanently broken upstream answer is real — navigation-service serves a
+ * deterministic 500 for a corrupt cached market until an operator clears it —
+ * and a scout pinned to that waypoint with no failure budget would retry it
+ * forever with nothing at stake and nothing to show. At the default 5s tick
+ * and a retry limit of 3, this is about 25 minutes: far longer than any
+ * deploy, restart or credential refresh, and still an exit.
+ */
+export const UNRELATED_FAILURE_RETRY_MULTIPLIER = 100;
 
 export interface FleetSchedulerDeps {
   state: AutopilotState;
@@ -68,8 +94,13 @@ export class FleetScheduler {
 
   constructor(private readonly deps: FleetSchedulerDeps) {
     this.dispatchLock = new DispatchLock(deps.pool, `dispatch:${deps.shipSymbol}`);
+    // Pre-FSM failures (getShip, the planner, a replan) land here rather than
+    // in handleTickFailure, and during an outage they are most of them. They
+    // carry the same verdict so nothing filtering on `failureKind` sees a
+    // partial picture — they just never touch a target's retry budget,
+    // because no target has been acted on yet.
     this.loop = new IntervalLoop(deps.intervalMs, () => this.tick(), (err) =>
-      deps.events.append("mining_tick_error", { shipSymbol: deps.shipSymbol, message: String(err) })
+      deps.events.append("mining_tick_error", { shipSymbol: deps.shipSymbol, message: String(err), failureKind: verdictOf(err) })
     );
   }
 
@@ -309,7 +340,7 @@ export class FleetScheduler {
     try {
       await discoverAndEvaluateContracts({ contracts, events, clients, planner, ship});
     } catch (err) {
-      await events.append("contract_discovery_error", { message: String(err), failureKind: err instanceof UpstreamCallError ? err.kind : "rejected" });
+      await events.append("contract_discovery_error", { message: String(err), failureKind: verdictOf(err) });
     }
   }
 
@@ -369,26 +400,22 @@ export class FleetScheduler {
    * A real failure while working a target (not a planner/infra error — those
    * are caught by the loop's error handler).
    *
-   * What happens next depends on *why* it failed, not just on how often it
-   * has. `mine.failureRetryLimit` answers exactly one question — "is this
-   * target not working out?" — and only a `rejected` verdict is evidence about
-   * the target. An unreachable service or a rejected credential says nothing
-   * about where the ship was sent, so counting those there abandons good
-   * targets across the whole fleet for a reason no reassignment can fix; that
-   * is the failure auth-design decision 19 describes. A `malformed` request is
-   * our own bug and deterministic, so serving out the retry limit only delays
-   * the inevitable reassignment by `retryLimit` ticks.
+   * How much patience the target gets depends on *why* it failed.
+   * `mine.failureRetryLimit` answers exactly one question — "is this target
+   * not working out?" — and an unreachable service or a rejected credential is
+   * no answer to it. Counting those against the target abandons good targets
+   * across the whole fleet for a reason no reassignment can fix, which is the
+   * failure auth-design decision 19 describes. They still count, a hundred
+   * times more slowly, so nothing can be pinned forever on an upstream that is
+   * never coming back.
    */
   private async handleTickFailure(task: ShipTask, err: unknown): Promise<void> {
     const { events, knobs, tasks, contracts, shipSymbol } = this.deps;
-    // Anything thrown off the upstream seam is a logic error here — a foreign
-    // phase, a contract row that vanished. FSMs are DB-free, so there is no
-    // third possibility. `rejected` keeps those on the retry-then-reassign
-    // path the foreign-phase throw was written for.
-    const kind = err instanceof UpstreamCallError ? err.kind : "rejected";
-    // Only failures that say something about the target count against it.
-    const blamesTarget = kind === "rejected" || kind === "malformed";
-    const failureCount = blamesTarget ? task.failureCount + 1 : task.failureCount;
+    const kind = verdictOf(err);
+    // Every failure counts. What changes is how many it takes: keeping the
+    // count moving is also what lets the `consecutive_failures` alarm name a
+    // stuck ship, whatever is stucking it.
+    const failureCount = task.failureCount + 1;
     await events.append("mining_tick_error", { shipSymbol, message: String(err), failureCount, failureKind: kind });
 
     // Same discard invariant as the success path: an abort or a switch to
@@ -408,18 +435,12 @@ export class FleetScheduler {
         ? task.phase === "CONTRACT_TRAVEL_TO_DESTINATION" || task.phase === "CONTRACT_DELIVER" || task.phase === "CONTRACT_FULFILL"
         : task.tradeSymbol !== null;
 
-    // `unavailable` and `credentials` leave the task untouched: the ship keeps
-    // its target and retries it next tick, for as long as the outage or the
-    // credential problem lasts. The event above is what tells anyone — and the
-    // error-rate alarm still counts it, so an outage is not silent.
-    if (!blamesTarget) return;
-
-    // A `malformed` request fails identically every tick, so there is nothing
-    // to learn from retrying it; reassign now. Cargo still wins either way —
-    // abandoning a target with goods in the hold strands them.
-    const retryLimit = await knobs.get("mine.failureRetryLimit");
-    const giveUp = kind === "malformed" || failureCount >= retryLimit;
-    if (!giveUp || cargoAtStake) {
+    // The whole branch: a failure that says nothing about the target buys the
+    // ship a far longer budget on it, rather than none at all.
+    const blamesTarget = kind !== "unavailable" && kind !== "credentials";
+    const retryLimit =
+      (await knobs.get("mine.failureRetryLimit")) * (blamesTarget ? 1 : UNRELATED_FAILURE_RETRY_MULTIPLIER);
+    if (failureCount < retryLimit || cargoAtStake) {
       await tasks.save({ ...task, failureCount });
       return;
     }

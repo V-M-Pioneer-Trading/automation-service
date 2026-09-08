@@ -19,29 +19,40 @@ onto targets that were never the problem. That is the failure mode
 auth-design.md decision 19 describes, and it is worst exactly when it is least
 recoverable, because a re-plan needs the same upstream that is down.
 
-`gameClients.ts` now classifies each failure once, at the call, into a
-`UpstreamFailureKind`: `unavailable`, `credentials`, `malformed` or `rejected`.
-`handleTickFailure` branches on the verdict. `rejected` keeps the old
-retry-then-reassign policy — it is the only verdict that is evidence about the
-target. `malformed` reassigns on the first failure, since an identical request
-fails identically forever. `unavailable` and `credentials` leave the task
-untouched: the ship keeps its target and retries next tick for as long as the
-condition lasts. Cargo in the hold still outranks all four. Every failure is
-still logged with its verdict, so the error-rate alarm is as loud as before.
+`gameClients.ts` now classifies each failure once, at the call, into an
+`UpstreamFailureKind`: `unavailable`, `credentials`, `malformed` or `rejected`;
+`scheduler.ts` adds `internal` for "our own code threw". Every failure still
+counts — that is what lets the `consecutive_failures` alarm name a stuck ship
+whatever is stucking it — but the budget it counts against depends on the
+verdict. `rejected`, `malformed` and `internal` spend `mine.failureRetryLimit`,
+unchanged. `unavailable` and `credentials` spend a hundred times that: about 25
+minutes at the default 5s tick, which outlasts any deploy, restart or
+credential refresh. Cargo in the hold still outranks all five.
 
-Two of the four boundaries rest on documented upstream behaviour rather than on
-status alone. `400` means the game said no, unless the body carries
-`error.fields` — the sibling services pass the game's status and message
-through and add `fields` only on their own validation failures. `503` means a
-missing credential only when the message says so, which is the sole difference
-between st-gateway's two 503s.
+Not "retry forever", because an upstream can be permanently broken in a way
+that looks transient — navigation-service serves a deterministic 500 for a
+corrupt cached market until an operator clears it, and a scout has no cargo at
+stake to justify sitting on it for the rest of the run.
 
-Three existing tests simulated a bad target with a `500` or a `404`, which the
-taxonomy immediately exposed as testing something else: two proved
-"reassignment happens" using an outage that now correctly doesn't cause one,
-and the replan suite's fleet stub 404'd every call, so its ships were being
-reassigned on their first dispatch behind assertions about tasks surviving.
-All three now use a `400` game refusal.
+Not a *shorter* fuse for `malformed` either, tempting as it is for a request
+that will fail identically forever: fleet-service and agent-service answer
+`404` for any unrouted path, so a rolling deploy produces one, and it is
+indistinguishable from a permanently wrong request at every layer. Zero retries
+there would abandon the whole fleet on a single bad tick — the same failure
+reached another way.
+
+Two boundaries use documented upstream behaviour on top of the status, both as
+bonus precision rather than as the rule. `400` means the game said no unless
+the body carries `error.fields`, which only fleet-service emits (agent-service
+answers plain text, navigation-service RFC 9457). `503` means a missing
+credential only when the message says so — the sole difference between
+st-gateway's two 503s, and a signal that does not survive navigation-service,
+which collapses every upstream 5xx into its own `502`. Both gaps cost a
+`failureKind` label, never safety.
+
+Two existing tests simulated a bad target with a `500`, which the taxonomy
+exposed as testing something else: they proved "reassignment happens" from an
+outage that now correctly doesn't cause one. Both use a `400` game refusal now.
 
 ## The test suite stops racing a wall clock
 

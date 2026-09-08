@@ -3,12 +3,12 @@ import { AutopilotState } from "../autopilotState";
 import { ContractRepo } from "../contractRepo";
 import { createPool, migrate } from "../db";
 import { EventLog } from "../eventLog";
-import { classifyUpstreamStatus, ShipSnapshot, UpstreamCallError, UpstreamFailureKind } from "../gameClients";
+import { classifyUpstreamStatus, GameClients, ShipSnapshot, UpstreamCallError, UpstreamFailureKind } from "../gameClients";
 import { KnobRepo } from "../knobs";
 import { MarketIntelRepo } from "../marketIntelRepo";
 import { ObservationRepo } from "../observations";
 import { Planner } from "../planner";
-import { FleetScheduler } from "../scheduler";
+import { FleetScheduler, UNRELATED_FAILURE_RETRY_MULTIPLIER } from "../scheduler";
 import { ShipTask, ShipTaskRepo } from "../shipTaskRepo";
 import { FakeClock } from "../testSupport/fakeClock";
 import { fakeGameClients } from "../testSupport/fakeGameClients";
@@ -108,13 +108,15 @@ describe("the scheduler branches on the verdict, not the status code", () => {
   };
 
   /** Every tick's first dispatch (`orbit`, on the way to the belt) fails with `err`. */
-  const arrange = (err: unknown) => {
-    const clients = fakeGameClients({
-      getShip: async () => ship(),
-      orbit: async () => {
-        throw err;
-      },
-    });
+  const arrange = (err: unknown, override?: GameClients) => {
+    const clients =
+      override ??
+      fakeGameClients({
+        getShip: async () => ship(),
+        orbit: async () => {
+          throw err;
+        },
+      });
     const tasks = new ShipTaskRepo(pool, clock);
     const events = new EventLog(pool, clock);
     const knobs = new KnobRepo(pool);
@@ -153,47 +155,59 @@ describe("the scheduler branches on the verdict, not the status code", () => {
   const detailsOf = async (events: EventLog, type: string): Promise<Record<string, unknown>[]> =>
     (await events.list(200)).filter((e) => e.type === type).map((e) => e.detail as Record<string, unknown>);
 
-  it("an unreachable upstream never spends the target's retry budget", async () => {
+  it("an unreachable upstream does not spend the target's retry budget", async () => {
     // fleet-service is down. Nothing about X1-BELT is wrong, and no
     // reassignment reaches a service that is not answering.
-    const { tasks, events, scheduler: s } = arrange(
-      new UpstreamCallError("fleet-service: connect ECONNREFUSED", 502, "unavailable")
-    );
+    const { tasks, events, scheduler: s } = arrange(new UpstreamCallError("fleet-service: connect ECONNREFUSED", "unavailable"));
     await seedTask(tasks);
 
     await tick(s, 10); // well past mine.failureRetryLimit (3)
 
     const task = await tasks.get(SHIP);
     expect(task?.asteroidWaypoint).toBe("X1-BELT"); // still working the same target
-    expect(task?.failureCount).toBe(0);
     expect(await eventTypes(events)).not.toContain("mining_task_failed");
-    // Still audible: the error-rate alarm reads these, so an outage is loud
-    // without also being destructive.
+    // It still counts - that is what lets the consecutive-failures alarm name
+    // this ship - it just counts against a budget a hundred times longer.
+    expect(task?.failureCount).toBe(10);
     const errors = await detailsOf(events, "mining_tick_error");
     expect(errors.length).toBeGreaterThanOrEqual(10);
     expect(errors[0].failureKind).toBe("unavailable");
   });
 
-  it("a rejected credential never spends it either, and says so", async () => {
-    const { tasks, events, scheduler: s } = arrange(
-      new UpstreamCallError("fleet-service: 401 unauthorized", 401, "credentials")
-    );
+  it("...but does eventually spend a much longer one, so nothing is pinned forever", async () => {
+    // navigation-service serves a deterministic 500 for a corrupt cached
+    // market until an operator clears it. With no exit at all, a scout
+    // assigned there would retry that one waypoint for the rest of the run
+    // with no cargo at stake and nothing to show for it.
+    const { tasks, events, knobs, scheduler: s } = arrange(new UpstreamCallError("nav: 500 corrupt cached data", "unavailable"));
+    await knobs.set("mine.failureRetryLimit", 1);
+    await seedTask(tasks);
+
+    const budget = UNRELATED_FAILURE_RETRY_MULTIPLIER; // x a retry limit of 1
+    await tick(s, budget - 1);
+    expect((await tasks.get(SHIP))?.asteroidWaypoint).toBe("X1-BELT"); // still hanging on
+
+    await tick(s, 1);
+    expect(await eventTypes(events)).toContain("mining_task_failed");
+    expect((await tasks.get(SHIP))?.asteroidWaypoint).toBeNull();
+  }, 30_000);
+
+  it("a rejected credential is treated the same way, and says so", async () => {
+    const { tasks, events, scheduler: s } = arrange(new UpstreamCallError("fleet-service: 401 unauthorized", "credentials"));
     await seedTask(tasks);
 
     await tick(s, 10);
 
-    const task = await tasks.get(SHIP);
-    expect(task?.asteroidWaypoint).toBe("X1-BELT");
-    expect(task?.failureCount).toBe(0);
+    expect((await tasks.get(SHIP))?.asteroidWaypoint).toBe("X1-BELT");
     expect(await eventTypes(events)).not.toContain("mining_task_failed");
     expect((await detailsOf(events, "mining_tick_error"))[0].failureKind).toBe("credentials");
   });
 
-  it("the game refusing the action still counts against the target, and abandons it at the limit", async () => {
+  it("the game refusing the action spends the target's budget, and abandons it at the limit", async () => {
     // The pre-existing policy, unchanged: this is the failure the retry limit
-    // was designed for, and the one verdict that is evidence about the target.
+    // was designed for, and the clearest evidence about the target.
     const { tasks, events, scheduler: s } = arrange(
-      new UpstreamCallError('POST /ships/MINING-1/orbit: 400 {"error":{"message":"Ship is in transit."}}', 400, "rejected")
+      new UpstreamCallError("POST /ships/MINING-1/orbit: 400 Ship is in transit.", "rejected")
     );
     await seedTask(tasks);
 
@@ -203,29 +217,33 @@ describe("the scheduler branches on the verdict, not the status code", () => {
 
     await tick(s, 1);
     expect(await eventTypes(events)).toContain("mining_task_failed");
-    const task = await tasks.get(SHIP);
-    expect(task?.asteroidWaypoint).toBeNull(); // reassigned on the next tick
+    expect((await tasks.get(SHIP))?.asteroidWaypoint).toBeNull(); // reassigned on the next tick
     expect((await detailsOf(events, "mining_task_failed"))[0].failureKind).toBe("rejected");
   });
 
-  it("a malformed request reassigns on the first failure instead of retrying a deterministic bug", async () => {
-    const { tasks, events, scheduler: s } = arrange(
-      new UpstreamCallError("POST /ships/MINING-1/orbit: 404 not found", 404, "malformed")
-    );
+  it("a malformed request spends the same budget as a refusal, not a shorter one", async () => {
+    // Tempting to reassign immediately, since an identical request fails
+    // identically forever. But fleet-service and agent-service answer 404 for
+    // any unrouted path, so a rolling deploy produces one, and it is
+    // indistinguishable from a permanently wrong request at every layer.
+    // Zero retries would abandon the whole fleet on a single bad tick - the
+    // failure this taxonomy exists to prevent, reached a different way.
+    const { tasks, events, scheduler: s } = arrange(new UpstreamCallError("POST /ships/MINING-1/orbit: 404 not found", "malformed"));
     await seedTask(tasks);
 
     await tick(s, 1);
+    expect(await eventTypes(events)).not.toContain("mining_task_failed");
+    expect((await tasks.get(SHIP))?.asteroidWaypoint).toBe("X1-BELT");
 
+    await tick(s, 2);
     expect(await eventTypes(events)).toContain("mining_task_failed");
-    expect((await tasks.get(SHIP))?.asteroidWaypoint).toBeNull();
+    expect((await detailsOf(events, "mining_task_failed"))[0].failureKind).toBe("malformed");
   });
 
   it("cargo in the hold still outranks every verdict", async () => {
     // Abandoning a target mid-cycle strands whatever is already aboard, with
     // no code path back to selling it - true whoever's fault the failure was.
-    const { tasks, events, scheduler: s } = arrange(
-      new UpstreamCallError("POST /ships/MINING-1/orbit: 404 not found", 404, "malformed")
-    );
+    const { tasks, events, scheduler: s } = arrange(new UpstreamCallError("POST /ships/MINING-1/orbit: 404 not found", "malformed"));
     await seedTask(tasks, { tradeSymbol: "IRON_ORE" });
 
     await tick(s, 6);
@@ -234,10 +252,10 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     expect((await tasks.get(SHIP))?.asteroidWaypoint).toBe("X1-BELT");
   });
 
-  it("a failure off the upstream seam keeps the old retry-then-reassign path", async () => {
-    // A corrupt row or a vanished contract throws a plain Error. FSMs are
-    // DB-free, so there is no transient third case to protect, and the
-    // foreign-phase throw was written expecting exactly this.
+  it("our own code throwing is `internal`, and stays on the target's budget", async () => {
+    // A foreign phase, or a contract row that vanished. FSMs are DB-free, so
+    // there is no transient third case to protect, and the foreign-phase throw
+    // was written expecting exactly this treatment.
     const { tasks, events, scheduler: s } = arrange(new Error("advanceMiningTask called on a SCOUT_ phase"));
     await seedTask(tasks);
 
@@ -246,5 +264,26 @@ describe("the scheduler branches on the verdict, not the status code", () => {
 
     await tick(s, 1);
     expect(await eventTypes(events)).toContain("mining_task_failed");
+    expect((await detailsOf(events, "mining_task_failed"))[0].failureKind).toBe("internal");
+  });
+
+  it("a failure before the FSM runs carries a verdict too", async () => {
+    // `getShip` and the planner fail through the loop's error handler, not
+    // through handleTickFailure, and during an outage those are most of the
+    // failures there are. A digest filtering on failureKind saw none of them.
+    const clients = fakeGameClients({
+      getShip: async () => {
+        throw new UpstreamCallError("agent-service: connect ETIMEDOUT", "unavailable");
+      },
+    });
+    const { tasks, events, scheduler: s } = arrange(new Error("unused"), clients);
+    await seedTask(tasks);
+
+    await tick(s, 1);
+
+    const errors = await detailsOf(events, "mining_tick_error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0].failureKind).toBe("unavailable");
+    expect((await tasks.get(SHIP))?.failureCount).toBe(0); // no target was acted on
   });
 });

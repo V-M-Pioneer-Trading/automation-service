@@ -94,40 +94,55 @@ other (that cycle existed once; `transaction.ts` exists to break it).
   market for mining and the procurement market for contracts; `tradeSymbol` is
   the extracted good or the deliverable. Renaming the columns means a
   migration plus a change to the `/autopilot/ships/:s` response shape.
-- **`failureCount` counts evidence about the target, not throws.** It resets to
-  0 on any successful action, and increments only on a `rejected` or
-  `malformed` verdict (see below). At `mine.failureRetryLimit` the task is
-  abandoned via `idleTask` — immediately for `malformed`, which is
-  deterministic — *unless* cargo is at stake: for mining that's `tradeSymbol
-  !== null`; for contracts it's phase `CONTRACT_TRAVEL_TO_DESTINATION` or later
-  (a purchase has happened). An abandoned contract goes back to status
-  `accepted`.
+- **`failureCount` resets to 0 on any successful action** and increments on
+  every failed one. What the verdict changes is the *budget*: `rejected`,
+  `malformed` and `internal` spend `mine.failureRetryLimit`, while
+  `unavailable` and `credentials` spend
+  `mine.failureRetryLimit × UNRELATED_FAILURE_RETRY_MULTIPLIER`. At the limit
+  the task is abandoned via `idleTask` *unless* cargo is at stake: for mining
+  that's `tradeSymbol !== null`; for contracts it's phase
+  `CONTRACT_TRAVEL_TO_DESTINATION` or later (a purchase has happened). An
+  abandoned contract goes back to status `accepted`.
+
+  The multiplier is a number rather than "never give up" on purpose. A ship
+  pinned to a permanently broken upstream answer is real — navigation-service
+  serves a deterministic 500 for a corrupt cached market until an operator
+  clears it — and a scout has no cargo at stake to justify retrying forever.
 - **The verdict, not the status code, is what anything branches on.**
   `gameClients.ts` classifies every failed call once, where the transport error
   and the response are both still in hand, into `unavailable` (never reached
   the game), `credentials` (we cannot authenticate), `malformed` (our request
   was wrong) or `rejected` (the game refused the action). `handleTickFailure`
-  is the only consumer that branches. `statusCode` is kept on the error as the
-  raw fact it was classified from, and **nothing reads it** — `server.ts`'s
-  error handler used to, which was both unreachable (no route calls an upstream
-  service) and misleading, since it implied an operator's `401` might be the
-  fleet's own expired token.
+  is the only consumer that branches, and `UpstreamCallError` no longer carries
+  a status code at all. `server.ts`'s error handler used to re-serve one, which
+  was both unreachable (no route calls an upstream service) and misleading,
+  since it implied an operator's `401` might be the fleet's own expired token.
+
+  `scheduler.ts` widens the type to `FailureVerdict` with one more case,
+  `internal`: our own code threw. Use `verdictOf(err)` rather than testing
+  `instanceof` again.
 
   This exists because all four used to be one thing: an expired M2M token or a
   ten-minute fleet-service outage ticked `failureCount` on every ship until the
   retry limit abandoned every task in the fleet, then re-planned them onto
   targets that were never the problem (auth-design.md decision 19).
 
-  Two classification details are load-bearing and match documented upstream
-  contracts, not guesses. `400` is `rejected` unless the body carries
-  `error.fields`, because the sibling services pass the game's own status and
-  message through and add `fields` only on *their* validation failures
-  (fleet-service README). `503` is `credentials` only when the message says the
-  credential is not configured, which is the sole thing separating st-gateway's
-  two different 503s (st-gateway README). A throw that isn't an
-  `UpstreamCallError` is a logic error — FSMs are DB-free, so there is no
-  transient third case — and is treated as `rejected`, which is what the
-  foreign-phase throw below was written for.
+  Two classification details match documented upstream behaviour rather than
+  guesses, and both are *bonus* signals — the status alone already lands on a
+  safe verdict. `400` is `rejected` unless the body carries `error.fields`,
+  which **only fleet-service emits** (tsoa validation); agent-service answers
+  plain text and navigation-service answers RFC 9457, so their own validation
+  failures read `rejected` and simply get the full retry budget. `503` is
+  `credentials` only when the message says the credential is not configured,
+  the sole thing separating st-gateway's two 503s — and that signal does not
+  survive navigation-service, which collapses every upstream 5xx into its own
+  `502`. Those gaps cost precision in an event's `failureKind`, never safety.
+
+  What must not be done is give `malformed` a shorter fuse than `rejected`:
+  fleet-service and agent-service answer `404` for any unrouted path, so a
+  rolling deploy produces one, and treating that as a proven-permanent bug
+  would abandon the whole fleet on a single bad tick — the same failure by
+  another route.
 - **A foreign phase throws.** `advanceMiningTask` on a `SCOUT_*` phase throws
   rather than returning `null`, so a corrupt row is counted as a failure and
   eventually reassigned instead of stalling silently forever.
@@ -296,7 +311,10 @@ Renaming it would strand every historical row, so it stays; what must not
 happen again is a *denominator* that reads the name literally.
 `mining_tick_error`, `mining_task_failed` and `contract_discovery_error` each
 carry a `failureKind` — the verdict above — so a digest can say *why* the fleet
-is failing without anyone re-deriving it from a message string.
+is failing without anyone re-deriving it from a message string. That includes
+the `mining_tick_error`s written by the loop's own error callback, which are
+most of them during an outage (every `getShip` and planner call fails there,
+before any FSM runs).
 
 Event `detail` must never contain a token or anything token-shaped; `actor`
 is the Clerk `sub` only.
@@ -393,12 +411,10 @@ is the Clerk `sub` only.
   matching query, including inside a transaction; reuse it for
   "crash between two writes" cases.
 - **A stub that fails a ship action must pick a status that means what the test
-  means.** A `500` is `unavailable` and deliberately costs the target nothing,
-  so "this target keeps failing" simulated with one asserts nothing; a `404` is
-  `malformed` and reassigns on the *first* failure, which will empty a task a
-  test expected to survive. Use a `400` with the game's envelope
-  (`{ error: { message } }`) for a refusal. All three mistakes were in this
-  suite before the taxonomy existed to expose them.
+  means.** A `500` is `unavailable`, which buys the target a hundred times the
+  usual patience, so "this target keeps failing" simulated with one will time
+  out rather than reassign — two tests in this suite did exactly that. Use a
+  `400` with the game's envelope (`{ error: { message } }`) for a refusal.
 
 ## Conventions
 

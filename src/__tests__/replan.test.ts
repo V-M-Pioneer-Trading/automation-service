@@ -81,11 +81,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     });
 
     fleet = startStubServer((_req, _body, res) => {
-      // This suite is about replan triggering and scope, so the ship is meant
-      // to sit on its target without progressing. A game refusal does that; a
-      // 404 would classify as `malformed` and reassign the ship on its first
-      // dispatch, quietly emptying the very task these cases assert survives.
-      respondJson(res, 400, { error: { message: "stub: this suite does not drive the FSM" } });
+      respondJson(res, 404, { error: "unused in this suite" });
     });
 
     nav = startStubServer((req, _body, res) => {
