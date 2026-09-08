@@ -41,6 +41,17 @@ describe("the decision record's two layouts", () => {
     expect(readMiningRecord(decisionDetail(kind, mining, {}))).toEqual(mining);
   });
 
+  it("reads whichever layout actually carries the candidates", () => {
+    // A row qualifying on the flat disjunct while also carrying an unrelated
+    // nested object. The planner does not write this, but the reader and the
+    // SQL predicate must agree about which rows exist or a decision goes
+    // missing from the denominator of "X of Y would have changed" - the class
+    // of gap this module was extracted to close.
+    const record = readMiningRecord({ ...mining, miningDetail: { note: "something else" } });
+    expect(record?.chosen).toBe("X1-TEST-BELT");
+    expect(record?.candidates).toHaveLength(1);
+  });
+
   it("returns null for a decision that logged no candidates to re-score", () => {
     expect(readMiningRecord({ chosenKind: "none", shipSymbol: "MINING-1" })).toBeNull();
   });

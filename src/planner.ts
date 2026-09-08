@@ -33,7 +33,7 @@ import { decisionDetail, MiningDecisionRecord, PlannerCandidate } from "./planne
 // A candidate is part of the decision record before it is part of the planner:
 // it is what a replay re-scores. Defined there so the record module depends on
 // nothing, and re-exported here because this is where callers look for it.
-export { PlannerCandidate };
+export type { PlannerCandidate };
 
 export interface ContractEvaluation {
   /** Null if no market in the system sells the required good, or no route reaches the destination. */

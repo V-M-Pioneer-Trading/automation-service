@@ -99,6 +99,19 @@ describe("what the event log can be asked", () => {
       expect(earnings.lastEarnedAt).toEqual(at(3));
     });
 
+    it("includes both ends of the window", async () => {
+      // The bounds are inclusive, and a check that pages on "nothing earned
+      // all window" must not be able to miss an earning that landed exactly on
+      // an edge — least of all the one at `now`, which is every tick.
+      await appendAt(0, "mining_sell", { totalPrice: 100 });
+      await appendAt(10, "mining_sell", { totalPrice: 100 });
+      await appendAt(11, "mining_sell", { totalPrice: 100 }); // outside
+
+      const earnings = await events.earningsBetween(at(0), at(10));
+      expect(earnings.count).toBe(2);
+      expect(earnings.lastEarnedAt).toEqual(at(10));
+    });
+
     it("reports nothing earned as zero rather than as no data", async () => {
       await appendAt(1, "mining_extract", { units: 3 });
       const earnings = await events.earningsBetween(at(0), at(10));
@@ -122,22 +135,31 @@ describe("what the event log can be asked", () => {
       expect(errors).toBe(1);
     });
 
-    it("ignores what happened outside the window", async () => {
-      await appendAt(1, "mining_tick_error", {});
-      await appendAt(30, "mining_extract", { units: 1 });
+    it("ignores what happened outside the window, and includes both of its ends", async () => {
+      await appendAt(9, "mining_tick_error", {}); // before
+      await appendAt(10, "mining_tick_error", {}); // exactly at `since`
+      await appendAt(40, "mining_extract", { units: 1 }); // exactly at `until`
+      await appendAt(41, "mining_extract", { units: 1 }); // after
+
       const { total, errors } = await events.taskOutcomesBetween(at(10), at(40));
-      expect(total).toBe(1);
-      expect(errors).toBe(0);
+      expect(total).toBe(2);
+      expect(errors).toBe(1);
     });
   });
 
   describe("markets in active use", () => {
-    it("is every market a sell leg priced, deduplicated", async () => {
-      await appendAt(1, "mining_market_selected", { marketsChecked: ["X1-A", "X1-B"] });
+    it("is every market a sell leg priced, deduplicated, from the lookback edge inclusive", async () => {
+      await appendAt(0, "mining_market_selected", { marketsChecked: ["X1-A", "X1-B"] }); // exactly at `since`
       await appendAt(2, "mining_market_selected", { marketsChecked: ["X1-B", "X1-C"] });
       await appendAt(3, "mining_sell", { totalPrice: 10 }); // says nothing about markets
 
       expect((await events.marketsPricedSince(at(0))).sort()).toEqual(["X1-A", "X1-B", "X1-C"]);
+    });
+
+    it("does not reach back past the lookback", async () => {
+      await appendAt(0, "mining_market_selected", { marketsChecked: ["X1-OLD"] });
+      await appendAt(5, "mining_market_selected", { marketsChecked: ["X1-NEW"] });
+      expect(await events.marketsPricedSince(at(1))).toEqual(["X1-NEW"]);
     });
 
     it("treats a selection that priced nothing as no markets rather than an error", async () => {

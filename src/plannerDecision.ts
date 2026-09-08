@@ -83,8 +83,14 @@ export function decisionDetail(
  * an archive: the oldest of them predate fields the current writer always sets.
  */
 export function readMiningRecord(detail: Record<string, unknown>): MiningDecisionRecord | null {
+  // Whichever layout actually carries the candidates, which is what
+  // `REPLAYABLE_DECISION_PREDICATE` selects on. Preferring `miningDetail`
+  // outright would drop a row that qualified on the flat disjunct while
+  // carrying an unrelated nested object — not a shape the planner writes, but
+  // the reader and the predicate disagreeing about which rows exist is exactly
+  // the class of gap this module was extracted to close.
   const nested = detail.miningDetail as Record<string, unknown> | undefined;
-  const block = nested ?? detail;
+  const block = nested?.candidates !== undefined ? nested : detail;
   if (block.candidates === undefined) return null;
   return {
     shipSymbol: (block.shipSymbol as string | undefined) ?? "",

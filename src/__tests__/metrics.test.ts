@@ -4,6 +4,7 @@ import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { MetricsRepo } from "../metrics";
 
 describe("automation-service metrics rollups (meta#14)", () => {
   let pool: Pool;
@@ -131,4 +132,69 @@ describe("automation-service metrics rollups (meta#14)", () => {
     expect(rollupsAfterRestart).toHaveLength(rollupsBeforeRestart.length);
     expect(rollupsAfterRestart[0].windowEnd).toBe(latestWindowEnd);
   }, 10_000);
+});
+
+/**
+ * The one question `profit_drop` asks of the rollups. It is one method, not
+ * two, because the two numbers only mean anything together: the trailing
+ * average deliberately excludes the latest rollup, so the comparison is
+ * "latest against its own history" and not "latest against a window that
+ * already contains it". Split across two calls, that invariant lived in the
+ * caller — which is how the check came to own two queries against a table it
+ * does not.
+ */
+describe("MetricsRepo.latestAgainstTrailingAverage", () => {
+  let pool: Pool;
+
+  beforeAll(async () => {
+    pool = createPool(process.env.DATABASE_URL!);
+    await migrate(pool);
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  beforeEach(async () => {
+    await resetDatabase(pool);
+  });
+
+  const NOW = new Date("2026-01-01T12:00:00Z");
+  const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000);
+
+  const insertRollup = async (windowEnd: Date, creditsPerHour: number) => {
+    await pool.query(
+      `INSERT INTO metrics_rollup (window_start, window_end, computed_at, credits_per_hour, extraction_units, error_rate)
+       VALUES ($1, $2, $2, $3, 0, 0)`,
+      [new Date(windowEnd.getTime() - 3_600_000), windowEnd, creditsPerHour]
+    );
+  };
+
+  it("excludes the latest rollup from the average it is compared against", async () => {
+    await insertRollup(hoursAgo(3), 1000);
+    await insertRollup(hoursAgo(2), 2000);
+    await insertRollup(hoursAgo(1), 300); // the latest, and the collapse
+
+    const result = await new MetricsRepo(pool, { now: () => NOW }).latestAgainstTrailingAverage(NOW, 6 * 3_600_000);
+    expect(result).not.toBeNull();
+    expect(result!.latest).toBe(300);
+    // 1500, not 1100: including the collapsed window would drag the baseline
+    // toward it and make a real drop look shallower than it is.
+    expect(result!.trailingAverage).toBe(1500);
+    expect(result!.sampleCount).toBe(2);
+  });
+
+  it("does not reach past the trailing window", async () => {
+    await insertRollup(hoursAgo(20), 9000); // yesterday, irrelevant
+    await insertRollup(hoursAgo(3), 1000);
+    await insertRollup(hoursAgo(1), 300);
+
+    const result = await new MetricsRepo(pool, { now: () => NOW }).latestAgainstTrailingAverage(NOW, 6 * 3_600_000);
+    expect(result!.trailingAverage).toBe(1000);
+    expect(result!.sampleCount).toBe(1);
+  });
+
+  it("has no answer at all before the first rollup exists", async () => {
+    expect(await new MetricsRepo(pool, { now: () => NOW }).latestAgainstTrailingAverage(NOW, 6 * 3_600_000)).toBeNull();
+  });
 });

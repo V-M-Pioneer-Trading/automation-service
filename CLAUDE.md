@@ -37,27 +37,28 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `intervalLoop.ts` | `IntervalLoop`: the one guarded timer every scheduler runs on | nothing |
 | `dispatchLock.ts` | `DispatchLock`: Postgres advisory lock making "one process drives this ship" true across processes | pg, crypto |
 | `fleetEvents.ts` | The event vocabulary: task progress, failed actions, credits arriving. SQL predicates only, no I/O | nothing |
-| `anomaly.ts` | `AnomalyRepo`, `AnomalyChecker` (five read-only checks). **No `Pool`** — the checks judge, they don't retrieve | knobs, marketIntel, eventLog, metrics |
+| `anomaly.ts` | `AnomalyRepo` (owns the `anomaly` table), and `AnomalyChecker` — five read-only checks that take **no `Pool`**: they judge, they don't retrieve | knobs, marketIntel, eventLog, metrics |
 | `anomalyScheduler.ts` | Runs checks, dedupes, persists, delivers, requests replans | anomaly, webhookDelivery |
 | `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table, fleetEvents |
 | `testSupport/fakeClock.ts`, `testSupport/fakeGameClients.ts` | The adapters for the `Clock` and `GameClients` seams. One each, shared — not one per test file | test-only |
 | `eventLog.ts` | Appends events, and **answers the questions asked of the log** — what the balance read, what the operator last asked for, what was earned, how much failed, which markets are priced against | clock, fleetEvents |
+| `plannerDecision.ts` | The decision record: the scoring block's type, the two `event_log.detail` layouts, and the writer/reader pair for them. Imports nothing local | nothing |
 | `shipTaskRepo.ts`, `contractRepo.ts`, `marketIntelRepo.ts` | Row ↔ object repos. Repos taking `Pool \| PoolClient` can join a transaction | clock |
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
 | `auth.ts` | Networkless Clerk JWT verification, service-secret guard | jose |
 | `config.ts` | `configFromEnv()`; every numeric env var validated positive | fs |
 | `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | m2mToken, fetch |
 | `m2mToken.ts` | Mints/caches this service's own Clerk M2M token for outbound `Authorization` | fetch, crypto |
-| `plannerDecision.ts` | The decision record: the scoring block's type, the two `event_log.detail` layouts, and the writer/reader pair for them. Imports nothing local | nothing |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs, plannerDecision |
 
 Dependency direction is strictly downward in that table's spirit: `scoring`,
 `routeCost` and `plannerDecision` import nothing local; FSMs never import repos
 except the `ShipTask` type and `idleTask`; `knobs.ts` and `db.ts` must not
 import each other (that cycle existed once; `transaction.ts` exists to break
-it). `PlannerCandidate` lives in `plannerDecision.ts` and is re-exported from
-`planner.ts`, which is why there is no cycle between them: the candidate is
-part of the logged record before it is part of the planner.
+it). `PlannerCandidate` lives in `plannerDecision.ts`, not in `planner.ts`, so
+that the record module can import nothing at all: a candidate is part of the
+logged record before it is part of the planner. `planner.ts` re-exports the type
+for callers who look there first.
 
 ## Invariants the scheduler depends on
 
@@ -319,16 +320,21 @@ ai-service); treat them as public. Things that depend on specific types:
 | Consumer | Reads |
 |---|---|
 | `fleetEvents.ts` | **Owns the vocabulary.** Which types mean task progress, a failed action, credits arriving, a balance reading, a market selection, and the operator's stated intent |
-| `EventLog` | The only module that queries `event_log`. Turns that vocabulary into the questions callers actually ask (`creditsAt`, `lastLifecycleTransitionAt`, `earningsBetween`, `taskOutcomesBetween`, `marketsPricedSince`) |
+| `EventLog` | Turns that vocabulary into the questions callers actually ask (`creditsAt`, `lastLifecycleTransitionAt`, `earningsBetween`, `taskOutcomesBetween`, `marketsPricedSince`). Everything about *which rows mean what* goes here |
 | `MetricsRepo` | `mining_extract.units`, plus `fleetEvents`' revenue and error-rate predicates |
 | `AnomalyChecker` | Asks `EventLog` and `MetricsRepo`; issues no SQL of its own |
 | `plannerDecision.ts` | `planner_assignment`, `planner_shadow_assignment` and the layout of their `detail` |
 | `/anomalies/digest` | `NOTABLE_EVENT_TYPES` in `server.ts`. The test for inclusion is "would someone be wrong about the fleet without it, and does nothing else say it?" — not "is it an error". Routine per-tick events stay out; a bounded list nobody reads is worse than no list |
 
-**Ask `EventLog` for rows and `fleetEvents.ts` for the vocabulary; never write
-your own `type LIKE …` and never query `event_log` from outside `EventLog`.**
-`AnomalyChecker` used to run six of its own queries against it — reaching past
-the module that owns the table, and restating the vocabulary in the process.
+**Never write your own `type LIKE …`, and don't query `event_log` to answer a
+question about the fleet — ask `EventLog`.** `AnomalyChecker` used to run six of
+its own queries against it, reaching past the module that owns the table and
+restating the vocabulary in the process; it now issues no SQL at all. Two other
+modules do still read the table directly, and both are aggregating rather than
+asking: `MetricsRepo` computes a rollup, and `replay.ts` streams decisions
+(through `plannerDecision.ts`'s predicate, so the row *selection* is still owned
+in one place). A third such reader is a smell.
+
 Both alarms and
 the rollup used to spell these questions out separately, and drifted into
 agreeing with each other about the wrong thing: they counted errors that every

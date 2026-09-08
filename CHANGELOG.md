@@ -17,7 +17,9 @@ that own those tables, and restating the vocabulary on the way through.
 `EventLog` now answers the questions the checks actually ask: what the balance
 read at an instant, when the fleet first started recording it, what the operator
 last said they wanted, what was earned in a window, how much of what the fleet
-did in a window failed, which markets it is pricing against. `MetricsRepo`
+did in a window failed, which markets it is pricing against. `MetricsRepo` and
+`replay.ts` still read the table directly, and both are aggregating rather than
+asking; `AnomalyChecker` now issues no SQL at all. `MetricsRepo`
 answers the one the profit-drop check asks — the latest rollup against its own
 trailing average, which is one method because the two numbers only mean
 anything together. `AnomalyChecker` has **no `Pool`**: it contains the judgement

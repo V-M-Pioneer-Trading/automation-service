@@ -128,17 +128,24 @@ export function replayDecision(decision: ReplayDecision, overrides: Record<strin
       overheadHours,
     });
     const estimatedFuelCost = roundTripDistance * fuelCreditsPerUnitDistance;
-    // The planner's own predicate, not a restatement of it: replay exists to
+    // The planner's own predicates, not a restatement of them: replay exists to
     // answer "what would the planner have done", so any rule it applies and
     // this does not is a wrong answer delivered confidently.
-    if (breachesReserveFloor({ currentCredits: decision.currentCredits, estimatedCost: estimatedFuelCost, reserveFloor })) {
-      return { waypoint: candidate.waypoint, score, excluded: "reserve-floor" };
-    }
-    if (!isViableCandidate({ reachable: true, breachesReserveFloor: false, score })) {
-      // Scoring at or below zero loses to idling. Without this, replaying
-      // `mine.taskWeight=0` reported a chosen field for every decision the
-      // planner had logged as `planner_no_viable_target`.
-      return { waypoint: candidate.waypoint, score, excluded: "not-worth-it" };
+    //
+    // Asked twice, with the real values both times, because the report names
+    // *why* a candidate was dropped and the two reasons read very differently
+    // to an operator. `isViableCandidate` is still the one that decides.
+    const breaches = breachesReserveFloor({
+      currentCredits: decision.currentCredits,
+      estimatedCost: estimatedFuelCost,
+      reserveFloor,
+    });
+    const viable = isViableCandidate({ reachable: candidate.reachable, breachesReserveFloor: breaches, score });
+    if (!viable) {
+      // Scoring at or below zero loses to idling. Without that clause,
+      // replaying `mine.taskWeight=0` reported a chosen field for every
+      // decision the planner had logged as `planner_no_viable_target`.
+      return { waypoint: candidate.waypoint, score, excluded: breaches ? "reserve-floor" : "not-worth-it" };
     }
     return { waypoint: candidate.waypoint, score, excluded: null };
   });
@@ -181,7 +188,11 @@ export async function loadDecisions(pool: Pool, since: Date, limit: number): Pro
   const decisions: ReplayDecision[] = [];
   for (const row of rows as { id: string | number; occurred_at: Date; detail: Record<string, unknown> }[]) {
     const record = readMiningRecord(row.detail);
-    if (record === null) continue; // the SQL already excludes these; belt and braces for old rows
+    // Should not happen — the SQL selects on the same condition the reader
+    // uses — but a row that satisfies one and not the other is a decision
+    // silently missing from the denominator of "X of Y would have changed",
+    // so skip rather than replay an empty candidate list as an unchanged one.
+    if (record === null) continue;
     decisions.push({
       ...record,
       id: String(row.id),
