@@ -297,6 +297,55 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     expect((await tasks.get(SHIP))?.asteroidWaypoint).toBe("X1-BELT");
   });
 
+  it.each(["CONTRACT_TRAVEL_TO_DESTINATION", "CONTRACT_DELIVER", "CONTRACT_FULFILL"] as const)(
+    "keeps retrying a contract task at %s, where a purchase has already been dispatched",
+    async (phase) => {
+      // Every phase from the purchase onward, not just the first. A contract's
+      // tradeSymbol is set at assignment time (meta#27), so the phase is the
+      // only thing that says goods are aboard - and dropping one from that list
+      // strands whatever was bought, with no path back to delivering it.
+      const { tasks, events, scheduler: s } = arrange(
+        new UpstreamCallError("POST /ships/MINING-1/orbit: 400 Ship is in transit.", "rejected")
+      );
+      await seedTask(tasks, { taskKind: "contract", phase, contractId: null, tradeSymbol: "IRON_ORE" });
+
+      await tick(s, 6); // twice the retry limit
+
+      expect(await eventTypes(events)).not.toContain("mining_task_failed");
+      expect((await tasks.get(SHIP))?.phase).toBe(phase);
+    }
+  );
+
+  it("gives up on a contract task that has not bought anything yet", async () => {
+    // The other side of the same rule: before a purchase there is nothing to
+    // strand, so the target is abandoned and the contract released (meta#27).
+    const { tasks, events, scheduler: s } = arrange(
+      new UpstreamCallError("POST /ships/MINING-1/orbit: 400 Ship is in transit.", "rejected")
+    );
+    await seedTask(tasks, { taskKind: "contract", phase: "CONTRACT_PURCHASE", contractId: null, tradeSymbol: "IRON_ORE" });
+
+    await tick(s, 3);
+
+    expect(await eventTypes(events)).toContain("mining_task_failed");
+  });
+
+  it("a scout is never held back by cargo it cannot hold", async () => {
+    // The scheduler used to apply mining's rule - tradeSymbol !== null - to
+    // every non-contract task. That gave the right answer for a scout only
+    // because nothing sets that column on one; a row that carried it would have
+    // been retried on the same target forever, on the strength of cargo a scout
+    // cannot have. Each kind answers for itself now (meta#75 B7).
+    const { tasks, events, scheduler: s } = arrange(
+      new UpstreamCallError("POST /ships/MINING-1/orbit: 400 Ship is in transit.", "rejected")
+    );
+    await seedTask(tasks, { taskKind: "scout", phase: "SCOUT_TRAVEL", tradeSymbol: "IRON_ORE" });
+
+    await tick(s, 3); // the retry limit
+
+    expect(await eventTypes(events)).toContain("mining_task_failed");
+    expect((await tasks.get(SHIP))?.asteroidWaypoint).toBeNull();
+  });
+
   it("our own code throwing is `internal`, and stays on the target's budget", async () => {
     // A foreign phase, or a contract row that vanished. FSMs are DB-free, so
     // there is no transient third case to protect, and the foreign-phase throw

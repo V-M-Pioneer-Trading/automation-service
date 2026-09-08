@@ -1,5 +1,5 @@
 import { ContractRecord } from "./contractRepo";
-import { idleTask } from "./shipTaskRepo";
+import { ContractPhase, idleTask, ShipTask, TaskPhase } from "./shipTaskRepo";
 import {
   dockIfNeeded,
   refuelIfNeeded,
@@ -19,6 +19,21 @@ import {
  * CONTRACT_TRAVEL_TO_MARKET while units are still owed. Only the contract's
  * first deliverable is worked — see README.
  */
+/**
+ * The phases from a dispatched purchase onward. `tradeSymbol` cannot answer
+ * "is cargo aboard?" for a contract the way it does for mining: it is set at
+ * assignment time, before anything has been bought (meta#27). The phase is what
+ * says a purchase has happened.
+ */
+const CARGO_HELD_PHASES: readonly TaskPhase[] = [
+  "CONTRACT_TRAVEL_TO_DESTINATION",
+  "CONTRACT_DELIVER",
+  "CONTRACT_FULFILL",
+] satisfies readonly ContractPhase[];
+
+/** See `miningCargoAtStake` for why each kind answers this itself. */
+export const contractCargoAtStake = (task: ShipTask): boolean => CARGO_HELD_PHASES.includes(task.phase);
+
 export async function advanceContractTask(ctx: TaskContext & { contract: ContractRecord }): Promise<TickResult | null> {
   const waiting = resolveWaitIfElapsed(ctx, "contract");
   if (waiting !== undefined) return waiting;

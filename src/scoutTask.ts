@@ -10,6 +10,18 @@ import { dockIfNeeded, refuelIfNeeded, requireTarget, resolveWaitIfElapsed, Task
  * `task.asteroidWaypoint`, the column every task kind uses for "where the
  * planner sent me".
  */
+/**
+ * Never. A scout docks, reads prices and leaves; it buys nothing and extracts
+ * nothing, so there is never cargo to strand by abandoning its target.
+ *
+ * Worth stating rather than inheriting. The scheduler used to apply mining's
+ * rule — `tradeSymbol !== null` — to every non-contract task, which gave the
+ * right answer for a scout only because nothing sets that column on one. A
+ * scout row that somehow carried a `tradeSymbol` would have been retried on the
+ * same target forever, on the strength of cargo it cannot hold.
+ */
+export const scoutCargoAtStake = (): boolean => false;
+
 export async function advanceScoutTask(ctx: TaskContext): Promise<TickResult | null> {
   const waiting = resolveWaitIfElapsed(ctx, "scout");
   if (waiting !== undefined) return waiting;

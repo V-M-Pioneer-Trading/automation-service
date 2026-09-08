@@ -7,6 +7,36 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Each task kind says what it means by the shared columns
+
+Three task kinds share one `ship_task` row, and they mean different things by
+the same columns: `tradeSymbol` is the extracted good for mining and the
+deliverable for a contract, set at different moments; `asteroidWaypoint` is
+wherever the planner sent the ship, including a scout's market.
+
+That is not what this change fixes — the row is still flat, and splitting it is
+migration-shaped. What it fixes is the one place the *scheduler* had to know the
+difference: deciding whether abandoning a target would strand cargo, by
+enumerating contract phase names inline. A scheduler reading FSM internals to
+make a decision the FSMs are the authority on.
+
+Each FSM module exports its own predicate now — `miningCargoAtStake`,
+`contractCargoAtStake`, `scoutCargoAtStake` — and the scheduler switches over
+the three, the same shape as `advance`. Adding a task kind fails to compile
+until it answers.
+
+The scout case turns out to have been wrong rather than merely implicit. The old
+conditional applied mining's rule (`tradeSymbol !== null`) to every non-contract
+task, which gave the right answer for a scout only because nothing sets that
+column on one. A scout row that somehow carried a `tradeSymbol` would have been
+retried on the same target forever, on the strength of cargo a scout cannot
+hold. It says `false` now, and a test pins it.
+
+The three contract phases were untested individually — dropping any one of them
+from the list left the suite green, while stranding whatever had been bought.
+Each is pinned now, along with the phase before the purchase, where giving up is
+the correct answer.
+
 ## One knob snapshot per anomaly tick
 
 The planner has had this rule since it existed: `DecisionContext` is one fetch
