@@ -477,8 +477,9 @@ describe("automation-service anomaly detection (meta#15)", () => {
 
     const gateway = app({ noWebhook: true });
     await waitForAnomaly(gateway, "error_rate");
-    // Several more ticks: redelivery would otherwise pick the row up each time.
-    await new Promise((r) => setTimeout(r, 100));
+    // Several more real ticks: redelivery runs on each one, so if a missing
+    // webhook were being counted as a failed delivery the counter would climb.
+    for (let t = 0; t < 3; t++) await gateway.locals.forceAnomalyTick();
 
     const { rows } = await pool.query(`SELECT delivery_attempts, delivered_at FROM anomaly WHERE type = 'error_rate'`);
     expect(rows).not.toHaveLength(0);
@@ -591,7 +592,11 @@ describe("automation-service anomaly detection (meta#15)", () => {
     // never comes back can't make every tick pay for it indefinitely. The
     // column counts rounds — one per deliver() call, each of which retries
     // internally — so the HTTP ceiling is this times the per-call budget.
-    await new Promise((r) => setTimeout(r, 1500));
+    // Well past MAX_DELIVERY_ROUNDS' worth of ticks. The ceiling is a
+    // *cross-tick* bound, so proving it needs the ticks to happen; sleeping on
+    // a loop that never fires froze the counter and asserted a per-tick
+    // property while claiming a cross-tick one.
+    for (let t = 0; t < 20; t++) await gateway.locals.forceAnomalyTick();
     const { rows } = await pool.query("SELECT delivery_attempts FROM anomaly WHERE id = $1", [anomaly.id]);
     expect(Number(rows[0].delivery_attempts)).toBeLessThanOrEqual(12);
   }, 15_000);
@@ -601,9 +606,11 @@ describe("automation-service anomaly detection (meta#15)", () => {
       `INSERT INTO ship_task (ship_symbol, phase, failure_count, updated_at) VALUES ($1, 'EXTRACT', $2, $3)`,
       ["MINING-1", 5, clock.now()]
     );
-    const gateway = app({ withMining: true, intervalMs: 15 });
+    const gateway = app({ withMining: true });
     await waitForAnomaly(gateway, "consecutive_failures");
-    await new Promise((r) => setTimeout(r, 100)); // several more ticks, condition still true
+    // Real ticks with the condition still true: dedupe has to survive the loop
+    // running again, which a sleep on a never-firing loop never tested.
+    for (let t = 0; t < 5; t++) await gateway.locals.forceAnomalyTick();
 
     const digest = await request(gateway).get("/api/automation/v1/anomalies/digest?windowMinutes=10080");
     const matching = digest.body.anomalies.filter((a: { type: string }) => a.type === "consecutive_failures");

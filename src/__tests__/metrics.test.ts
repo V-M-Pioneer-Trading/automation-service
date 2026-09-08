@@ -32,7 +32,7 @@ describe("automation-service metrics rollups (meta#14)", () => {
     gateways = [];
   });
 
-  const app = (rollupIntervalMs = 15) => {
+  const app = (rollupIntervalMs = 100_000) => { // never fires on its own; forceMetricsTick drives every tick
     const gateway = createTestApp(pool, clock, undefined, { rollupIntervalMs });
     gateways.push(gateway);
     return gateway;
@@ -69,12 +69,11 @@ describe("automation-service metrics rollups (meta#14)", () => {
     const gateway = app();
     clock.advance(60 * 60 * 1000); // one hour, so credits/hour reads directly off the seeded revenue
 
-    const deadline = Date.now() + 2000;
     let rollups: { creditsPerHour: number; extractionUnits: number; errorRate: number }[] = [];
-    while (Date.now() < deadline && rollups.length < 2) {
+    for (let t = 0; t < 50 && rollups.length < 2; t++) {
       const res = await request(gateway).get("/api/automation/v1/metrics/context");
       rollups = res.body.rollups;
-      if (rollups.length < 2) await new Promise((r) => setTimeout(r, 10));
+      if (rollups.length < 2) await gateway.locals.forceMetricsTick();
     }
     expect(rollups.length).toBeGreaterThanOrEqual(2); // the seeded baseline + the one just computed
 
@@ -92,12 +91,11 @@ describe("automation-service metrics rollups (meta#14)", () => {
     const gateway = app();
     clock.advance(1000);
 
-    const deadline = Date.now() + 2000;
     let body: { rollups: unknown[]; events: unknown[] } = { rollups: [], events: [] };
-    while (Date.now() < deadline && body.rollups.length < 2) {
+    for (let t = 0; t < 50 && body.rollups.length < 2; t++) {
       const res = await request(gateway).get("/api/automation/v1/metrics/context");
       body = res.body;
-      if (body.rollups.length < 2) await new Promise((r) => setTimeout(r, 10));
+      if (body.rollups.length < 2) await gateway.locals.forceMetricsTick();
     }
     expect(body.rollups.length).toBeGreaterThanOrEqual(2);
     expect(body.events.length).toBeGreaterThan(0);
@@ -110,12 +108,11 @@ describe("automation-service metrics rollups (meta#14)", () => {
     const firstRun = app();
     clock.advance(1000);
 
-    const deadline1 = Date.now() + 2000;
     let firstRollupCount = 0;
-    while (Date.now() < deadline1 && firstRollupCount < 2) {
+    for (let t = 0; t < 50 && firstRollupCount < 2; t++) {
       const res = await request(firstRun).get("/api/automation/v1/metrics/context");
       firstRollupCount = res.body.rollups.length;
-      if (firstRollupCount < 2) await new Promise((r) => setTimeout(r, 10));
+      if (firstRollupCount < 2) await firstRun.locals.forceMetricsTick();
     }
     expect(firstRollupCount).toBeGreaterThanOrEqual(2);
 
@@ -124,7 +121,9 @@ describe("automation-service metrics rollups (meta#14)", () => {
 
     // Simulated restart: a fresh app instance, same DB, same (unadvanced) clock.
     const restarted = app();
-    await new Promise((r) => setTimeout(r, 60)); // give it a few ticks; no time has elapsed, so nothing new should compute
+    // Real ticks: the claim is that the restarted scheduler *ran* and computed
+    // nothing because no time had elapsed, not merely that it was idle.
+    for (let t = 0; t < 5; t++) await restarted.locals.forceMetricsTick();
 
     const rollupsAfterRestart = (await request(restarted).get("/api/automation/v1/metrics/context")).body.rollups;
     // Same rollup count and same latest window_end as before the restart — no

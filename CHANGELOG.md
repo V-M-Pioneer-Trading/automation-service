@@ -32,10 +32,16 @@ paused" and "no re-dispatch on resume" both slept and then asserted that nothing
 had happened, on a loop that no longer ticked at all. They force ticks now, so
 they assert what they claim to.
 
+Ten sleeps turned out to be hiding vacuous assertions of that kind, found by
+auditing every sleep that sat inside a *passing* test rather than only fixing
+the ones that failed. Each now forces ticks; the metrics resume assertion, for
+instance, fails under a mutation of the resume guard where before it could not.
+
 `FakeClock` had ten copies (nine identical, one missing `advance`) and
 `GameClients` had one good in-test fake; both are now single shared adapters
-under `testSupport/`. Suite time went from ~56s to ~35s, and three consecutive
-runs are clean.
+under `testSupport/`. `MetricsScheduler` gained the `forceTick` the other two
+loops had. Suite time went from ~56s to ~35s, and three consecutive runs are
+clean.
 
 ## Anomaly detection no longer needs somewhere to page
 

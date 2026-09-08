@@ -1,7 +1,7 @@
 import { Clock } from "../clock";
 import { ContractRecord } from "../contractRepo";
 import { advanceContractTask } from "../contractTask";
-import { GameClients, ShipSnapshot } from "../gameClients";
+import { ShipSnapshot } from "../gameClients";
 import { advanceMiningTask } from "../miningTask";
 import { advanceScoutTask } from "../scoutTask";
 import { ShipTask } from "../shipTaskRepo";

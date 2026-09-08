@@ -251,9 +251,8 @@ describe("automation-service market scouting loop (meta#12)", () => {
     // score drops to ~0 (elapsed = 0), so the ship should be assigned mining.
     // Poll until asteroidWaypoint is filled in (not just TRAVEL_TO_ASTEROID phase,
     // which fires immediately on FRESH_MINING_TASK before assignment runs).
-    const deadline = Date.now() + 8000;
     let miningTask: Record<string, unknown> | null = null;
-    while (Date.now() < deadline) {
+    for (let t = 0; t < 200; t++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
       if (res.status === 200 && res.body.task.taskKind === "mining" && res.body.task.asteroidWaypoint !== null) {
         miningTask = res.body.task;

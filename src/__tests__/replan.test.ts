@@ -120,7 +120,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     ]);
   });
 
-  const app = (replanIntervalMs = 300_000, schedulerIntervalMs = 15) => {
+  const app = (replanIntervalMs = 300_000, schedulerIntervalMs = 100_000) => { // never fires on its own; forceFleetTick drives every tick
     const gateway = createTestApp(pool, clock, {
       agentServiceUrl: agentUrl,
       fleetServiceUrl: fleetUrl,
@@ -197,7 +197,8 @@ describe("automation-service fleet replan (meta#13)", () => {
     // Second trigger, well inside the default 30s debounce window: must NOT
     // produce a second replan_executed while the clock hasn't moved.
     await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
-    await new Promise((r) => setTimeout(r, 200));
+    // Ticks, not a sleep: the debounce has to hold across real replan attempts.
+    for (let t = 0; t < 5; t++) await gateway.locals.forceFleetTick();
     expect(await countReplans(gateway)).toBe(1);
 
     // Advance the clock past the debounce window and trigger again — now it runs.
@@ -246,9 +247,8 @@ describe("automation-service fleet replan (meta#13)", () => {
     // Wait for the first natural tick: it creates the ship_task row via
     // getOrCreate and calls assignTarget once through the normal per-ship path
     // (no replan has been requested yet).
-    const deadline1 = Date.now() + 5000;
-    while (Date.now() < deadline1 && agent.calls.filter((c) => c.url === "/contracts").length < 1) {
-      await new Promise((r) => setTimeout(r, 20));
+    for (let t = 0; t < 50 && agent.calls.filter((c) => c.url === "/contracts").length < 1; t++) {
+      await gateway.locals.forceFleetTick();
     }
     expect(agent.calls.filter((c) => c.url === "/contracts").length).toBe(1);
 

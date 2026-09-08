@@ -329,14 +329,15 @@ is the Clerk `sub` only.
 - Cleanup order matters: `afterEach` must `stopBackgroundSchedulers()` (metrics
   and anomaly loops are *not* tied to abort) and `POST /autopilot/abort` (which
   awaits the fleet loop's drain) before closing stubs or truncating.
-- **Tests drive every tick; nothing runs on a wall clock.** Both loops are
-  created with an interval long enough never to fire, and the test advances
-  them explicitly with `app.locals.forceFleetTick()` and
-  `app.locals.forceAnomalyTick()`. Each forces exactly one tick and awaits it to
+- **Tests drive every tick; nothing runs on a wall clock.** All three loops —
+  fleet, anomaly and metrics — are created with an interval long enough never
+  to fire, and the test advances them explicitly with
+  `app.locals.forceFleetTick()`, `forceAnomalyTick()` and `forceMetricsTick()`. Each forces exactly one tick and awaits it to
   completion, so a `FakeClock` jump can never be straddled by a background tick
   judging a half-arranged window.
 
-  This replaced ~20 `while (Date.now() < deadline)` polls across eight files,
+  This replaced every `while (Date.now() < deadline)` poll and every
+  `setTimeout` sleep in the suite — there are now **zero** of either —
   which were the source of every flake this suite has had: `669b101` (poll and
   tick periods aliasing, so a one-tick phase was invisible), `649d266`
   (`credits_flat` racing a `FakeClock` jump), and a 2026-09-06 recurrence where

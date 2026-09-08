@@ -246,6 +246,11 @@ describe("automation-service contract loop (meta#11)", () => {
     return gateway;
   };
 
+  /** Run the fleet loop exactly `times`, in place of sleeping and hoping. */
+  const tick = async (gateway: ReturnType<typeof createTestApp>, times = 1) => {
+    for (let t = 0; t < times; t++) await gateway.locals.forceFleetTick();
+  };
+
   const waitForEvent = async (gateway: ReturnType<typeof createTestApp>, type: string, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
@@ -287,7 +292,7 @@ describe("automation-service contract loop (meta#11)", () => {
     expect(evaluated.detail.contractId).toBe("CONTRACT-1");
     expect(evaluated.detail.expectedProfit).toBeLessThan(0);
 
-    await new Promise((r) => setTimeout(r, 100));
+    await tick(gateway, 3);
     expect(agent.calls.some((c) => c.url === "/contracts/CONTRACT-1/accept")).toBe(false);
   }, 20_000);
 
@@ -395,7 +400,9 @@ describe("automation-service contract loop (meta#11)", () => {
     const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
     expect(task.phase).toBe("CONTRACT_TRAVEL_TO_DESTINATION"); // resumed, not reset to CONTRACT_TRAVEL_TO_MARKET
 
-    await new Promise((r) => setTimeout(r, 60));
+    // The restarted app has to actually run for "did it re-buy?" to mean
+    // anything; sleeping left the resume path unexecuted.
+    await tick(restarted, 5);
     const rePurchased = agent.calls.slice(callsBeforeRestart).some((c) => c.url === "/ships/MINING-1/purchase");
     expect(rePurchased).toBe(false); // never re-buys what an earlier run already procured
   }, 20_000);

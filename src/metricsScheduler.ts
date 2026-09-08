@@ -26,6 +26,11 @@ export class MetricsScheduler {
     return this.loop.stop();
   }
 
+  /** Run exactly one rollup, to completion — the same test seam both other loops have. */
+  forceTick(): Promise<void> {
+    return this.loop.runOnce();
+  }
+
   private async tick(): Promise<void> {
     const windowEnd = this.clock.now();
     if (this.windowStart === null) {

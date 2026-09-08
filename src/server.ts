@@ -525,9 +525,20 @@ export function createApp(options: AppOptions) {
   app.locals.forceAnomalyTick = async () => {
     await anomalyScheduler?.forceTick();
   };
-  app.locals.forceFleetTick = async () => {
-    await scheduler?.forceTick();
-  };
+  // Deliberately only defined when there is a loop to drive. A hook that
+  // resolves without ticking is the same silent no-op runOnce() now throws on,
+  // so a test wiring an app with no mining config gets a TypeError naming the
+  // hook rather than an assertion that passes for the wrong reason.
+  if (scheduler !== null) {
+    app.locals.forceFleetTick = async () => {
+      await scheduler.forceTick();
+    };
+  }
+  if (metricsScheduler !== null) {
+    app.locals.forceMetricsTick = async () => {
+      await metricsScheduler.forceTick();
+    };
+  }
 
   return app;
 }
