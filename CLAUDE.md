@@ -310,15 +310,24 @@ Both the planner's scout scoring and the `market_stale` check read
 - `resetDatabase()` in tests resets all knobs to defaults **and sets
   `scout.creditsPerRefresh` to 0** unless `{ enableScouting: true }`; a test
   that unexpectedly sees a scout assignment usually forgot this.
-- **One snapshot per unit of work.** A decision or a tick reads the knob table
-  once, through `getValues()`, and passes the values down. `DecisionContext`
-  does this for the planner; `AnomalyScheduler.tick` does it for the checks,
-  which is why `AnomalyChecker` takes a `KnobValues` rather than a `KnobRepo`.
-  Nine separate reads let an operator's mid-tick write land between two of
-  them, and the resulting report describes a fleet state that never existed —
-  worse than a stale reading, because it is internally inconsistent. A new
-  check takes the snapshot as an argument; a `knobs.get()` inside one is a
-  regression, and `anomaly.test.ts` fails on it.
+- **One snapshot per unit of work**, where the unit is a planner *decision* and
+  an anomaly *tick*. Both read the knob table once through `getValues()` and
+  pass the values down: `DecisionContext` for the planner,
+  `AnomalyScheduler.tick` for the checks — which is why `AnomalyChecker` takes
+  a `KnobValues` rather than a `KnobRepo`. Nine separate reads let an
+  operator's edits land between two of them, so a tick could judge the fleet
+  under one policy and suppress the result under another. A new check takes the
+  snapshot as an argument; a `knobs.get()` inside one is a regression, and
+  `anomaly.test.ts` fails on it.
+
+  **The fleet tick is not yet one unit**, and knowing that is the point of
+  writing the rule down. A replan calls `assignTarget` per idle ship, each of
+  which loads its own `DecisionContext` with HTTP calls in between, and
+  `maybeReplan` and `handleTickFailure` read a knob apiece. One replan is
+  therefore N snapshots spread over seconds — a far wider window than the one
+  the anomaly tick just closed, and the reason it is not fixed here is only
+  that hoisting a snapshot through `Planner.loadContext` is a change to the
+  planner's own contract, not a change to this one.
 
 ## Events
 

@@ -12,15 +12,14 @@ Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/is
 The planner has had this rule since it existed: `DecisionContext` is one fetch
 of everything a decision depends on, so every arm of it scores against the same
 numbers. The invariant stopped at the planner's edge. An anomaly tick made
-**nine** separate `knobs.get()` round trips — eight inside the checks, two of
-those in checks that run concurrently, and one more for the dedupe window after
-they returned.
+**nine** separate `knobs.get()` round trips — eight inside the checks, all of
+them concurrent, and a ninth for the dedupe window after they returned.
 
-So an operator changing a threshold mid-tick could have one alarm judged against
-the old value and the next against the new one, and the dedupe window against a
-third state. The result is not a stale report but an internally inconsistent
-one: `error_rate` could fire on a window of one length while naming another in
-its own detail.
+No single threshold was ever read twice, so the hazard is not one alarm
+disagreeing with itself. It is two *different* knobs coming from either side of
+an operator's edits, and the ninth read is the plainest case: a cooldown change
+landing while the checks ran meant a tick that judged the fleet under one policy
+and suppressed the result under another.
 
 `AnomalyScheduler.tick` now reads `getValues()` once and passes it down.
 `AnomalyChecker` takes a `KnobValues`, not a `KnobRepo` — with the `Pool` that
@@ -29,8 +28,15 @@ retrieval at all.
 
 Pinned by counting reads rather than by racing a write, because the failure it
 prevents is a race: the test asserts exactly one `getValues()` and no `get()`
-per tick. Restoring either the separate cooldown read or a per-check snapshot
-fails it.
+per tick, and that `runChecks` actually received a complete snapshot. Its
+fixture arms the autopilot with a ship and seeds enough rollups that every check
+reaches its threshold read — without that, three of the eight are unreachable
+and a check reading its own knob passes unnoticed.
+
+The anomaly loop also has an error callback now. The fleet loop has always had
+one; this loop did not, so a throwing tick was swallowed by `IntervalLoop`'s
+default and detection stopped dead with nothing in the log. A tick that now
+depends on the whole knob table is one more way to throw.
 
 ## The event log answers questions instead of handing out its table
 

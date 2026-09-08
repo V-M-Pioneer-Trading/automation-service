@@ -152,12 +152,13 @@ export class AnomalyChecker {
    * same rule `DecisionContext` enforces for the planner, which exists so every
    * arm of a decision scores against one set of numbers.
    *
-   * This used to be eight separate reads, two of them inside checks running
-   * concurrently, so an operator changing a threshold mid-tick could have one
-   * alarm judged against the old value and another against the new one. Worse
-   * than a stale reading, because the result is a report of a fleet state that
-   * never existed: `error_rate` could fire on a window `errorRateWindowMinutes`
-   * long while naming a different length in its own detail.
+   * This used to be eight separate reads, all of them concurrent, plus a ninth
+   * for the dedupe window after the checks returned. No single threshold was
+   * ever read twice, so the hazard is not one alarm disagreeing with itself; it
+   * is two *different* knobs coming from either side of an operator's edits.
+   * The ninth read is the plainest case: a cooldown change landing while the
+   * checks ran meant a tick that judged the fleet under one policy and
+   * suppressed under another.
    */
   async runChecks(shipSymbol: string, task: ShipTask | null, knobs: KnobValues): Promise<AnomalyCandidate[]> {
     const now = this.clock.now();
