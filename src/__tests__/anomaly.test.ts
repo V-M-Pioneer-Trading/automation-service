@@ -7,6 +7,7 @@ import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { KnobRepo } from "../knobs";
 
 function startStubServer(handler: (req: http.IncomingMessage, body: string, res: http.ServerResponse) => void) {
   const calls: { method: string; url: string; body: string }[] = [];
@@ -105,6 +106,35 @@ describe("automation-service anomaly detection (meta#15)", () => {
     gateways.push(gateway);
     return gateway;
   };
+
+  /**
+   * One tick, one set of thresholds — the rule `DecisionContext` already enforces
+   * for the planner, arriving here (meta#75 B6).
+   *
+   * Pinned by counting reads rather than by racing a write, because the failure
+   * it prevents is a race: eight separate `get`s, two of them inside checks that
+   * run concurrently, plus a ninth for the dedupe window. An operator changing a
+   * threshold mid-tick could have one alarm judged against the old value and the
+   * next against the new one, and the report would then describe a fleet state
+   * that never existed.
+   */
+  it("reads the knob table exactly once per anomaly tick", async () => {
+    const getValues = jest.spyOn(KnobRepo.prototype, "getValues");
+    const get = jest.spyOn(KnobRepo.prototype, "get");
+    try {
+      const gateway = app();
+      getValues.mockClear();
+      get.mockClear();
+
+      await gateway.locals.forceAnomalyTick();
+
+      expect(getValues).toHaveBeenCalledTimes(1);
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      getValues.mockRestore();
+      get.mockRestore();
+    }
+  });
 
   const waitForAnomaly = async (gateway: ReturnType<typeof createTestApp>, type: string, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {

@@ -101,11 +101,17 @@ export class AnomalyScheduler {
     // a tick that was told to stop must not go on to read or write state.
     if (this.loop.stopped) return;
 
+    // One snapshot for the whole tick, the same rule `DecisionContext` enforces
+    // for the planner. Nine separate reads meant an operator changing a
+    // threshold mid-tick could have one alarm judged against the old value, the
+    // next against the new one, and the dedupe window against a third state.
+    const knobValues = await knobs.getValues();
+
     const task = shipSymbol === null ? null : await tasks.get(shipSymbol);
-    const candidates = await checker.runChecks(shipSymbol ?? "unknown", task);
+    const candidates = await checker.runChecks(shipSymbol ?? "unknown", task, knobValues);
     if (this.loop.stopped) return;
 
-    const cooldownMs = (await knobs.get("anomaly.dedupeCooldownMinutes")) * 60_000;
+    const cooldownMs = knobValues["anomaly.dedupeCooldownMinutes"] * 60_000;
     const now = clock.now();
 
     for (const candidate of candidates) {

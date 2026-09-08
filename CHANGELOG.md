@@ -7,6 +7,31 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## One knob snapshot per anomaly tick
+
+The planner has had this rule since it existed: `DecisionContext` is one fetch
+of everything a decision depends on, so every arm of it scores against the same
+numbers. The invariant stopped at the planner's edge. An anomaly tick made
+**nine** separate `knobs.get()` round trips — eight inside the checks, two of
+those in checks that run concurrently, and one more for the dedupe window after
+they returned.
+
+So an operator changing a threshold mid-tick could have one alarm judged against
+the old value and the next against the new one, and the dedupe window against a
+third state. The result is not a stale report but an internally inconsistent
+one: `error_rate` could fire on a window of one length while naming another in
+its own detail.
+
+`AnomalyScheduler.tick` now reads `getValues()` once and passes it down.
+`AnomalyChecker` takes a `KnobValues`, not a `KnobRepo` — with the `Pool` that
+went in the previous change, it now holds the judgement and none of the
+retrieval at all.
+
+Pinned by counting reads rather than by racing a write, because the failure it
+prevents is a race: the test asserts exactly one `getValues()` and no `get()`
+per tick. Restoring either the separate cooldown read or a per-check snapshot
+fails it.
+
 ## The event log answers questions instead of handing out its table
 
 `fleetEvents.ts` already owned which types mean task progress, a failed action

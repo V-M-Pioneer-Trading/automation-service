@@ -241,7 +241,7 @@ export function createApp(options: AppOptions) {
       ? new AnomalyScheduler({
           state,
           repo: anomalyRepo,
-          checker: new AnomalyChecker(clock, knobs, state, marketIntel, events, metricsRepo),
+          checker: new AnomalyChecker(clock, state, marketIntel, events, metricsRepo),
           webhook: anomaly.webhookUrl ? new WebhookDelivery({ url: anomaly.webhookUrl }) : null,
           events,
           clock,

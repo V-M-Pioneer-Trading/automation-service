@@ -37,7 +37,7 @@ Postgres 16, and builds/pushes the image only on merge to `main`.
 | `intervalLoop.ts` | `IntervalLoop`: the one guarded timer every scheduler runs on | nothing |
 | `dispatchLock.ts` | `DispatchLock`: Postgres advisory lock making "one process drives this ship" true across processes | pg, crypto |
 | `fleetEvents.ts` | The event vocabulary: task progress, failed actions, credits arriving. SQL predicates only, no I/O | nothing |
-| `anomaly.ts` | `AnomalyRepo` (owns the `anomaly` table), and `AnomalyChecker` — five read-only checks that take **no `Pool`**: they judge, they don't retrieve | knobs, marketIntel, eventLog, metrics |
+| `anomaly.ts` | `AnomalyRepo` (owns the `anomaly` table), and `AnomalyChecker` — five read-only checks that take **no `Pool` and no `KnobRepo`**: they judge, they don't retrieve | knobs (types only), marketIntel, eventLog, metrics |
 | `anomalyScheduler.ts` | Runs checks, dedupes, persists, delivers, requests replans | anomaly, webhookDelivery |
 | `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table, fleetEvents |
 | `testSupport/fakeClock.ts`, `testSupport/fakeGameClients.ts` | The adapters for the `Clock` and `GameClients` seams. One each, shared — not one per test file | test-only |
@@ -310,6 +310,15 @@ Both the planner's scout scoring and the `market_stale` check read
 - `resetDatabase()` in tests resets all knobs to defaults **and sets
   `scout.creditsPerRefresh` to 0** unless `{ enableScouting: true }`; a test
   that unexpectedly sees a scout assignment usually forgot this.
+- **One snapshot per unit of work.** A decision or a tick reads the knob table
+  once, through `getValues()`, and passes the values down. `DecisionContext`
+  does this for the planner; `AnomalyScheduler.tick` does it for the checks,
+  which is why `AnomalyChecker` takes a `KnobValues` rather than a `KnobRepo`.
+  Nine separate reads let an operator's mid-tick write land between two of
+  them, and the resulting report describes a fleet state that never existed —
+  worse than a stale reading, because it is internally inconsistent. A new
+  check takes the snapshot as an argument; a `knobs.get()` inside one is a
+  regression, and `anomaly.test.ts` fails on it.
 
 ## Events
 
