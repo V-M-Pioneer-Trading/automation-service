@@ -1,8 +1,10 @@
 name: container
 
 on:
+  # No branch filter: a pull request stacked on another branch needs the same
+  # checks as one targeting main. Filtering to main meant a stacked PR ran
+  # nothing at all and looked green by default.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
     tags: ["v*"]
@@ -13,8 +15,11 @@ permissions:
   id-token: write
 
 jobs:
+  # Runs on pull requests *and* on push: previously a direct push to main
+  # skipped the tests entirely and went straight to build-and-deploy. The
+  # Postgres service below is attached to the job, not to the event, so it
+  # comes up for a push run exactly as it does for a pull request one.
   test:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -45,6 +50,7 @@ jobs:
 
   docker:
     if: github.event_name == 'push'
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
