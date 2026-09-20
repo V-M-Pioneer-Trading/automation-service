@@ -15,8 +15,10 @@ npm run typecheck             # tsc --noEmit; run before every commit, strict mo
 npm run replay -- --set mine.taskWeight=2 --since 6h --verbose
 ```
 
-CI (`.github/workflows/container.yml`) runs `npm test` on PRs against a fresh
-Postgres 16, and builds/pushes the image only on merge to `main`.
+CI (`.github/workflows/container.yml`) runs `npm test` on PRs and on pushes against a fresh
+Postgres 16. The image is built, pushed and redeployed only on a push to `main`, and
+only after that test job passes. Deploy permissions (`packages`, `id-token`) are
+declared on the `docker` job, never at workflow level.
 
 ## Module map
 

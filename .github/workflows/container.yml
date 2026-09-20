@@ -11,8 +11,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
-  id-token: write
 
 jobs:
   # Runs on pull requests *and* on push: previously a direct push to main
@@ -51,6 +49,14 @@ jobs:
   docker:
     if: github.event_name == 'push'
     needs: test
+    # Deploy credentials live on this job alone. Declared at workflow level they
+    # reached the test job too, and since that job now runs on pushes to main its
+    # OIDC token would satisfy the deploy role's trust policy: npm install scripts
+    # and test code could have assumed the role that redeploys production.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
