@@ -44,6 +44,9 @@ jobs:
   # comes up for a push run exactly as it does for a pull request one.
   test:
     runs-on: ubuntu-latest
+    # The concurrency group spans the whole workflow, so a hung test job holds
+    # the deploy slot too. The suite takes a minute or two.
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16-alpine
@@ -151,10 +154,12 @@ jobs:
           context: .
           platforms: linux/arm64
           push: true
-          # Layer cache in the Actions cache: dependency layers (modules,
-          # packages) are rebuilt only when their manifests change.
+          # Layer cache in the Actions cache: layers whose inputs did not change
+          # are reused. ignore-error: a cache export hiccup must not fail the
+          # build after the image and :latest are already pushed, which would
+          # skip the redeploy and leave :latest ahead of prod.
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
