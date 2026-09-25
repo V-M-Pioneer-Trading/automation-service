@@ -8,6 +8,9 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Manual redeploy of main, for when the tip's own run was displaced or never
+  # started (see the concurrency comment below).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,8 +28,11 @@ permissions:
 # one replaces it, so a burst of merges skips straight to the newest.
 #
 # GitHub does not promise the queue runs in push order, and a re-run of an old
-# run joins it too. The tip-of-main check in the deploy job covers both: a run
-# whose commit is no longer the tip of main does not push :latest or redeploy.
+# run joins it too. The tip-of-main check in the docker job stops both from
+# putting an older commit on :latest. It cannot bring back a tip whose own run
+# was displaced from the pending slot (say by a re-run of an old one) or never
+# started: the runs that remain are not the tip and skip, with a warning.
+# Recover by dispatching this workflow on main.
 concurrency:
   group: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && format('deploy-{0}', github.repository) || format('run-{0}', github.run_id) }}
   cancel-in-progress: false
@@ -66,7 +72,8 @@ jobs:
           DATABASE_URL: postgres://postgres:test@localhost:5432/automation_test
 
   docker:
-    if: github.event_name == 'push'
+    # A push to main or a tag, or a manual dispatch; never a pull request.
+    if: github.event_name != 'pull_request'
     needs: test
     # Deploy credentials live on this job alone. Declared at workflow level they
     # reached the test job too, and since that job now runs on pushes to main its
@@ -89,11 +96,21 @@ jobs:
       - name: Check this commit is still the tip of main
         id: tip
         run: |
-          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          # --exit-code, no pipe: a failed lookup must fail the run, not read
+          # as "not the tip" and skip the deploy with a green check.
+          tip=$(git ls-remote --exit-code origin refs/heads/main)
+          tip=${tip%%[[:space:]]*}
           if [ "$GITHUB_REF" = refs/heads/main ] && [ "$tip" = "$GITHUB_SHA" ]; then
+            echo "Deploying $GITHUB_SHA, the tip of main."
             echo "deploy=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_REF" = refs/heads/main ]; then
+            # Normally the run for $tip is queued behind this one and deploys
+            # it. If that run was displaced or never started, nothing does:
+            # dispatch this workflow on main.
+            echo "::warning::Not deploying $GITHUB_SHA: main is at $tip, whose own run should deploy it. If it has none, run this workflow on main by hand."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::Not deploying: $GITHUB_REF at $GITHUB_SHA, main is at $tip."
+            echo "::notice::Not deploying: $GITHUB_REF is not main."
             echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
