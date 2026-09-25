@@ -8,9 +8,34 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Manual redeploy of main, for when the tip's own run was displaced or never
+  # started (see the concurrency comment below).
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# One deploy at a time. On 2026-09-25 auth-service #5 and #6 merged seconds
+# apart; their runs overlapped, #5's older commit pushed :latest last and its
+# redeploy ran last, so production ran without #6's fix until #6's run was
+# re-run by hand.
+#
+# Only runs on main can deploy (the deploy role trusts refs/heads/main alone),
+# so only they share the group. Everything else, pull requests and v* tags
+# included, gets a group of its own and never queues or displaces a main run.
+# cancel-in-progress stays false so a run is never killed halfway through a
+# push or a host restart. GitHub keeps one run pending per group and a newer
+# one replaces it, so a burst of merges skips straight to the newest.
+#
+# GitHub does not promise the queue runs in push order, and a re-run of an old
+# run joins it too. The tip-of-main check in the docker job stops both from
+# putting an older commit on :latest. It cannot bring back a tip whose own run
+# was displaced from the pending slot (say by a re-run of an old one) or never
+# started: the runs that remain are not the tip and skip, with a warning.
+# Recover by dispatching this workflow on main.
+concurrency:
+  group: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && format('deploy-{0}', github.repository) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 jobs:
   # Runs on pull requests *and* on push: previously a direct push to main
@@ -47,7 +72,9 @@ jobs:
           DATABASE_URL: postgres://postgres:test@localhost:5432/automation_test
 
   docker:
-    if: github.event_name == 'push'
+    # A push to main or a tag, or a manual dispatch on main; never a pull
+    # request, and no image built from a dispatch on another branch.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     needs: test
     # Deploy credentials live on this job alone. Declared at workflow level they
     # reached the test job too, and since that job now runs on pushes to main its
@@ -60,6 +87,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Deploys only if this commit is still the tip of main. The group above
+      # serializes runs but does not order them, so without this an older run
+      # that got the slot second, or a re-run of an old run, would push :latest
+      # and redeploy over a newer commit. The sha tag is still built either way.
+      # Tag runs and dispatches from other branches stop here too: the deploy
+      # role would refuse them anyway.
+      - name: Check this commit is still the tip of main
+        id: tip
+        run: |
+          # --exit-code and no pipe on ls-remote: a failed lookup must fail the
+          # run, not read as "not the tip" and skip with a green check. The
+          # pattern matches ref-name suffixes (a branch x/refs/heads/main
+          # matches too), so keep the exact ref only.
+          refs=$(git ls-remote --exit-code origin refs/heads/main)
+          tip=$(printf '%s\n' "$refs" | awk '$2 == "refs/heads/main" { print $1 }')
+          [ -n "$tip" ] || { echo "::error::refs/heads/main not found on origin"; exit 1; }
+          if [ "$GITHUB_REF" = refs/heads/main ] && [ "$tip" = "$GITHUB_SHA" ]; then
+            echo "Deploying $GITHUB_SHA, the tip of main."
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_REF" = refs/heads/main ]; then
+            # Normally the run for $tip is queued behind this one and deploys
+            # it. If that run was displaced or never started, nothing does:
+            # dispatch this workflow on main.
+            echo "::warning::Not deploying $GITHUB_SHA: main is at $tip, whose own run should deploy it. If it has none, run this workflow on main by hand."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Not deploying: $GITHUB_REF is not main."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/setup-buildx-action@v3
 
@@ -76,7 +133,7 @@ jobs:
           images: ghcr.io/v-m-pioneer-trading/automation-service
           tags: |
             type=sha,format=long
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ steps.tip.outputs.deploy == 'true' }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -88,14 +145,54 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Configure AWS credentials
+        if: steps.tip.outputs.deploy == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::543292785457:role/github-actions-ssm-deploy
           aws-region: eu-central-1
 
-      - name: Trigger redeploy on shared host
+      # Waits for the host to finish, not only for SSM to accept the command.
+      # send-command returns as soon as the command is queued, so without the
+      # wait this job, and the concurrency slot above, were released while the
+      # host was still pulling and restarting, and a bootstrap that failed left the
+      # run green. This bootstrap has no /health check, so Success means the
+      # container was started, not that it is healthy (meta#89).
+      # The SSM output is not printed: these logs are public and the
+      # bootstrap's failure path dumps container logs. Read it in the SSM
+      # console under the command ID echoed below.
+      - name: Redeploy on shared host
+        if: steps.tip.outputs.deploy == 'true'
+        env:
+          INSTANCE_ID: i-011b6b82a9072a385
+          DOCUMENT: automation-service-bootstrap-i-011b6b82a9072a385
         run: |
-          aws ssm send-command \
-            --document-name "automation-service-bootstrap-i-011b6b82a9072a385" \
-            --targets "Key=InstanceIds,Values=i-011b6b82a9072a385" \
-            --region eu-central-1
+          # --timeout-seconds: a command the host has not picked up within 10
+          # minutes is dropped instead of running later, outside the queue.
+          command_id=$(aws ssm send-command \
+            --document-name "$DOCUMENT" \
+            --targets "Key=InstanceIds,Values=$INSTANCE_ID" \
+            --timeout-seconds 600 \
+            --region eu-central-1 \
+            --query Command.CommandId --output text)
+          echo "SSM command $command_id"
+          # 90 polls, a little over 15 minutes. The slowest bootstrap
+          # (agent-service: MySQL, two pulls, /health) takes about 7.
+          for _ in $(seq 90); do
+            sleep 10
+            # InvocationDoesNotExist for a moment right after send-command,
+            # until the invocation is registered. Any other error is real.
+            if ! status=$(aws ssm get-command-invocation \
+              --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+              --region eu-central-1 --query Status --output text 2>"$RUNNER_TEMP/ssm-err"); then
+              grep -q InvocationDoesNotExist "$RUNNER_TEMP/ssm-err" || { cat "$RUNNER_TEMP/ssm-err" >&2; exit 1; }
+              status=Pending
+            fi
+            case "$status" in
+              Pending|InProgress|Delayed) continue ;;
+              Success) exit 0 ;;
+            esac
+            echo "::error::Redeploy $command_id ended with status $status"
+            exit 1
+          done
+          echo "::error::Redeploy $command_id still running after 15 minutes"
+          exit 1
