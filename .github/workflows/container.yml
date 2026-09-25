@@ -84,7 +84,17 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    runs-on: ubuntu-latest
+    # Native arm64: the shared host is a t4g (Graviton), so arm64 is the only
+    # image production runs. It used to be built next to amd64 on an x86 runner,
+    # the arm64 half under QEMU: 7-10x slower than native (navigation-service's
+    # Gradle build took 8 minutes of a 9-minute job), and on 2026-09-25 an
+    # emulated `npm ci` in fleet-service died with "Illegal instruction" and hung
+    # the job for six hours.
+    runs-on: ubuntu-24.04-arm
+    # A hung build now holds the deploy concurrency slot and blocks every later
+    # deploy in this repo, so it must not get GitHub's six-hour default. A
+    # native build takes a few minutes and the redeploy waits up to ~15.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -139,8 +149,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/arm64
           push: true
+          # Layer cache in the Actions cache: dependency layers (modules,
+          # packages) are rebuilt only when their manifests change.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
