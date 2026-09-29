@@ -384,13 +384,22 @@ target follows from the verdict:
 | `malformed` | We asked for something the service would not accept or could not find: a bug, a stale config, a waypoint that is gone | `mine.failureRetryLimit` |
 | `internal` | Our own code threw — a corrupt task row, a contract that vanished | `mine.failureRetryLimit` |
 | `unavailable` | The request never reached the game: network, timeout, 5xx, gateway backpressure | 100× that |
-| `credentials` | Our M2M token was rejected, or st-gateway holds no SpaceTraders credential | 100× that |
+| `credentials` | A credential was rejected: ours by the service we called (`401` `a bearer token is required` / `invalid or expired session`, or the scope `403`), the gateway's injected agent token by the game (a relayed `401`), or st-gateway holds no SpaceTraders credential (`503 SpaceTraders credential not configured`) | 100× that |
+| `denied` | The game refused us access and the service relayed its `403` unchanged: `Agent does not own or cannot access ship X`. A ship symbol left stale by a universe reset; the credential is fine and an operator fixes the configuration | 100× that |
 
-The first three are evidence about the target. The last two are evidence about
-the fleet's plumbing, and are counted on their own tally, so an outage never
-eats into the patience the next real refusal needs — otherwise a fleet coming
-back from one would abandon every target at once, on the first "ship is in
-transit" of the recovery.
+The first three are evidence about the target. The last three are evidence about
+the fleet's plumbing or configuration, and are counted on their own tally, so an
+outage never eats into the patience the next real refusal needs — otherwise a
+fleet coming back from one would abandon every target at once, on the first
+"ship is in transit" of the recovery.
+
+`credentials` and `denied` are told apart by the message, not the status: an
+introspecting service answers a `403` of its own only with the family's scope
+sentence, and any other `403` is SpaceTraders' answer relayed unchanged
+(meta's `docs/design/upstream-errors.md`). Every migrated service's
+introspection `503`, `the authentication service could not process this
+request`, stays `unavailable`: auth-service is down or restarting, which
+fixes itself.
 
 100× is 300 ticks at the default retry limit: at least 25 minutes, nearer 75
 against a service that hangs rather than refusing (a tick that waits out the

@@ -105,7 +105,7 @@ for callers who look there first.
   failures that are evidence about the target (`rejected`, `malformed`,
   `internal`) and is spent against `mine.failureRetryLimit`;
   `unrelatedFailureCount` counts the ones that are evidence about the plumbing
-  (`unavailable`, `credentials`) and is spent against
+  (`unavailable`, `credentials`, `denied`) and is spent against
   `mine.failureRetryLimit × UNRELATED_FAILURE_RETRY_MULTIPLIER`. Both reset to
   0 on any successful action. At either limit the task is abandoned via
   `idleTask` *unless* cargo is at stake. An abandoned contract goes back to
@@ -160,8 +160,10 @@ for callers who look there first.
 - **The verdict, not the status code, is what anything branches on.**
   `gameClients.ts` classifies every failed call once, where the transport error
   and the response are both still in hand, into `unavailable` (never reached
-  the game), `credentials` (we cannot authenticate), `malformed` (our request
-  was wrong) or `rejected` (the game refused the action). `handleTickFailure`
+  the game), `credentials` (a credential was rejected: ours, or the
+  gateway's by the game), `denied` (the game's own `403` relayed unchanged:
+  the ship is not ours), `malformed` (our request was wrong) or `rejected`
+  (the game refused the action). `handleTickFailure`
   is the only consumer that branches, and `UpstreamCallError` no longer carries
   a status code at all. `server.ts`'s error handler used to re-serve one, which
   was both unreachable (no route calls an upstream service) and misleading,
@@ -171,7 +173,7 @@ for callers who look there first.
   `internal`: our own code threw. Use `verdictOf(err)` rather than testing
   `instanceof` again.
 
-  This exists because all four used to be one thing: an expired M2M token or a
+  This exists because all of them used to be one thing: an expired M2M token or a
   ten-minute fleet-service outage ticked `failureCount` on every ship until the
   retry limit abandoned every task in the fleet, then re-planned them onto
   targets that were never the problem (auth-design.md decision 19).
@@ -190,6 +192,18 @@ for callers who look there first.
   could not process this request", decision 21) is `unavailable` — auth-service
   down, which fixes itself — and `upstreamFailure.test.ts` pins it; never let
   a message check route it to `credentials`.
+
+  A `403` is `credentials` only when it carries the family's scope sentence
+  (`MESSAGES.missingScope` from the introspection client). Any other `403` is
+  the game's, relayed unchanged by the service we called, and is `denied`:
+  the production case was `403 Agent does not own or cannot access ship
+  RADOMSKY-TEST-1.` after a universe reset, logged as `credentials` and
+  sending an operator to auth-service for a stale `SHIP_SYMBOL`. A `401`
+  stays `credentials` whatever the body says — the game's own `401` (token
+  `reset_date` mismatch) is the gateway's credential, and auth-service's to
+  fix. `UNRELATED_FAILURE_KINDS` in `gameClients.ts` is the one list of
+  verdicts that spend the unrelated budget; add a kind there, not in the
+  scheduler.
 
   What must not be done is give `malformed` a shorter fuse than `rejected`:
   fleet-service and agent-service answer `404` for any unrouted path, so a

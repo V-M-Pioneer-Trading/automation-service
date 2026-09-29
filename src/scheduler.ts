@@ -6,7 +6,7 @@ import { ContractRepo } from "./contractRepo";
 import { DispatchLock } from "./dispatchLock";
 import { advanceContractTask, contractCargoAtStake, startContractTask } from "./contractTask";
 import { EventLog } from "./eventLog";
-import { GameClients, ShipSnapshot, UpstreamCallError, UpstreamFailureKind } from "./gameClients";
+import { GameClients, ShipSnapshot, UNRELATED_FAILURE_KINDS, UpstreamCallError, UpstreamFailureKind } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
 import { KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
@@ -31,8 +31,8 @@ export const verdictOf = (err: unknown): FailureVerdict =>
 
 /**
  * `rejected`, `malformed` and `internal` are evidence about the target, and
- * spend `mine.failureRetryLimit` directly. `unavailable` and `credentials` are
- * evidence about the fleet's plumbing and get this multiple of it instead,
+ * spend `mine.failureRetryLimit` directly. `unavailable`, `credentials` and
+ * `denied` are evidence about the fleet's plumbing and get this multiple of it instead,
  * counted separately on `ship_task.unrelated_failure_count`.
  *
  * Not infinity, and that is the point of the number rather than a boolean. A
@@ -451,7 +451,7 @@ export class FleetScheduler {
     // one number cannot be spent against two budgets: three ticks of an outage
     // would otherwise leave the next genuine refusal one strike away from
     // abandoning a target it had never once failed against.
-    const blamesTarget = kind !== "unavailable" && kind !== "credentials";
+    const blamesTarget = kind === "internal" || !UNRELATED_FAILURE_KINDS.has(kind);
     const counted: ShipTask = {
       ...task,
       failureCount: task.failureCount + (blamesTarget ? 1 : 0),

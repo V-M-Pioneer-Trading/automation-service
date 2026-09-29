@@ -11,7 +11,7 @@
  * which is exactly the lane the autopilot belongs in (decision 2).
  */
 
-import { M2MTokenError, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
+import { M2MTokenError, MESSAGES, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
 
 /**
  * One end of a nav route. SpaceTraders reports both ends with coordinates and
@@ -115,9 +115,17 @@ export interface Contract {
  * - `unavailable` — the request never reached the game. Network, timeout,
  *   5xx, or gateway backpressure. Nothing about the target is wrong.
  * - `credentials` — the fleet cannot authenticate. Our M2M token was rejected
- *   (401/403), or st-gateway has no SpaceTraders credential to inject. Nothing
- *   about the target is wrong here either; the difference from `unavailable`
- *   is who has to act, not what the ship should do next.
+ *   by the service we called (the family's own 401/403 sentences), or a
+ *   SpaceTraders token was rejected by the game (a relayed 401), or st-gateway
+ *   has no SpaceTraders credential to inject. Nothing about the target is
+ *   wrong here either; the difference from `unavailable` is who has to act,
+ *   not what the ship should do next.
+ * - `denied` — the game itself refused us access, and the service relayed
+ *   its answer unchanged: a 403 whose message is SpaceTraders' own, "Agent
+ *   does not own or cannot access ship X". In practice a ship symbol that
+ *   went stale at a universe reset. Nothing about the target is wrong, and
+ *   re-planning onto another target changes nothing; an operator has to fix
+ *   the configuration.
  * - `malformed` — this service asked for something the upstream service would
  *   not accept or could not find: a bug, a stale configuration, or a waypoint
  *   that no longer exists.
@@ -127,7 +135,8 @@ export interface Contract {
  *
  * The split that matters to the scheduler is `rejected`/`malformed` (evidence
  * about the target, spend its retry budget) against
- * `unavailable`/`credentials` (evidence about the fleet's plumbing, don't).
+ * `unavailable`/`credentials`/`denied` (evidence about the fleet's plumbing
+ * or configuration, don't).
  * `malformed` deliberately does *not* get a shorter fuse than `rejected`: a
  * `404` is emitted by fleet-service and agent-service for any unrouted path,
  * so a rolling deploy or a brief ingress gap produces one, and it is
@@ -135,7 +144,10 @@ export interface Contract {
  * it zero retries would abandon the whole fleet on a single bad tick, which is
  * the failure this taxonomy exists to prevent.
  */
-export type UpstreamFailureKind = "unavailable" | "credentials" | "malformed" | "rejected";
+export type UpstreamFailureKind = "unavailable" | "credentials" | "denied" | "malformed" | "rejected";
+
+/** The verdicts that say nothing about the target, and so spend the unrelated budget. */
+export const UNRELATED_FAILURE_KINDS: ReadonlySet<UpstreamFailureKind> = new Set(["unavailable", "credentials", "denied"]);
 
 /**
  * The gateway answers `503` both for "auth-service has no agent token yet" and
@@ -153,6 +165,21 @@ export type UpstreamFailureKind = "unavailable" | "credentials" | "malformed" | 
  * "auth-service unavailable" sentence, though it needs an operator too.
  */
 const CREDENTIAL_UNCONFIGURED = /credential not configured/i;
+
+/**
+ * The three sentences an introspecting service answers with when *our* M2M
+ * token is the problem (decision 21; `@v-m-pioneer-trading/introspection-client`
+ * pins them byte for byte). A 403 carrying none of them was not written by
+ * the family at all: the three services relay SpaceTraders' status and
+ * message unchanged (meta `docs/design/upstream-errors.md`), so it is the
+ * game refusing us access to what we named. A ship symbol left stale by a
+ * universe reset produced `403 Agent does not own or cannot access ship
+ * RADOMSKY-TEST-1.` in production, and it was logged as `credentials` for as
+ * long as it lasted, sending an operator to auth-service for a config problem.
+ */
+const FAMILY_AUTH_SENTENCES: readonly string[] = [MESSAGES.missingToken, MESSAGES.invalidSession, MESSAGES.missingScope];
+
+const isFamilyAuthSentence = (body: string): boolean => FAMILY_AUTH_SENTENCES.some((sentence) => body.includes(sentence));
 
 /**
  * Decides the verdict from what an upstream answer actually carries.
@@ -174,7 +201,14 @@ const CREDENTIAL_UNCONFIGURED = /credential not configured/i;
  * one — which is why `malformed` keeps the normal retry budget.
  */
 export function classifyUpstreamStatus(status: number, body = ""): UpstreamFailureKind {
-  if (status === 401 || status === 403) return "credentials";
+  // A 401 is a rejected credential whoever presented it: ours, refused by the
+  // service we called, or the gateway's injected agent token, refused by the
+  // game (`game-token-rejected` in meta's gateway fixtures). Either way an
+  // operator looks at auth-service. A 403 is `credentials` only when the
+  // family wrote it — the scope sentence — because the game's own 403 says
+  // the credential was fine and the *ship* is not ours.
+  if (status === 401) return "credentials";
+  if (status === 403) return isFamilyAuthSentence(body) ? "credentials" : "denied";
   if (status === 503 && CREDENTIAL_UNCONFIGURED.test(body)) return "credentials";
   // 429 is the gateway's token bucket telling us to come back, not a refusal;
   // 408 and 425 are a proxy talking about the connection, not about the game.

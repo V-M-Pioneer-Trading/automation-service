@@ -7,6 +7,26 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## A relayed upstream 403 is `denied`, not `credentials`
+
+In production the mining loop logged `mining_tick_error` with
+`failureKind=credentials` for `GET .../ships/RADOMSKY-TEST-1: 403 Agent does
+not own or cannot access ship RADOMSKY-TEST-1.` — SpaceTraders' own answer,
+relayed unchanged by agent-service, because the ship symbol was stale after a
+universe reset. `classifyUpstreamStatus` mapped every 401 and 403 to
+`credentials`, so the verdict sent an operator to auth-service for a
+configuration problem.
+
+A 403 is now `credentials` only when it carries the family's scope sentence
+(`this action requires a scope this session does not carry`, pinned by the
+introspection client); any other 403 is the game's and reads as the new kind
+`denied`. A 401 stays `credentials` whatever the body: the game's own 401
+(token `reset_date` mismatch) is the gateway's credential, and still
+auth-service's to fix. The introspection 503 stays `unavailable`. `denied`
+spends the unrelated budget like the other two plumbing verdicts, since
+re-planning onto another target cannot fix the ship symbol. The production
+message is pinned in `upstreamFailure.test.ts`.
+
 ## Two new scopes on three routes (meta#59 step 4, decision 22)
 
 `POST /events` now requires `events:write`; `POST /planner/replan` and
