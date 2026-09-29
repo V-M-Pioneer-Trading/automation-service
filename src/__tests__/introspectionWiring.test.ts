@@ -224,6 +224,46 @@ describe("introspection wiring", () => {
     });
   });
 
+  // cors() must run before anything that could answer the preflight: mounted
+  // after the router, Express answers OPTIONS itself with no
+  // Access-Control-Allow-Origin, and a browser never sends the POST.
+  it("answers a browser's preflight for a guarded POST, never asking the center", async () => {
+    const res = await request(app())
+      .options(`${V1}/autopilot/arm`)
+      .set("Origin", "http://localhost:3000")
+      .set("Access-Control-Request-Method", "POST")
+      .set("Access-Control-Request-Headers", "authorization");
+
+    expect(res.status).toBe(204);
+    expect(res.headers["access-control-allow-origin"]).toBe("http://localhost:3000");
+    expect(res.headers["access-control-allow-headers"]).toContain("Authorization");
+    expect(center.calls).toHaveLength(0);
+  });
+
+  describe("a body the parser refuses is the caller's fault, not a 500", () => {
+    it("answers malformed JSON with 400 in the usual envelope", async () => {
+      const res = await request(app())
+        .post(`${V1}/autopilot/arm`)
+        .set("Authorization", `Bearer ${CONTROL_TOKEN}`)
+        .set("Content-Type", "application/json")
+        .send("{not json");
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: { message: "malformed JSON body" } });
+    });
+
+    it("answers an oversized body with 413", async () => {
+      const res = await request(app())
+        .post(`${V1}/events`)
+        .set("Authorization", `Bearer ${CONTROL_TOKEN}`)
+        .set("Content-Type", "application/json")
+        .send(JSON.stringify({ type: "ai_test", detail: { pad: "x".repeat(200_000) } }));
+
+      expect(res.status).toBe(413);
+      expect(res.body).toEqual({ error: { message: "request body too large" } });
+    });
+  });
+
   // The two routes registered only when a ship-driving scheduler is wired.
   // Nothing is armed, so the upstream URLs are never called.
   describe("routes that exist only with mining configured", () => {

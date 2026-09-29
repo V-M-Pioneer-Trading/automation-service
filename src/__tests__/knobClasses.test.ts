@@ -106,7 +106,7 @@ describe("knob classes", () => {
     it("refuses to let the supervisor widen its own alarm thresholds", async () => {
       const res = await machineWrite("anomaly.errorRateThreshold", 1);
       expect(res.status).toBe(403); // the credential is valid; it just doesn't reach this class
-      expect(res.body.error.message).toMatch(/alert knob/);
+      expect(res.body.error.message).toMatch(/is an alert knob/);
 
       const after = await request(app()).get("/api/automation/v1/planner/knobs");
       const knob = after.body.knobs.find((k: { name: string }) => k.name === "anomaly.errorRateThreshold");
@@ -116,7 +116,7 @@ describe("knob classes", () => {
     it("refuses to let the supervisor rewrite what the planner believes about the universe", async () => {
       const res = await machineWrite("travel.speedUnitsPerHourPrior", 999);
       expect(res.status).toBe(403);
-      expect(res.body.error.message).toMatch(/model knob/);
+      expect(res.body.error.message).toMatch(/is a model knob/);
     });
 
     it("fences a machine by kind even when its sub looks like an operator's", async () => {
@@ -127,6 +127,24 @@ describe("knob classes", () => {
         .set("Authorization", bearer({ sub: "user_2LooksHuman", kind: "machine" }))
         .send({ value: 1 });
       expect(res.status).toBe(403);
+    });
+
+    // The fence is written "only an operator is unfenced", not "a machine is
+    // fenced", so a kind the contract never defined gets the narrower set.
+    it("fences a kind it does not know, as if it were a machine", async () => {
+      const unknownKind = bearer({ sub: "svc_newKind", kind: "service" as unknown as "machine" });
+      const refused = await request(app())
+        .put("/api/automation/v1/planner/knobs/travel.speedUnitsPerHourPrior")
+        .set("Authorization", unknownKind)
+        .send({ value: 45 });
+      expect(refused.status).toBe(403);
+      expect(refused.body.error.message).toMatch(/model knob/);
+
+      const policy = await request(app())
+        .put("/api/automation/v1/planner/knobs/mine.taskWeight")
+        .set("Authorization", unknownKind)
+        .send({ value: 2 });
+      expect(policy.status).toBe(200);
     });
 
     it("refuses a caller without fleet:control before the class is considered", async () => {

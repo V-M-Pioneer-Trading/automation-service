@@ -21,8 +21,8 @@ export interface ServiceConfig {
   replanIntervalMs: number;
   // How often a metrics rollup (meta#14) is computed and persisted.
   metricsRollupIntervalMs: number;
-  // Anomaly detection (meta#15) is only enabled once a webhook URL is
-  // configured — null means the checks don't run at all.
+  // Where anomalies (meta#15) are also POSTed. Detection itself always runs
+  // and the digest is always served; null only skips the outbound POST.
   anomalyWebhookUrl: string | null;
   anomalyIntervalMs: number;
   // Matches the sibling services' convention (fleet-service, agent-service):

@@ -27,6 +27,9 @@ What each route declares:
 
 The app and its API router are `secured()`, so an undeclared route refuses to
 start. Unmatched paths now get a JSON `404` rather than Express's HTML page.
+A malformed JSON body is now `400 malformed JSON body` and an oversized one
+`413 request body too large`, where both used to be a `500` carrying the
+parser's own message. The knob-class refusal reads "is an alert knob".
 401, 403 and 503 sentences are the package's; the 403 no longer names the
 scope.
 

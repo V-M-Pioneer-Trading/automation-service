@@ -60,6 +60,7 @@ export const inProcessIntrospector: Introspector = {
 
 export interface TestTokenOptions {
   sub?: string;
+  /** A `kind` outside the contract's two may be cast in, to test fail-closed code. */
   kind?: Identity["kind"];
   scopes?: string[];
 }

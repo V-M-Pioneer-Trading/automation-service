@@ -335,7 +335,8 @@ export class KnobNotFoundError extends Error {
  */
 export class KnobClassForbiddenError extends Error {
   constructor(name: string, knobClass: KnobClass, allowed: readonly KnobClass[]) {
-    super(`${name} is a ${knobClass} knob; this caller may only write ${allowed.join(", ")}`);
+    const article = knobClass === "alert" ? "an" : "a";
+    super(`${name} is ${article} ${knobClass} knob; this caller may only write ${allowed.join(", ")}`);
   }
 }
 

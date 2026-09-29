@@ -560,7 +560,20 @@ export function createApp(options: AppOptions) {
   // to re-serve an `UpstreamCallError`'s status code, which was unreachable and
   // told a reader the opposite — that an operator's 401 might be the fleet's
   // own expired token rather than their session.
-  const onError: express.ErrorRequestHandler = (err: Error, _req, res, _next) => {
+  //
+  // A caller's malformed or oversized body is a caller's fault, reported by
+  // express.json() before any route runs. Answer it as one, in the same
+  // envelope, rather than as a 500 carrying the parser's own wording.
+  const BODY_ERRORS: Record<string, [number, string]> = {
+    "entity.parse.failed": [400, "malformed JSON body"],
+    "entity.too.large": [413, "request body too large"],
+  };
+  const onError: express.ErrorRequestHandler = (err: Error & { type?: unknown }, _req, res, _next) => {
+    const bodyError = typeof err.type === "string" ? BODY_ERRORS[err.type] : undefined;
+    if (bodyError !== undefined) {
+      res.status(bodyError[0]).json({ error: { message: bodyError[1] } });
+      return;
+    }
     res.status(500).json({ error: { message: err.message || "internal error" } });
   };
   app.use(onError);
