@@ -39,6 +39,9 @@ describe("classifyUpstreamStatus", () => {
     [403, "", "credentials"], // ...or lacks the scope the route wants
     [503, '{"error":{"message":"SpaceTraders credential not configured"}}', "credentials"],
     [503, '{"error":{"message":"auth-service unavailable: cannot obtain a SpaceTraders credential"}}', "unavailable"],
+    // Every migrated upstream's answer while auth-service cannot verify our
+    // M2M token (decision 21). An outage of the center, not a bad credential.
+    [503, '{"error":{"message":"the authentication service could not process this request"}}', "unavailable"],
     [502, "", "unavailable"],
     [504, "", "unavailable"],
     [429, "", "unavailable"], // the gateway's token bucket, not a refusal

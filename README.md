@@ -14,7 +14,8 @@ flowchart LR
     AS[automation-service] -->|ship state, agent, contracts,<br/>buy / sell| AG[agent-service]
     AS -->|orbit, dock, navigate,<br/>survey, extract, refuel, deliver| FL[fleet-service]
     AS -->|waypoints, markets| NAV[navigation-service]
-    AS -.->|every outbound call carries two headers:<br/>its own Clerk M2M token, and<br/>the armed SpaceTraders token| AG
+    AS -.->|every outbound call carries one header:<br/>its own Clerk M2M token| AG
+    AS -.->|what does this caller's bearer carry?<br/>guarded routes only| AUTH[auth-service]
     AS --- DB[(Postgres<br/>tasks, knobs, events,<br/>observations, anomalies)]
     AS -->|anomaly webhook| WH[operator webhook]
     AG & FL & NAV --> ST[(SpaceTraders API)]
@@ -193,12 +194,12 @@ is applied server-side so the restriction holds even if a client forgets it.
 **The fence is enforced on writes, not only on reads.** Being shown fewer
 knobs is not a control: the supervisor could always have named one it wasn't
 shown. `PUT /planner/knobs/:name` now checks the knob's class against the
-caller, inside the same row lock as the write. A human operator authenticating
-with `fleet:control` may write any class. The supervisor, authenticating as a
-machine with `X-Service-Secret`, may write `policy` only and gets `403`
-otherwise — so it cannot resolve "the error alarm fired" by making the error
-alarm unable to fire. Either way the change lands in the event log with the
-actor that made it.
+caller, inside the same row lock as the write. Both kinds of caller need
+`fleet:control`. A human operator may then write any class. The supervisor,
+presenting a Clerk M2M token that auth-service reports as `kind: "machine"`,
+may write `policy` only and gets `403` otherwise — so it cannot resolve "the
+error alarm fired" by making the error alarm unable to fire. Either way the
+change lands in the event log with the caller's verified `sub` as its actor.
 
 ### model
 
@@ -599,7 +600,7 @@ All routes are under `/api/automation/v1`. `/health` is unversioned.
 |---|---|
 | `GET /metrics/context?rollupLimit=&eventLimit=` | Rollups plus recent events in one bounded response, shaped to fit an AI context window. |
 | `GET /anomalies/digest?windowMinutes=&anomalyLimit=&eventLimit=` | Anomalies plus notable events for a window: lifecycle, terminal task outcomes, silent-degradation failures, dispatch contention, knob changes and clamps, and AI actions. |
-| `POST /events` | `{ type, detail }` for an external supervisor. `type` must start with `ai_`, so an external caller can log its own decisions but can never spoof a lifecycle or planner event. |
+| `POST /events` | `{ type, detail }` for an external supervisor. `type` must start with `ai_`, so an external caller can log its own decisions but can never spoof a lifecycle or planner event. `detail.actor` is overwritten with the caller's verified `sub`. |
 
 Invalid lifecycle transitions return `409` naming the current status.
 
@@ -621,10 +622,8 @@ Invalid lifecycle transitions return `409` naming the current status.
 | `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
 | `METRICS_ROLLUP_INTERVAL_MS` | Rollup cadence (default `60000`) |
 | `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |
-| `CLERK_JWT_KEY` | Clerk's RS256 public key, PEM/SPKI. Literal `\n` escapes are accepted |
-| `CLERK_JWT_KEY_FILE` | Path to that key instead of an inline value; `CLERK_JWT_KEY` wins if both are set. One of the two is **required** |
-| `CLERK_ISSUER` | Expected `iss`, optional. Narrows misconfiguration, not a control |
-| `AI_SERVICE_SECRET` | Shared secret for `POST /events` (**required**) |
+| `AUTH_INTROSPECTION_URL` | auth-service's **full** introspection endpoint, `/auth/v1/introspect` included, used verbatim; e.g. `http://localhost:3005/auth/v1/introspect` (**required**) |
+| `AUTH_INTROSPECTION_SECRET` | The caller secret sent to it as `X-Introspection-Secret`. Never the vault's `AUTH_SERVICE_SHARED_SECRET` (**required**) |
 | `CLERK_M2M_SECRET_KEY` | Clerk Machine Secret Key this service mints its own outbound token with (production) |
 | `DEV_M2M_SIGNING_KEY_FILE` | Path to a private key to sign that token locally instead, no Clerk account needed. One of these two is **required** |
 
@@ -635,10 +634,21 @@ into a timer that fires every millisecond.
 
 ## Authentication
 
-Every `GET` is public. Every mutating route needs a verified Clerk session
-carrying the **`fleet:control`** scope, except `POST /events`, which is a machine
-call from ai-service and uses the `X-Service-Secret` shared secret instead.
-There is no human identity behind it, and Clerk stays scoped to humans.
+This service verifies no token itself. auth-service is the only verifier
+(auth-design.md decision 21, meta#80): every guarded request's bearer is sent
+to its introspection endpoint through
+[`@v-m-pioneer-trading/introspection-client`](https://github.com/V-M-Pioneer-Trading/ts-introspection-client),
+which answers with `{sub, kind, scopes}`, and the route compares that with
+what it declared.
+
+Every `GET` is public and declares `ignoreCredentials()`: the
+`Authorization` header is never read there and auth-service is never called,
+so the dashboard and health checks keep working while auth-service is down, and
+a stale token riding along is not a `401`. Every mutating route needs the
+**`fleet:control`** scope, from an operator's session or a machine's Clerk M2M
+token alike. That includes `POST /events`: ai-service is to call it with its
+own M2M token (meta#59). The `X-Service-Secret` shared secret it used to
+take is gone, and sending that header is the same as sending nothing.
 
 | | Route | Requires |
 |---|---|---|
@@ -647,20 +657,35 @@ There is no human identity behind it, and Clerk stays scoped to humans.
 | public | `GET /health`, `/api/automation/health` | none |
 | gated | `POST /autopilot/arm`, `/pause`, `/abort` | `fleet:control` |
 | gated | `POST /planner/replan` | `fleet:control` |
-| gated | `PUT /planner/knobs/:name` | `fleet:control` for any class, or `X-Service-Secret` for `policy` only |
-| gated | `POST /events` | `X-Service-Secret` |
+| gated | `PUT /planner/knobs/:name` | `fleet:control`; then any class for `kind: "operator"`, `policy` only for `kind: "machine"` |
+| gated | `POST /events` | `fleet:control`, any kind |
 
-Verification is **networkless**: the service holds Clerk's public key and checks
-signatures itself, so there is no JWKS fetch on the hot path and no cache to go
-stale. A missing token is `401`; a valid token without the scope is `403`, since
-re-authenticating would not help.
+What a caller gets back, in the `{"error":{"message":…}}` envelope, with the
+package's exact sentences:
 
-`CLERK_JWT_KEY` and `AI_SERVICE_SECRET` are **required**, with no default and no
-"auth optional" mode. A service that can start without a trust anchor is a
-service that can be deployed with authentication silently off.
+| Situation | Answer | auth-service called |
+|---|---|---|
+| No `Authorization`, or one that is not `Bearer <one token>` (`Bearer abc def` included) | `401` `a bearer token is required` | no |
+| auth-service says the token is inactive (expired, foreign-signed, garbage) | `401` `invalid or expired session` | yes |
+| Active, without `fleet:control` | `403` `this action requires a scope this session does not carry`: generic, the scope is not named | yes |
+| A machine writing a non-`policy` knob | `403` naming the knob's class: the credential is fine, the knob is out of its reach | yes |
+| auth-service unreachable, slow (1 s), erroring, or rejecting our secret | `503` `the authentication service could not process this request`, one attempt, no retry | yes |
+| A path no route matches | `404` `not found` | no |
 
-Mutating routes stamp `detail.actor`, the Clerk user id, onto the event they
-write, so the audit trail records who armed, paused, aborted or retuned.
+This is **fail-closed**: with auth-service down every mutation is a `503`
+and nothing is armed, paused, aborted or retuned; reads carry on. There is no
+local fallback, because a second verification path is what decision 10 forbids.
+
+`AUTH_INTROSPECTION_URL` and `AUTH_INTROSPECTION_SECRET` are **required**,
+with no default and no "auth optional" mode: a missing or malformed one
+refuses to start, naming the variable and never the secret. The app and its
+API router are `secured()`, so a route registered without a declaration also
+refuses to start rather than being served.
+
+Mutating routes stamp `detail.actor`, the caller's `sub` as auth-service
+reported it (`user_…` for an operator, `mch_…` for a machine), onto the
+event they write, so the audit trail records who armed, paused, aborted,
+retuned or logged an `ai_` event.
 
 ### Calling out
 

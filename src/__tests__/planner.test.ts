@@ -4,7 +4,7 @@ import request from "supertest";
 import { Pool } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
-import { bearer, TEST_SERVICE_SECRET } from "../testSupport/authTokens";
+import { bearer, machineBearer, TEST_MACHINE } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
 
@@ -289,22 +289,22 @@ describe("automation-service planner (meta#10)", () => {
     const gateway = app();
 
     const okRes = await request(gateway)
-      .post("/api/automation/v1/events").set("X-Service-Secret", TEST_SERVICE_SECRET)
+      .post("/api/automation/v1/events").set("Authorization", machineBearer())
       .send({ type: "ai_intervention", detail: { anomalyId: "42", rationale: "raised the failure limit" } });
     expect(okRes.status).toBe(201);
 
     const spoofRes = await request(gateway)
-      .post("/api/automation/v1/events").set("X-Service-Secret", TEST_SERVICE_SECRET)
+      .post("/api/automation/v1/events").set("Authorization", machineBearer())
       .send({ type: "armed", detail: {} });
     expect(spoofRes.status).toBe(400);
 
-    const missingPrefixRes = await request(gateway).post("/api/automation/v1/events").set("X-Service-Secret", TEST_SERVICE_SECRET).send({ type: "intervention" });
+    const missingPrefixRes = await request(gateway).post("/api/automation/v1/events").set("Authorization", machineBearer()).send({ type: "intervention" });
     expect(missingPrefixRes.status).toBe(400);
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
     const aiEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "ai_intervention");
     expect(aiEvents).toHaveLength(1);
-    expect(aiEvents[0].detail).toMatchObject({ anomalyId: "42", rationale: "raised the failure limit" });
+    expect(aiEvents[0].detail).toMatchObject({ anomalyId: "42", rationale: "raised the failure limit", actor: TEST_MACHINE });
   });
 
   it("assigns the reachable, highest-scoring asteroid field and logs the scoring inputs for replay", async () => {

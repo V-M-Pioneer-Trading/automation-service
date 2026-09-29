@@ -3,25 +3,28 @@
  * `Authorization` when it calls agent-service and fleet-service itself (the
  * mining/contract scheduler, not a human operator's browser).
  *
- * See auth-design.md decision 19. Two sources, matching the same
- * local/production split every other trust anchor in this codebase already
- * uses (see auth.ts, dev-keys/README.md):
+ * See auth-design.md decision 19. Two sources, the same local/production
+ * split the dev keypair gives the rest of the stack (dev-keys/README.md).
  *
- *  - production: a real Clerk Machine, minted via the Backend API. Verified
- *    signature confirms — decoded and checked against the exact
- *    CLERK_JWT_KEY already deployed — a JWT-format M2M token is signed by
- *    the same instance key as a human session token, and carries `scope` as
- *    a flat top-level claim in the exact shape `requireScope()` already
- *    parses. Cached across ticks, refreshed well before its ~1hr expiry —
+ * The receiving services verify nothing themselves: they send this token to
+ * auth-service's introspection endpoint (decision 21), which checks it and
+ * answers with what it carries. The token carries `scope` as a flat
+ * top-level claim, which the center returns verbatim, and the center reports
+ * `kind: "machine"` because the token's `sub` starts `mch_`.
+ *
+ *  - production: a real Clerk Machine, minted via the Backend API. A
+ *    JWT-format M2M token is signed by the same instance key as a human
+ *    session token, so the center verifies both the same way. Cached across
+ *    ticks, refreshed well before its ~1hr expiry —
  *    not per-tick, since the scheduler ticks far more often than the
  *    Hobby-tier's 2,500 mints/month would tolerate. A stale-but-not-yet-
  *    expired cached token is preferred over a failed refresh, so a
  *    transient Clerk outage doesn't interrupt anything until the cached
  *    token actually goes stale.
  *  - local dev / tests: signed locally against a fixed (or, for tests,
- *    ephemeral) keypair — no network call, no Clerk account needed.
- *    Verification on the receiving end is real either way; only the trust
- *    anchor differs.
+ *    ephemeral) keypair — no network call, no Clerk account needed. The
+ *    center verifies it against the dev key's public half; only the trust
+ *    anchor differs from production.
  */
 
 import { sign } from "crypto";
