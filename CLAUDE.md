@@ -24,7 +24,7 @@ declared on the `docker` job, never at workflow level.
 
 | File | Owns | Depends on |
 |---|---|---|
-| `server.ts` | `createApp(options)`: wiring, routes, auth guards, `app.locals` test hooks | everything below |
+| `server.ts` | `createApp(options)`: wiring, routes and each route's auth declaration, `app.locals` test hooks | everything below, introspection-client |
 | `scheduler.ts` | `FleetScheduler`: the tick (replan → assign → advance one FSM step → persist) | planner, discovery, FSMs, repos |
 | `planner.ts` | `Planner`: one `DecisionContext` per decision, scores mining/contract/scout, pure `evaluateContract` | scoring, routeCost, observations, repos |
 | `scoring.ts` | The credits-per-hour arithmetic. Pure, no imports from the rest of `src` | nothing |
@@ -47,8 +47,8 @@ declared on the `docker` job, never at workflow level.
 | `plannerDecision.ts` | The decision record: the scoring block's type, the two `event_log.detail` layouts, and the writer/reader pair for them. Imports nothing local | nothing |
 | `shipTaskRepo.ts`, `contractRepo.ts`, `marketIntelRepo.ts` | Row ↔ object repos. Repos taking `Pool \| PoolClient` can join a transaction | clock |
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
-| `auth.ts` | Networkless Clerk JWT verification, service-secret guard | jose |
-| `config.ts` | `configFromEnv()`; every numeric env var validated positive | fs |
+| `auth.ts` | `SCOPE_FLEET_CONTROL`, the one scope this service declares. No verification: auth-service does that (decision 21) | nothing |
+| `config.ts` | `configFromEnv()`; every numeric env var validated positive; `loadIntrospectionConfig()` for the center | fs, introspection-client |
 | `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | m2mToken, fetch |
 | `m2mToken.ts` | Mints/caches this service's own Clerk M2M token for outbound `Authorization` | fetch, crypto |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs, plannerDecision |
@@ -187,6 +187,10 @@ for callers who look there first.
   the sole thing separating st-gateway's two 503s — and that signal does not
   survive navigation-service, which collapses every upstream 5xx into its own
   `502`. Those gaps cost precision in an event's `failureKind`, never safety.
+  Every migrated service's introspection `503` ("the authentication service
+  could not process this request", decision 21) is `unavailable` — auth-service
+  down, which fixes itself — and `upstreamFailure.test.ts` pins it; never let
+  a message check route it to `credentials`.
 
   What must not be done is give `malformed` a shorter fuse than `rejected`:
   fleet-service and agent-service answer `404` for any unrouted path, so a
@@ -326,11 +330,15 @@ Both the planner's scout scoring and the `market_stale` check read
 - Classes are a security boundary, enforced on **both** paths. Reads: the
   `?class=` filter. Writes: `KnobRepo.set(name, value, allowedClasses?)`
   checks the class inside the same row lock as the write and throws
-  `KnobClassForbiddenError` (→ 403). A Clerk `fleet:control` caller passes no
-  restriction and may write any class; a machine caller (`X-Service-Secret`)
-  is restricted to `policy`. Never move an `alert` or `model` knob to `policy`
-  casually, and never call `set` without `allowedClasses` on a path a
-  non-operator can reach.
+  `KnobClassForbiddenError` (→ 403). The route requires `fleet:control` of
+  everyone; then `kindOf(res) === "operator"` passes no restriction and may
+  write any class, and every other kind (today: `machine`, the AI supervisor
+  on its Clerk M2M token) is restricted to `policy`. Written as "not an
+  operator" rather than "is a machine" so an unexpected kind fails toward the
+  narrower set. Key on the center's `kind`, never on the `sub` prefix or on
+  a header's presence (it used to key on `X-Service-Secret`). Never move an
+  `alert` or `model` knob to `policy` casually, and never call `set` without
+  `allowedClasses` on a path a non-operator can reach.
 - A default is a safety decision. `credit.reserveFloor` defaults to a real
   reserve because at `0` the check reserves nothing, and the failure it guards
   is unrecoverable in-game. Changing a default only affects rows that don't
@@ -403,7 +411,36 @@ before any FSM runs) — though only `mining_task_failed` and
 those two and the raw event feed carries the rest.
 
 Event `detail` must never contain a token or anything token-shaped; `actor`
-is the Clerk `sub` only.
+is the `sub` auth-service reported (`actorOf(res)`) and nothing else — never a
+literal role name, never a value the caller supplied. `POST /events` overwrites
+any `detail.actor` in the body.
+
+## Inbound auth (decision 21)
+
+- **This service verifies nothing.** `createApp` takes an `ExpressAuth` from
+  `@v-m-pioneer-trading/introspection-client`; production builds it with
+  `createExpressAuth(config.introspection)`, which POSTs the bearer to
+  auth-service (`AUTH_INTROSPECTION_URL`, `AUTH_INTROSPECTION_SECRET`).
+  Handlers read identity only through `actorOf(res)` / `kindOf(res)`; there is
+  no `res.locals` key. No JWT library, no key, no fallback. Reintroducing a
+  local verifier is a regression against decision 10.
+- **Every route declares, first handler.** `app` and `api` are `secured()`:
+  every `GET` declares `ignoreCredentials()` (header never read, center never
+  called, so reads survive an auth-service outage), every mutation declares
+  `requireScope(SCOPE_FLEET_CONTROL)`. An undeclared route, a declaration in
+  second position, or `ignoreCredentials()` on a mutation throws at startup.
+  Middleware ahead of the guard (`cors`, `express.json`) is wrapped in
+  `passthrough()`, `cors()` stays first so it terminates preflights, and the
+  JSON 404 is `notFound()`, last before the error handler.
+- **Messages are the package's** (`MESSAGES`): `401` `a bearer token is
+  required` / `invalid or expired session`, `403` generic without the scope
+  name, `503` `the authentication service could not process this request`.
+  The one `403` of our own is `KnobClassForbiddenError`, which is a refusal
+  after a valid credential, not the contract's scope `403`.
+- **The pin is a release tarball URL** in `package.json`, integrity-hashed in
+  the lockfile. The two-`Authorization`-lines test in
+  `introspectionWiring.test.ts` pins the installed version's behaviour and is
+  meant to fail on a bump that changes it.
 
 ## Database
 
@@ -492,8 +529,13 @@ is the Clerk `sub` only.
   two consecutive waits (`waitForNewWait`); polling for the first of several
   anomalies when the assertion needs all of them (anomalies persist one at a
   time with a webhook delivery in between).
-- Auth is never bypassed in tests: `createTestApp` supplies an ephemeral RSA
-  keypair (`authTokens.ts`) and `bearer()` signs real tokens with it.
+- Auth is never bypassed in tests. `createTestApp` wires the package's real
+  Express adapter to an in-process stub center (`authTokens.ts`): tokens are
+  opaque strings the stub knows (`bearer()`, `machineBearer()`,
+  `bearerWithoutScope()`, `bearer({ sub, kind, scopes })`), anything else is
+  inactive. `introspectionWiring.test.ts` does the same over real HTTP against
+  `stubServers.ts`'s center; add a route and it belongs in that file's route
+  list.
 - `contract.test.ts`'s `makeFlakyPool` proxies a `Pool` to fail exactly one
   matching query, including inside a transaction; reuse it for
   "crash between two writes" cases.

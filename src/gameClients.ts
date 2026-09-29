@@ -178,6 +178,14 @@ export function classifyUpstreamStatus(status: number, body = ""): UpstreamFailu
   if (status === 503 && CREDENTIAL_UNCONFIGURED.test(body)) return "credentials";
   // 429 is the gateway's token bucket telling us to come back, not a refusal;
   // 408 and 425 are a proxy talking about the connection, not about the game.
+  //
+  // A 5xx that is not the credential sentence above lands here, and that
+  // includes every upstream's introspection 503, "the authentication service
+  // could not process this request" (decision 21, meta#80): auth-service is
+  // down or restarting, which fixes itself and must never spend a target's
+  // retry budget. It carries no numeric code by design, so there is nothing
+  // to match beyond the status; do not add a check that could route it to
+  // `credentials`.
   if (status === 408 || status === 425 || status === 429 || status >= 500) return "unavailable";
   if (status === 400) return hasValidationFields(body) ? "malformed" : "rejected";
   if (status === 409 || status === 422) return "rejected";

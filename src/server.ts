@@ -1,10 +1,19 @@
 import cors from "cors";
 import { generateKeyPairSync } from "crypto";
 import express from "express";
+import {
+  actorOf,
+  createExpressAuth,
+  kindOf,
+  notFound,
+  passthrough,
+  secured,
+  type ExpressAuth,
+} from "@v-m-pioneer-trading/introspection-client";
 import { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
 import { AnomalyConfig, AnomalyScheduler } from "./anomalyScheduler";
-import { AuthConfig, actorOf, createVerifier, SCOPE_FLEET_CONTROL } from "./auth";
+import { SCOPE_FLEET_CONTROL } from "./auth";
 import { AutopilotState, InvalidTransitionError } from "./autopilotState";
 import { Clock, systemClock } from "./clock";
 import { ServiceConfig, configFromEnv, resolveM2MTokenSource } from "./config";
@@ -146,8 +155,13 @@ export interface MetricsConfig {
 
 export interface AppOptions {
   pool: Pool;
-  /** Required: a caller cannot construct this service without deciding what it trusts. Tests use `createTestApp`. */
-  auth: AuthConfig;
+  /**
+   * Required: a caller cannot construct this service without deciding what it
+   * trusts. Production passes `createExpressAuth(loadIntrospectionConfig())`,
+   * which asks auth-service about every credential (decision 21); tests pass
+   * one wired to a stub center via `createTestApp`.
+   */
+  auth: ExpressAuth;
   clock?: Clock;
   /** Optional so lifecycle-only deployments and tests get arm/pause/abort with no ship-driving scheduler at all. */
   mining?: MiningConfig;
@@ -179,21 +193,32 @@ export function createApp(options: AppOptions) {
     authTokenSource,
   } = options;
 
-  const { requireScope, requireServiceSecret } = createVerifier(auth);
-  const requireControl = requireScope(SCOPE_FLEET_CONTROL);
+  // Every mutating route declares this; every read declares
+  // ignoreCredentials(). There is no third kind of route here.
+  const requireControl = auth.requireScope(SCOPE_FLEET_CONTROL);
+  const publicRead = auth.ignoreCredentials;
 
-  const app = express();
+  // secured(): a route registered on the app or on `api` below without a
+  // declaration as its first handler refuses to start. "Public" is something a
+  // route says out loud, never something that happens because a lookup missed.
+  const app = secured(express());
   // Every response here is either a live status check or reflects mutable
   // autopilot/event state — none of it is meaningfully cacheable
   app.set("etag", false);
+  // cors() first: it terminates a preflight itself, which is what lets a
+  // browser's OPTIONS through. Mounted after the guard, the router would answer
+  // the preflight with no Access-Control-Allow-Origin and the browser fails it.
   app.use(
-    cors({
-      origin: corsAllowedOrigin,
-      methods: ["GET", "POST", "PUT", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization"],
-    })
+    passthrough(
+      cors({
+        origin: corsAllowedOrigin,
+        methods: ["GET", "POST", "PUT", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization"],
+      }),
+      "answers CORS preflights; never serves a resource"
+    )
   );
-  app.use(express.json());
+  app.use(passthrough(express.json(), "parses bodies; never answers a request for a resource"));
 
   const state = new AutopilotState();
   const events = new EventLog(pool, clock);
@@ -263,16 +288,25 @@ export function createApp(options: AppOptions) {
   // since it's operational tooling, not versioned API surface. Mounted both
   // bare (local dev/compose) and under /api/automation (production CloudFront
   // only routes requests matching a configured path pattern).
-  app.get("/health", health);
-  app.get("/api/automation/health", health);
+  //
+  // ignoreCredentials(), not allowPublic(): health reads no identity, so a
+  // bearer sent here is never read and auth-service is never called. Health
+  // must not turn 401 on a stale token, or 503 while auth-service is down.
+  app.get("/health", publicRead(), health);
+  app.get("/api/automation/health", publicRead(), health);
 
-  const api = express.Router();
+  // Every read under the API is public on purpose — the dashboard is meant to
+  // be watchable without credentials, the event log especially — and none of
+  // them reads identity, so they all declare ignoreCredentials() too: a
+  // dashboard read keeps working while auth-service is down, and a stale token
+  // riding along on one is never a 401.
+  const api = secured(express.Router());
 
   // --- Autopilot lifecycle ---
 
   const lifecycleStatus = () => ({ status: state.getStatus(), mode: state.getMode() });
 
-  api.get("/autopilot/status", (_req, res) => {
+  api.get("/autopilot/status", publicRead(), (_req, res) => {
     res.json(lifecycleStatus());
   });
 
@@ -317,6 +351,7 @@ export function createApp(options: AppOptions) {
 
   api.get(
     "/autopilot/events",
+    publicRead(),
     asyncHandler(async (req, res) => {
       const limit = clampLimit(req.query.limit, 100, MAX_EVENTS_LIMIT);
       res.json({ events: await events.list(limit) });
@@ -326,6 +361,7 @@ export function createApp(options: AppOptions) {
   if (scheduler !== null) {
     api.get(
       "/autopilot/ships/:shipSymbol",
+      publicRead(),
       asyncHandler(async (req, res) => {
         const task = await tasks.get(req.params.shipSymbol);
         if (task === null) {
@@ -343,11 +379,16 @@ export function createApp(options: AppOptions) {
   // can never spoof a lifecycle/planner event type (e.g. "armed", "knob_changed")
   // that the rest of this service treats as authoritative.
   //
-  // Machine caller, so a shared secret rather than a Clerk scope — there is no
-  // human identity behind it, and Clerk stays scoped to humans.
+  // `fleet:control`, from any kind of caller: ai-service presents a Clerk M2M
+  // token (meta#59) like every other caller (decision 21). The shared secret
+  // this route used to take is gone; the center has no primitive for one.
+  //
+  // `detail.actor` is stamped with the verified `sub` and overrides anything
+  // the caller put there. The audit trail says who wrote a row because the
+  // center said so, not because the row said so.
   api.post(
     "/events",
-    requireServiceSecret(),
+    requireControl,
     asyncHandler(async (req, res) => {
       const type: unknown = req.body?.type;
       const detail: unknown = req.body?.detail;
@@ -359,7 +400,7 @@ export function createApp(options: AppOptions) {
         badRequest(res, "detail must be an object");
         return;
       }
-      await events.append(type, (detail as Record<string, unknown> | undefined) ?? {});
+      await events.append(type, { ...((detail as Record<string, unknown> | undefined) ?? {}), actor: actorOf(res) });
       res.status(201).json({ ok: true });
     })
   );
@@ -371,6 +412,7 @@ export function createApp(options: AppOptions) {
   // to filter means the restriction holds even if a client forgets it.
   api.get(
     "/planner/knobs",
+    publicRead(),
     asyncHandler(async (req, res) => {
       const requested = req.query.class;
       if (requested === undefined) {
@@ -388,40 +430,40 @@ export function createApp(options: AppOptions) {
   /**
    * Two kinds of caller may tune, and they are not trusted equally.
    *
-   * A human operator with `fleet:control` may write any class. The AI
-   * supervisor authenticates as a machine and may write `policy` only — the
-   * class model is a fence around *it*, and a fence enforced only by which
-   * knobs it is shown is not a fence: nothing stopped it naming
+   * Both need `fleet:control`. An operator may then write any class. A
+   * machine — the AI supervisor, on its Clerk M2M token — may write `policy`
+   * only: the class model is a fence around *it*, and a fence enforced only by
+   * which knobs it is shown is not a fence: nothing stopped it naming
    * `anomaly.errorRateThreshold` and resolving "the error alarm fired" by
    * making the error alarm unable to fire.
+   *
+   * "Machine" is the center's `kind`, never the `sub` prefix and never which
+   * header was sent; this used to key on `X-Service-Secret` being present.
+   * Only an explicit operator is unfenced, so a `kind` this code does not
+   * know fails toward the narrower set.
    */
   const machineWritableClasses: readonly KnobClass[] = ["policy"];
-  const knobWriteGuard: express.RequestHandler = (req, res, next) => {
-    if (req.header("X-Service-Secret") !== undefined) {
-      res.locals.machineCaller = true;
-      requireServiceSecret()(req, res, next);
-      return;
-    }
-    requireControl(req, res, next);
-  };
 
   api.put(
     "/planner/knobs/:name",
-    knobWriteGuard,
+    requireControl,
     asyncHandler(async (req, res) => {
       const value: unknown = req.body?.value;
       if (typeof value !== "number" || !Number.isFinite(value)) {
         badRequest(res, "value must be a finite number");
         return;
       }
-      const isMachine = res.locals.machineCaller === true;
+      const isOperator = kindOf(res) === "operator";
       try {
-        const { knob, previousValue } = await knobs.set(req.params.name, value, isMachine ? machineWritableClasses : undefined);
+        const { knob, previousValue } = await knobs.set(req.params.name, value, isOperator ? undefined : machineWritableClasses);
         await events.append("knob_changed", {
           name: req.params.name,
           previousValue,
           newValue: knob.value,
-          actor: isMachine ? "ai-service" : actorOf(res),
+          // The caller's verified sub: `user_…` for an operator, `mch_…` for
+          // a machine. It used to be the literal "ai-service" for any caller
+          // holding the shared secret, which named a role, not a credential.
+          actor: actorOf(res),
         });
         scheduler?.requestReplan("knob_change");
         res.json({ knob });
@@ -450,6 +492,7 @@ export function createApp(options: AppOptions) {
   // when a ship goes somewhere surprising.
   api.get(
     "/planner/model",
+    publicRead(),
     asyncHandler(async (_req, res) => {
       res.json({ model: await observations.calibrate(priorsFromKnobs(await knobs.getValues())) });
     })
@@ -471,6 +514,7 @@ export function createApp(options: AppOptions) {
   if (metricsScheduler !== null) {
     api.get(
       "/metrics/context",
+      publicRead(),
       asyncHandler(async (req, res) => {
         const rollupLimit = clampLimit(req.query.rollupLimit, DEFAULT_CONTEXT_ROLLUP_LIMIT, MAX_ROLLUPS_LIMIT);
         const eventLimit = clampLimit(req.query.eventLimit, DEFAULT_CONTEXT_EVENT_LIMIT, MAX_CONTEXT_EVENT_LIMIT);
@@ -483,6 +527,7 @@ export function createApp(options: AppOptions) {
   if (anomalyScheduler !== null) {
     api.get(
       "/anomalies/digest",
+      publicRead(),
       asyncHandler(async (req, res) => {
         const windowMinutes = clampLimit(req.query.windowMinutes, DEFAULT_DIGEST_WINDOW_MINUTES, MAX_DIGEST_WINDOW_MINUTES);
         const anomalyLimit = clampLimit(req.query.anomalyLimit, DEFAULT_DIGEST_ANOMALY_LIMIT, MAX_ANOMALIES_LIMIT);
@@ -499,15 +544,26 @@ export function createApp(options: AppOptions) {
 
   app.use("/api/automation/v1", api);
 
+  // Express' default 404 is an HTML page; every other answer from this service
+  // is JSON, so a mistyped path shouldn't be the one a caller can't parse.
+  // notFound() serves no resource, so it needs no declaration and never asks
+  // the center.
+  app.use(
+    notFound((_req: express.Request, res: express.Response) => {
+      res.status(404).json({ error: { message: "not found" } });
+    })
+  );
+
   // No route here calls an upstream service: every one of them reads Postgres
   // or flips in-memory state, and the game is only ever touched from a
   // scheduler tick, whose failures are classified and handled there. This used
   // to re-serve an `UpstreamCallError`'s status code, which was unreachable and
   // told a reader the opposite — that an operator's 401 might be the fleet's
   // own expired token rather than their session.
-  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const onError: express.ErrorRequestHandler = (err: Error, _req, res, _next) => {
     res.status(500).json({ error: { message: err.message || "internal error" } });
-  });
+  };
+  app.use(onError);
 
   // Metrics and anomaly detection run independent of autopilot arm/abort by
   // design, so /autopilot/abort can't stop them — tests that spin up many
@@ -560,7 +616,7 @@ if (require.main === module) {
         for (const clamp of knobClamps) await bootLog.append("knob_clamped", { ...clamp });
         return createApp({
           pool,
-          auth: { clerkJwtKeyPem: config.clerkJwtKeyPem, clerkIssuer: config.clerkIssuer, aiServiceSecret: config.aiServiceSecret },
+          auth: createExpressAuth(config.introspection),
           mining: config,
           metrics: { rollupIntervalMs: config.metricsRollupIntervalMs },
           // Always on, like the metrics rollups above it. Detection used to be

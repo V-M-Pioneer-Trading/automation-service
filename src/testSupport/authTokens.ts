@@ -1,90 +1,102 @@
 /**
- * @file Test credentials: an ephemeral keypair, generated per test run.
+ * @file Test credentials: opaque strings, and what a stub center says of them.
  *
- * Tests exercise the **real** verification path in `auth.ts` — there is no stub
- * verifier and no bypass flag. All that differs from production is the trust
- * anchor: this module mints a throwaway RSA keypair at load, hands the public
- * half to `createApp` and signs tokens with the private half. Nothing is
- * committed, nothing is shared between repositories, and a leaked test key
- * signs nothing that production would accept.
+ * automation-service no longer verifies a token (auth-design.md decision 21),
+ * so a test token is not a signed JWT; it is a string the stub center
+ * recognises. Two stubs speak the same table:
  *
- * The signer here is hand-rolled and synchronous on purpose. Signing is not the
- * security boundary — verification is, and that stays in `jose` — and a
- * synchronous `bearer()` keeps call sites readable across every suite that
- * touches a mutating route.
+ * - {@link inProcessIntrospector}, which `createTestApp` hands to the
+ *   package's real Express adapter. Only the transport is in-process: the
+ *   adapter, the authorizer and every message are the package's own.
+ * - `stubServers.ts`'s `startStubCenter`, a real local HTTP center, for the
+ *   wiring suite.
+ *
+ * Nothing here signs anything, and there is no bypass: a request still needs a
+ * token the center calls active, carrying the scope the route declares.
  */
 
-import { generateKeyPairSync, sign } from "crypto";
-import { SCOPE_AGENT_RESET, SCOPE_FLEET_CONTROL } from "../auth";
-
-const newKeyPair = () =>
-  generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: "spki", format: "pem" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-
-const { publicKey, privateKey } = newKeyPair();
-/** A second, untrusted keypair — the app is never told about this one. */
-const foreign = newKeyPair();
-
-/** Pass as `auth.clerkJwtKeyPem` when constructing an app under test. */
-export const TEST_CLERK_JWT_KEY = publicKey;
-
-/** Pass as `auth.aiServiceSecret`. Only ever compared, never verified. */
-export const TEST_SERVICE_SECRET = "test-service-secret";
+import type { CenterAnswer, Identity, Introspector } from "@v-m-pioneer-trading/introspection-client";
 
 export const TEST_ACTOR = "user_2TestOperator";
+/** The machine caller's `sub`, as Clerk issues one for an M2M token. */
+export const TEST_MACHINE = "mch_test";
 
-const b64url = (value: string): string => Buffer.from(value).toString("base64url");
+// Scope strings are literals on purpose, never auth.ts constants: a test
+// center that echoed SCOPE_FLEET_CONTROL would keep passing if the constant
+// itself drifted from the contract string the center really issues.
+const FLEET_CONTROL = "fleet:control";
+const AGENT_RESET = "agent:reset";
 
-export interface TestTokenOptions {
-  scopes?: string[];
-  sub?: string;
-  /** Negative offsets produce an already-expired token. */
-  expiresInSeconds?: number;
-  issuer?: string;
-}
+export const CONTROL_TOKEN = "test-token-fleet-control";
+export const MACHINE_TOKEN = "test-token-machine-fleet-control";
+export const SESSION_TOKEN = "test-token-session-other-scope";
+export const INACTIVE_TOKEN = "test-token-inactive";
+export const EXPIRED_TOKEN = "test-token-expired";
+export const FOREIGN_TOKEN = "test-token-foreign-signed";
 
-export function signTestToken(options: TestTokenOptions = {}): string {
-  return signWith(privateKey, options);
-}
+const fixed = new Map<string, Identity>([
+  [CONTROL_TOKEN, { sub: TEST_ACTOR, kind: "operator", scopes: [FLEET_CONTROL] }],
+  [MACHINE_TOKEN, { sub: TEST_MACHINE, kind: "machine", scopes: [FLEET_CONTROL] }],
+  // Signed in, holding a real permission, just not this service's.
+  [SESSION_TOKEN, { sub: TEST_ACTOR, kind: "operator", scopes: [AGENT_RESET] }],
+]);
 
-function signWith(key: string, options: TestTokenOptions): string {
-  const {
-    scopes = [SCOPE_FLEET_CONTROL],
-    sub = TEST_ACTOR,
-    expiresInSeconds = 300,
-    issuer,
-  } = options;
-
-  const issuedAt = Math.floor(Date.now() / 1000);
-  const header = { alg: "RS256", typ: "JWT" };
-  const payload = {
-    sub,
-    scope: scopes.join(" "),
-    iat: issuedAt,
-    exp: issuedAt + expiresInSeconds,
-    ...(issuer !== undefined ? { iss: issuer } : {}),
-  };
-
-  const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
-  const signature = sign("RSA-SHA256", Buffer.from(signingInput), key).toString("base64url");
-  return `${signingInput}.${signature}`;
-}
-
-/** Ready-to-use `Authorization` header value for an operator with full control. */
-export const bearer = (options: TestTokenOptions = {}): string => `Bearer ${signTestToken(options)}`;
-
-/** An operator who is signed in but holds no permission on this service. */
-export const bearerWithoutScope = (): string => bearer({ scopes: [SCOPE_AGENT_RESET] });
-
-/** A well-formed token whose `exp` has already passed. */
-export const expiredBearer = (): string => bearer({ expiresInSeconds: -60 });
+/** Tokens minted by {@link bearer} with non-default options. */
+const minted = new Map<string, Identity>();
 
 /**
- * Correctly-shaped, correct scopes, valid `exp` — signed by a key the service
- * has never seen. The one token that proves the signature is actually checked
- * rather than the payload merely being decoded.
+ * What the center answers for a bare token. Anything not listed is inactive —
+ * which is what the center says of an expired, foreign-signed or garbage
+ * token alike, since telling them apart is its business, not ours.
  */
-export const foreignBearer = (): string => `Bearer ${signWith(foreign.privateKey, {})}`;
+export const answerFor = (token: string): CenterAnswer => {
+  const identity = fixed.get(token) ?? minted.get(token);
+  return identity !== undefined ? { state: "active", identity } : { state: "inactive" };
+};
+
+export const inProcessIntrospector: Introspector = {
+  introspect: async (token: string) => answerFor(token),
+};
+
+export interface TestTokenOptions {
+  sub?: string;
+  kind?: Identity["kind"];
+  scopes?: string[];
+}
+
+/**
+ * Ready-to-use `Authorization` value. With no options, an operator holding
+ * `fleet:control`; with options, a fresh token the center will answer with
+ * exactly that identity.
+ */
+export const bearer = (options: TestTokenOptions = {}): string => {
+  if (options.sub === undefined && options.kind === undefined && options.scopes === undefined) {
+    return `Bearer ${CONTROL_TOKEN}`;
+  }
+  const token = `test-token-minted-${minted.size + 1}`;
+  minted.set(token, {
+    sub: options.sub ?? TEST_ACTOR,
+    kind: options.kind ?? "operator",
+    scopes: options.scopes ?? [FLEET_CONTROL],
+  });
+  return `Bearer ${token}`;
+};
+
+/** The AI supervisor: a machine holding `fleet:control` (meta#59). */
+export const machineBearer = (): string => `Bearer ${MACHINE_TOKEN}`;
+
+/** An operator who is signed in but holds no permission on this service. */
+export const bearerWithoutScope = (): string => `Bearer ${SESSION_TOKEN}`;
+
+/** A token the center answers `{"active": false}` for, as it does an expired one. */
+export const expiredBearer = (): string => `Bearer ${EXPIRED_TOKEN}`;
+
+/**
+ * A token the center answers `{"active": false}` for, as it does one signed by
+ * a key it never trusted. Kept as its own name so the suites still say which
+ * case they mean; to this service the two are the same answer.
+ */
+export const foreignBearer = (): string => `Bearer ${FOREIGN_TOKEN}`;
+
+/** A token the center answers `{"active": false}` for. */
+export const inactiveBearer = (): string => `Bearer ${INACTIVE_TOKEN}`;

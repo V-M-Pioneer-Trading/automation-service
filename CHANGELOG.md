@@ -7,6 +7,67 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## auth-service verifies every token (meta#80 step 8, decision 21)
+
+This service no longer verifies a Clerk token. Each guarded request's bearer
+goes to auth-service's introspection endpoint through
+`@v-m-pioneer-trading/introspection-client` (pinned at 1.1.1, the same release
+fleet-service runs), and the route compares the answer, `{sub, kind, scopes}`,
+with what it declared. There is no local fallback: a second verification path
+is what decision 10 forbids.
+
+What each route declares:
+
+- Every `GET`, health on both paths included: `ignoreCredentials()`. The
+  header is never read and the center never called, so dashboards and health
+  keep working while auth-service is down.
+- `POST /autopilot/arm|pause|abort`, `POST /planner/replan`,
+  `PUT /planner/knobs/:name` and `POST /events`: `fleet:control`, from any
+  kind of caller.
+
+The app and its API router are `secured()`, so an undeclared route refuses to
+start. Unmatched paths now get a JSON `404` rather than Express's HTML page.
+401, 403 and 503 sentences are the package's; the 403 no longer names the
+scope.
+
+Behaviour changes a caller will notice:
+
+- **`X-Service-Secret` is gone**, with `AI_SERVICE_SECRET`. `POST /events`
+  used to take it instead of a Clerk session, and `PUT /planner/knobs/:name`
+  picked its requirement from whether the header was present. The package has
+  no shared-secret primitive by design: a machine presents a Clerk M2M token
+  like every other caller. ai-service moves to one when it deploys (meta#59);
+  until then it cannot write here. meta#80 records ai-service as not yet
+  deployed, so no running caller loses access.
+- **The knob fence keys on `kind`.** Only `kind: "operator"` may write every
+  class; anything else, which today means `machine`, may write `policy` only
+  and gets the same `KnobClassForbiddenError` `403` as before.
+- **`actor` is the caller's `sub`.** `knob_changed.actor` used to be the
+  literal `"ai-service"` for any holder of the shared secret, which named a
+  role, not a credential; it is now the `mch_…` or `user_…` the center
+  reported. `POST /events` stamps `detail.actor` the same way and overwrites
+  whatever the caller put there.
+- **Fail-closed.** With auth-service down, every mutation is a `503` (one
+  attempt, 1 s timeout, no retry). Reads are unaffected.
+
+Configuration: `CLERK_JWT_KEY`, `CLERK_JWT_KEY_FILE` and `CLERK_ISSUER` are
+no longer read; `AUTH_INTROSPECTION_URL` (the full endpoint URL) and
+`AUTH_INTROSPECTION_SECRET` are required and refuse startup when missing.
+`jose` is gone from the dependencies. The *outbound* M2M token
+(`CLERK_M2M_SECRET_KEY` / `DEV_M2M_SIGNING_KEY_FILE`) is unchanged.
+
+The failure classifier already mapped every other service's introspection
+`503` ("the authentication service could not process this request") to
+`unavailable`, since it is a 5xx without the credential sentence; a test now
+pins it, so an auth-service outage can never spend a target's retry budget.
+
+Tests stopped signing tokens. `authTokens.ts` hands out opaque strings a stub
+center recognises, answered in-process for the suites and over real HTTP in
+`introspectionWiring.test.ts`, which drives every route class against a stub
+center. Its two-`Authorization`-lines case pins 1.1.1's behaviour (the first
+line is verified); 1.1.2 reads two lines as no credential, and bumping the pin
+flips that test deliberately.
+
 ## Each task kind writes its own opening shape too
 
 The entry below stopped the scheduler *interpreting* per-kind column meanings,

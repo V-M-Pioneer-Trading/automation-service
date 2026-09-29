@@ -15,9 +15,9 @@
     "replay": "npm run build && node dist/replay.js"
   },
   "dependencies": {
+    "@v-m-pioneer-trading/introspection-client": "https://github.com/V-M-Pioneer-Trading/ts-introspection-client/releases/download/v1.1.1/v-m-pioneer-trading-introspection-client-1.1.1.tgz",
     "cors": "^2.8.6",
     "express": "^4.21.2",
-    "jose": "^5.10.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {

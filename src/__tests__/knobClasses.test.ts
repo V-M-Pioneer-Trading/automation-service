@@ -1,7 +1,7 @@
 import request from "supertest";
 import { Pool } from "pg";
 import { createTestApp } from "../testSupport/createTestApp";
-import { bearer, TEST_SERVICE_SECRET } from "../testSupport/authTokens";
+import { bearer, bearerWithoutScope, machineBearer, TEST_ACTOR, TEST_MACHINE } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { KNOB_DEFINITIONS, syncKnobDefinitions } from "../knobs";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -88,10 +88,14 @@ describe("knob classes", () => {
    * rejected a write, so the exact move the class model exists to prevent —
    * an agent resolving "the error alarm fired" by making the error alarm
    * unable to fire — landed as an ordinary knob_changed event.
+   *
+   * The fence keys on the center's `kind`, which is what a Clerk M2M token
+   * is reported as (decision 21). It used to key on an `X-Service-Secret`
+   * header being present.
    */
   describe("the fence on the write path", () => {
     const machineWrite = (name: string, value: number) =>
-      request(app()).put(`/api/automation/v1/planner/knobs/${name}`).set("X-Service-Secret", TEST_SERVICE_SECRET).send({ value });
+      request(app()).put(`/api/automation/v1/planner/knobs/${name}`).set("Authorization", machineBearer()).send({ value });
 
     it("lets the supervisor write a policy knob", async () => {
       const res = await machineWrite("mine.taskWeight", 2);
@@ -115,19 +119,38 @@ describe("knob classes", () => {
       expect(res.body.error.message).toMatch(/model knob/);
     });
 
-    it("still refuses a machine caller presenting the wrong secret", async () => {
+    it("fences a machine by kind even when its sub looks like an operator's", async () => {
+      // The prefix is Clerk's convention and only the center may read it.
+      // A machine is whatever the center says is one.
+      const res = await request(app())
+        .put("/api/automation/v1/planner/knobs/anomaly.errorRateThreshold")
+        .set("Authorization", bearer({ sub: "user_2LooksHuman", kind: "machine" }))
+        .send({ value: 1 });
+      expect(res.status).toBe(403);
+    });
+
+    it("refuses a caller without fleet:control before the class is considered", async () => {
       const res = await request(app())
         .put("/api/automation/v1/planner/knobs/mine.taskWeight")
-        .set("X-Service-Secret", "not-the-secret")
+        .set("Authorization", bearerWithoutScope())
+        .send({ value: 2 });
+      expect(res.status).toBe(403);
+      expect(res.body.error.message).not.toMatch(/policy knob/);
+    });
+
+    it("treats the retired X-Service-Secret header as no credential", async () => {
+      const res = await request(app())
+        .put("/api/automation/v1/planner/knobs/mine.taskWeight")
+        .set("X-Service-Secret", "anything")
         .send({ value: 2 });
       expect(res.status).toBe(401);
     });
 
-    it("records the supervisor as the actor, so a tuning change is attributable", async () => {
+    it("records the supervisor's own sub as the actor, so a tuning change is attributable", async () => {
       await machineWrite("mine.taskWeight", 3);
       const events = await request(app()).get("/api/automation/v1/autopilot/events?limit=10");
       const changed = events.body.events.find((e: { type: string }) => e.type === "knob_changed");
-      expect(changed.detail).toMatchObject({ name: "mine.taskWeight", newValue: 3, actor: "ai-service" });
+      expect(changed.detail).toMatchObject({ name: "mine.taskWeight", newValue: 3, actor: TEST_MACHINE });
     });
   });
 
@@ -138,6 +161,18 @@ describe("knob classes", () => {
     expect(res.status).toBe(200);
     expect(res.body.knob.value).toBe(45);
     expect(res.body.knob.class).toBe("model");
+  });
+
+  it("lets an operator write an alert knob too, and records the operator's sub", async () => {
+    const res = await request(app())
+      .put("/api/automation/v1/planner/knobs/anomaly.errorRateThreshold").set("Authorization", bearer())
+      .send({ value: 0.2 });
+    expect(res.status).toBe(200);
+    expect(res.body.knob.class).toBe("alert");
+
+    const events = await request(app()).get("/api/automation/v1/autopilot/events?limit=10");
+    const changed = events.body.events.find((e: { type: string }) => e.type === "knob_changed");
+    expect(changed.detail).toMatchObject({ name: "anomaly.errorRateThreshold", newValue: 0.2, actor: TEST_ACTOR });
   });
 
   it("deletes knobs dropped from the definitions, so no orphan lever survives a redeploy", async () => {
