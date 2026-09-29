@@ -166,6 +166,23 @@ describe("introspection wiring", () => {
       expect(new URLSearchParams(asked.body).get("token")).toBe(CONTROL_TOKEN);
     });
 
+    it("records the center's sub as the actor, whatever the body claims", async () => {
+      // A caller with fleet:control may not sign someone else's name: arm,
+      // pause and abort take the actor from the verified identity only.
+      const armed = app();
+      for (const action of ["arm", "pause", "abort"]) {
+        await request(armed)
+          .post(`${V1}/autopilot/${action}`)
+          .set("Authorization", `Bearer ${CONTROL_TOKEN}`)
+          .send({ actor: "forged" });
+      }
+
+      for (const type of ["armed", "paused", "aborted"]) {
+        const [event] = await eventsOf(type);
+        expect(event.detail.actor).toBe(TEST_ACTOR);
+      }
+    });
+
     it("answers 503 with the fixed sentence when the center is down, and does nothing", async () => {
       const res = await request(appWith(await downUrl()))
         .put(`${V1}/planner/knobs/mine.taskWeight`)

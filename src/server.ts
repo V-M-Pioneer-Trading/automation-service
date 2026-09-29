@@ -574,7 +574,10 @@ export function createApp(options: AppOptions) {
       res.status(bodyError[0]).json({ error: { message: bodyError[1] } });
       return;
     }
-    res.status(500).json({ error: { message: err.message || "internal error" } });
+    // Anything else is our defect, and its message is ours to read, not the
+    // caller's: a Postgres or parser message names tables and encodings.
+    console.error("automation-service: unhandled error", err);
+    res.status(500).json({ error: { message: "internal error" } });
   };
   app.use(onError);
 
