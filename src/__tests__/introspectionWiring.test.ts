@@ -364,66 +364,83 @@ describe("introspection wiring", () => {
   });
 
   /**
-   * Two `Authorization` lines, written to a raw socket because no client
-   * library will send them. Node keeps the FIRST line and discards the rest.
-   *
-   * Client 1.1.1 (the version installed here) verifies that first line, so a
-   * caller chooses which credential is checked by choosing the order. 1.1.2
-   * counts `rawHeaders` and reads two lines as no credential: 401, no center
-   * call. These assertions pin 1.1.1's behaviour; bumping the pin makes them
-   * fail, and the fix then is to assert 1.1.2's answer instead.
+   * Two `Authorization` lines are never a credential (fixture v4, client
+   * README P7). Node's parser keeps the first line and discards the rest, so
+   * read naively a caller would choose which credential is verified by
+   * choosing the order, or turn a credentialed request into a visitor with an
+   * empty first line. The client counts the lines in `rawHeaders`, and any
+   * count other than one is no credential. The requests are written to a raw
+   * socket as real separate lines, because no HTTP client library sends two.
    */
-  describe("two Authorization lines (client 1.1.1)", () => {
-    const raw = async (lines: string[]): Promise<number> => {
+  describe("two Authorization lines are no credential", () => {
+    const raw = async (
+      method: "GET" | "POST",
+      path: string,
+      lines: string[]
+    ): Promise<{ status: number; body: unknown }> => {
       const server = app().listen(0, "127.0.0.1");
       await new Promise<void>((resolve) => server.once("listening", () => resolve()));
       const { port } = server.address() as AddressInfo;
       try {
-        return await new Promise<number>((resolve, reject) => {
+        const response = await new Promise<string>((resolve, reject) => {
           const socket = connect(port, "127.0.0.1");
           let data = "";
-          socket.on("data", (chunk) => {
-            data += chunk.toString("latin1");
-            const match = /^HTTP\/1\.1 (\d{3})/.exec(data);
-            if (match) {
-              socket.destroy();
-              resolve(Number(match[1]));
-            }
-          });
+          socket.on("data", (chunk) => (data += chunk.toString("utf8")));
+          socket.on("end", () => resolve(data));
           socket.on("error", reject);
+          const body = method === "POST" ? "{}" : "";
           socket.write(
             [
-              `POST ${V1}/autopilot/arm HTTP/1.1`,
+              `${method} ${path} HTTP/1.1`,
               `Host: 127.0.0.1:${port}`,
               ...lines,
-              "Content-Type: application/json",
-              "Content-Length: 2",
+              ...(method === "POST" ? ["Content-Type: application/json"] : []),
+              `Content-Length: ${body.length}`,
               "Connection: close",
               "",
-              "{}",
+              body,
             ].join("\r\n")
           );
         });
+        const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(response)?.[1]);
+        const text = response.slice(response.indexOf("\r\n\r\n") + 4);
+        return { status, body: text.length > 0 ? JSON.parse(text) : null };
       } finally {
         server.closeAllConnections();
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
     };
 
-    it("verifies the first line only: inactive first is 401", async () => {
-      const status = await raw([`Authorization: Bearer ${INACTIVE_TOKEN}`, `authorization: Bearer ${CONTROL_TOKEN}`]);
+    it.each([
+      ["both lines the same full credential", [`Authorization: Bearer ${CONTROL_TOKEN}`, `Authorization: Bearer ${CONTROL_TOKEN}`]],
+      ["a full first line and an empty second", [`Authorization: Bearer ${CONTROL_TOKEN}`, "Authorization:"]],
+      ["an empty first line and a full second", ["Authorization:", `Authorization: Bearer ${CONTROL_TOKEN}`]],
+      ["a scopeless session first and fleet:control second", [`Authorization: Bearer ${SESSION_TOKEN}`, `authorization: Bearer ${CONTROL_TOKEN}`]],
+    ])("refuses a write carrying %s: 401, and the center is never asked", async (_name, lines) => {
+      const res = await raw("POST", `${V1}/autopilot/arm`, lines);
 
-      expect(status).toBe(401);
-      expect(center.calls).toHaveLength(1);
-      expect(new URLSearchParams(center.calls[0].body).get("token")).toBe(INACTIVE_TOKEN);
+      expect(res).toEqual({ status: 401, body: { error: { message: "a bearer token is required" } } });
+      expect(center.calls).toHaveLength(0);
+      expect(await eventsOf("armed")).toHaveLength(0);
     });
 
-    it("verifies the first line only: control first is served", async () => {
-      const status = await raw([`Authorization: Bearer ${CONTROL_TOKEN}`, `authorization: Bearer ${INACTIVE_TOKEN}`]);
+    it("still serves a public GET carrying two lines: ignoreCredentials() reads neither", async () => {
+      const res = await raw("GET", `${V1}/autopilot/status`, [
+        `Authorization: Bearer ${CONTROL_TOKEN}`,
+        `Authorization: Bearer ${INACTIVE_TOKEN}`,
+      ]);
 
-      expect(status).toBe(200);
+      expect(res.status).toBe(200);
+      expect(center.calls).toHaveLength(0);
+    });
+
+    // The control case: the same harness with one line is a credential, so
+    // the refusals above are about the count, not about the raw socket.
+    it("serves the same write carrying one line", async () => {
+      const res = await raw("POST", `${V1}/autopilot/arm`, [`Authorization: Bearer ${CONTROL_TOKEN}`]);
+
+      expect(res.status).toBe(200);
       expect(center.calls).toHaveLength(1);
-      expect(new URLSearchParams(center.calls[0].body).get("token")).toBe(CONTROL_TOKEN);
     });
   });
 

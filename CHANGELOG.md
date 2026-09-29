@@ -11,8 +11,7 @@ Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/is
 
 This service no longer verifies a Clerk token. Each guarded request's bearer
 goes to auth-service's introspection endpoint through
-`@v-m-pioneer-trading/introspection-client` (pinned at 1.1.1, the same release
-fleet-service runs), and the route compares the answer, `{sub, kind, scopes}`,
+`@v-m-pioneer-trading/introspection-client` (pinned at 1.1.2), and the route compares the answer, `{sub, kind, scopes}`,
 with what it declared. There is no local fallback: a second verification path
 is what decision 10 forbids.
 
@@ -67,9 +66,11 @@ pins it, so an auth-service outage can never spend a target's retry budget.
 Tests stopped signing tokens. `authTokens.ts` hands out opaque strings a stub
 center recognises, answered in-process for the suites and over real HTTP in
 `introspectionWiring.test.ts`, which drives every route class against a stub
-center. Its two-`Authorization`-lines case pins 1.1.1's behaviour (the first
-line is verified); 1.1.2 reads two lines as no credential, and bumping the pin
-flips that test deliberately.
+center. 1.1.2 is the release that makes two `Authorization` lines no
+credential (fixture v4): 1.1.1 verified the first line, so a caller chose which
+of two credentials was checked by choosing their order. The wiring suite sends
+real separate lines over a raw socket and pins `401 a bearer token is required`
+with no center call on a write, and `200` with no call on a public read.
 
 ## Each task kind writes its own opening shape too
 
