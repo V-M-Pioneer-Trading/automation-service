@@ -1,7 +1,10 @@
-import { loadIntrospectionConfig, type IntrospectionConfig } from "@v-m-pioneer-trading/introspection-client";
-import { readFileSync } from "fs";
-import { SCOPE_FLEET_CONTROL } from "./auth";
-import { createClerkM2MTokenSource, createLocalM2MTokenSource, M2MTokenSource } from "./m2mToken";
+import {
+  createCentralM2MTokenSource,
+  loadIntrospectionConfig,
+  M2MTokenError,
+  type IntrospectionConfig,
+  type M2MTokenSource,
+} from "@v-m-pioneer-trading/introspection-client";
 
 export interface ServiceConfig {
   port: number;
@@ -36,28 +39,64 @@ export interface ServiceConfig {
   introspection: IntrospectionConfig;
 }
 
+/** Variables the pre-decision-22 sources read. Rollout step 3 removes them from the deploy. */
+const RETIRED_M2M_VARIABLES = ["CLERK_M2M_SECRET_KEY", "DEV_M2M_SIGNING_KEY_FILE"] as const;
+
 /**
- * The *outbound* credential (auth-design.md decision 19): production passes a real
- * Clerk Machine Secret Key inline (`CLERK_M2M_SECRET_KEY`); local dev points
- * at the committed dev-keys private half instead (`DEV_M2M_SIGNING_KEY_FILE`),
- * so `docker compose up` still needs no Clerk account. Neither has a default
- * — a missing configuration here should be a loud startup failure, not a
- * quiet 401 on every mining tick discovered days later.
+ * The *outbound* credential (auth-design.md decision 22): this service holds
+ * no Clerk material and mints nothing. It asks auth-service for its machine
+ * token, proving who it is with its own caller secret
+ * (`AUTH_M2M_CALLER_SECRET`) sent to `AUTH_M2M_TOKEN_URL`, the full
+ * `/auth/v1/m2m-token` URL used verbatim. One source serves production and
+ * local dev; the center decides what it signs with. Neither variable has a
+ * default: a missing one is a loud startup failure, not a quiet 401 on every
+ * mining tick discovered days later.
+ *
+ * `CLERK_M2M_SECRET_KEY` and `DEV_M2M_SIGNING_KEY_FILE` are no longer read. The
+ * rollout keeps the old variable set in production until step 3, so setting
+ * either is not an error: it is one log line naming the variable, never its
+ * value.
  */
-export const resolveM2MTokenSource = (): M2MTokenSource => {
-  const secretKey = process.env.CLERK_M2M_SECRET_KEY;
-  if (secretKey !== undefined && secretKey !== "") {
-    return createClerkM2MTokenSource(secretKey, { scope: SCOPE_FLEET_CONTROL });
+export const resolveM2MTokenSource = (
+  env: NodeJS.ProcessEnv = process.env,
+  log: (line: string) => void = console.warn
+): M2MTokenSource => {
+  const url = env.AUTH_M2M_TOKEN_URL;
+  if (url === undefined || url === "") throw new Error("AUTH_M2M_TOKEN_URL must be set");
+  const secret = env.AUTH_M2M_CALLER_SECRET;
+  if (secret === undefined || secret === "") throw new Error("AUTH_M2M_CALLER_SECRET must be set");
+
+  const ignored = RETIRED_M2M_VARIABLES.filter((name) => env[name] !== undefined && env[name] !== "");
+  if (ignored.length > 0) {
+    log(`${ignored.join(" and ")} set but ignored: the machine token now comes from auth-service (decision 22)`);
   }
 
-  const path = process.env.DEV_M2M_SIGNING_KEY_FILE;
-  if (path !== undefined && path !== "") {
-    const pem = readFileSync(path, "utf8").trim();
-    if (pem === "") throw new Error(`DEV_M2M_SIGNING_KEY_FILE (${path}) is empty`);
-    return createLocalM2MTokenSource(pem, { scope: SCOPE_FLEET_CONTROL });
-  }
+  return createCentralM2MTokenSource({ url, secret });
+};
 
-  throw new Error("CLERK_M2M_SECRET_KEY or DEV_M2M_SIGNING_KEY_FILE must be set");
+export type StartupTokenOutcome = "fetched" | "deferred" | "unknown-caller";
+
+/**
+ * Fetch the machine token once before listening. A `401` from the center is a
+ * configuration error, not a transient one, so it comes back as
+ * `"unknown-caller"` for the entrypoint to exit on. Anything else is the center
+ * being slow or down: log one line and carry on, the source fetches again on
+ * first use. Only `err.kind` is logged, never the token, the secret or a
+ * response body.
+ */
+export const fetchStartupToken = async (
+  source: M2MTokenSource,
+  log: (line: string) => void = console.warn
+): Promise<StartupTokenOutcome> => {
+  try {
+    await source.getToken();
+    return "fetched";
+  } catch (err) {
+    if (err instanceof M2MTokenError && err.kind === "unknown-caller") return "unknown-caller";
+    const kind = err instanceof M2MTokenError ? err.kind : "unexpected";
+    log(`machine token not fetched at startup (${kind}); will retry on first use`);
+    return "deferred";
+  }
 };
 
 const requireEnv = (name: string): string => {

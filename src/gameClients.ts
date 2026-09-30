@@ -3,15 +3,15 @@
  * automation-service never calls SpaceTraders directly — every ship action and
  * every read goes through these.
  *
- * One header per call, per auth-design.md decisions 5 and 19: `Authorization`
- * carries automation-service's own Clerk M2M token, proving *this service* is
+ * One header per call, per auth-design.md decisions 5 and 22: `Authorization`
+ * carries automation-service's own machine token (minted by auth-service), proving *this service* is
  * authorized to act (the same way a human operator's session would from
  * command-interface). No game credential travels: st-gateway injects the
  * agent token itself, and a machine identity queues as background there,
  * which is exactly the lane the autopilot belongs in (decision 2).
  */
 
-import type { M2MTokenSource } from "./m2mToken";
+import type { M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
 
 /**
  * One end of a nav route. SpaceTraders reports both ends with coordinates and

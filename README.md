@@ -14,7 +14,7 @@ flowchart LR
     AS[automation-service] -->|ship state, agent, contracts,<br/>buy / sell| AG[agent-service]
     AS -->|orbit, dock, navigate,<br/>survey, extract, refuel, deliver| FL[fleet-service]
     AS -->|waypoints, markets| NAV[navigation-service]
-    AS -.->|every outbound call carries one header:<br/>its own Clerk M2M token| AG
+    AS -.->|every outbound call carries one header:<br/>its own machine token| AG
     AS -.->|what does this caller's bearer carry?<br/>guarded routes only| AUTH[auth-service]
     AS --- DB[(Postgres<br/>tasks, knobs, events,<br/>observations, anomalies)]
     AS -->|anomaly webhook| WH[operator webhook]
@@ -624,8 +624,10 @@ Invalid lifecycle transitions return `409` naming the current status.
 | `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |
 | `AUTH_INTROSPECTION_URL` | auth-service's **full** introspection endpoint, `/auth/v1/introspect` included, used verbatim; e.g. `http://localhost:3005/auth/v1/introspect` (**required**) |
 | `AUTH_INTROSPECTION_SECRET` | The caller secret sent to it as `X-Introspection-Secret`. Never the vault's `AUTH_SERVICE_SHARED_SECRET` (**required**) |
-| `CLERK_M2M_SECRET_KEY` | Clerk Machine Secret Key this service mints its own outbound token with (production) |
-| `DEV_M2M_SIGNING_KEY_FILE` | Path to a private key to sign that token locally instead, no Clerk account needed. One of these two is **required** |
+| `AUTH_M2M_TOKEN_URL` | auth-service's **full** machine-token endpoint, `/auth/v1/m2m-token` included, used verbatim; e.g. `http://localhost:3005/auth/v1/m2m-token` (**required**) |
+| `AUTH_M2M_CALLER_SECRET` | This service's own caller secret, sent to it as `X-M2M-Caller-Secret`. It alone identifies the caller, so it is never the introspection secret (**required**) |
+
+`CLERK_M2M_SECRET_KEY` and `DEV_M2M_SIGNING_KEY_FILE` are no longer read. Setting either logs one line saying so and changes nothing else, so a deployment can keep the old variable until it is cleaned up.
 
 Which asteroid field to mine is **not** configured; the planner chooses it.
 Tune scoring through knobs, not env vars. Every `*_MS` value and `PORT` must
@@ -695,7 +697,7 @@ header:
 
 | Header | Carries | Answers |
 |---|---|---|
-| `Authorization` | This service's own Clerk M2M token, minted and cached for its lifetime rather than per tick | "May automation-service act here?" |
+| `Authorization` | This service's own machine token, fetched from auth-service and cached until half its lifetime has passed rather than per tick | "May automation-service act here?" |
 
 "Which agent is this acting for?" is no longer this service's question:
 st-gateway injects the fleet's agent token itself (auth-design.md decision 5).
@@ -703,9 +705,13 @@ The M2M token is also what st-gateway derives queue priority from — a machine
 identity lands in the background lane, which is exactly where the autopilot
 belongs (decision 2).
 
-The M2M token comes from a real Clerk Machine in production
-(`CLERK_M2M_SECRET_KEY`) and is signed locally in dev and tests
-(`DEV_M2M_SIGNING_KEY_FILE`). Only the trust anchor differs; verification on
+The machine token is minted by auth-service, not here (auth-design.md decision
+22): this service holds no Clerk material. At startup it fetches one token,
+once, before listening. A `401` from the center means
+`AUTH_M2M_CALLER_SECRET` is not one it knows, so the process logs that and
+exits 1; a `503`, a timeout or a refused connection logs one line and the
+service starts anyway, fetching on first use. Production and local dev use the
+same source; only what the center signs with differs. Verification on
 the receiving end is real either way.
 
 ---
