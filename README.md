@@ -653,11 +653,10 @@ arm, pause and abort; **`planner:advise`** for `POST /planner/replan` and
 implies another, so a token holding only `fleet:control` gets `403` on the
 last three. ai-service's M2M token (meta#59) carries `events:write
 planner:advise` and no `fleet:control`, so it cannot arm, pause or abort.
-**The operator must carry all three in Clerk `public_metadata`** (`fleet:control
-events:write planner:advise`), a manual step like `universe:refresh`'s; without
-the two new ones the operator loses replan, knob writes and `/events`. The
-dev keypair's default token (`meta/scripts/mint-dev-token.mjs`) carries them. The `X-Service-Secret` shared secret it used to
-take is gone, and sending that header is the same as sending nothing.
+Operator step, manual like `universe:refresh`'s: **ADD `events:write planner:advise` to the operator's existing `public_metadata` scopes** (`fleet:control agent:reset universe:refresh`); do not replace them, or the operator loses the rest. Without the two new
+scopes the operator loses replan, knob writes and `/events`. The dev keypair's
+default token (`meta/scripts/mint-dev-token.mjs`) carries them. The
+`X-Service-Secret` shared secret it used to take is gone, and sending that header is the same as sending nothing.
 
 | | Route | Requires |
 |---|---|---|

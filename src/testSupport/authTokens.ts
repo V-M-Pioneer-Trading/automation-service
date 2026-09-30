@@ -28,6 +28,10 @@ const FLEET_CONTROL = "fleet:control";
 const EVENTS_WRITE = "events:write";
 const PLANNER_ADVISE = "planner:advise";
 const AGENT_RESET = "agent:reset";
+const UNIVERSE_REFRESH = "universe:refresh";
+
+/** The operator's Clerk public_metadata after decision 22 step 4: its three old scopes plus the two new. */
+const OPERATOR_SCOPES = [FLEET_CONTROL, AGENT_RESET, UNIVERSE_REFRESH, EVENTS_WRITE, PLANNER_ADVISE];
 
 export const CONTROL_TOKEN = "test-token-fleet-control";
 export const MACHINE_TOKEN = "test-token-machine-advisory";
@@ -38,7 +42,7 @@ export const FOREIGN_TOKEN = "test-token-foreign-signed";
 
 const fixed = new Map<string, Identity>([
   // The operator's Clerk public_metadata after decision 22 step 4.
-  [CONTROL_TOKEN, { sub: TEST_ACTOR, kind: "operator", scopes: [FLEET_CONTROL, EVENTS_WRITE, PLANNER_ADVISE] }],
+  [CONTROL_TOKEN, { sub: TEST_ACTOR, kind: "operator", scopes: OPERATOR_SCOPES }],
   // auth-service's fixed table row for ai-service: no fleet:control.
   [MACHINE_TOKEN, { sub: TEST_MACHINE, kind: "machine", scopes: [EVENTS_WRITE, PLANNER_ADVISE] }],
   // Signed in, holding a real permission, just not this service's.
@@ -70,9 +74,10 @@ export interface TestTokenOptions {
 }
 
 /**
- * Ready-to-use `Authorization` value. With no options, an operator holding
- * `fleet:control events:write planner:advise`; with options, a fresh token the center will answer with
- * exactly that identity.
+ * Ready-to-use `Authorization` value. The default identity is the operator
+ * with all five scopes, whether or not options are given: an option omitted
+ * falls back to that default, so `bearer({ sub })` differs from `bearer()`
+ * only in `sub`. Pass `scopes` to narrow.
  */
 export const bearer = (options: TestTokenOptions = {}): string => {
   if (options.sub === undefined && options.kind === undefined && options.scopes === undefined) {
@@ -82,7 +87,7 @@ export const bearer = (options: TestTokenOptions = {}): string => {
   minted.set(token, {
     sub: options.sub ?? TEST_ACTOR,
     kind: options.kind ?? "operator",
-    scopes: options.scopes ?? [FLEET_CONTROL],
+    scopes: options.scopes ?? OPERATOR_SCOPES,
   });
   return `Bearer ${token}`;
 };
