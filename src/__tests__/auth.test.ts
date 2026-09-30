@@ -8,6 +8,7 @@ import {
   bearer,
   bearerWithoutScope,
   expiredBearer,
+  fleetControlOnlyBearer,
   foreignBearer,
   machineBearer,
   TEST_ACTOR,
@@ -74,7 +75,7 @@ describe("automation-service authentication", () => {
     });
   });
 
-  describe("mutating routes require fleet:control", () => {
+  describe("mutating routes require their scope", () => {
     type Agent = ReturnType<typeof request>;
     const mutations: [string, (agent: Agent) => request.Test][] = [
       ["POST /autopilot/arm", (a) => a.post(`${V1}/autopilot/arm`).send({})],
@@ -115,6 +116,35 @@ describe("automation-service authentication", () => {
       expect(res.status).toBe(200);
     });
 
+    // Decision 22, one literal per route: fleet:control alone reaches neither
+    // the audit-write route nor the two planner-advice routes.
+    it.each([
+      ["POST /events", (a: Agent) => a.post(`${V1}/events`).send({ type: "ai_test" })],
+      ["PUT /planner/knobs/:name", (a: Agent) => a.put(`${V1}/planner/knobs/mine.taskWeight`).send({ value: 2 })],
+    ] as [string, (agent: Agent) => request.Test][])("refuses %s to fleet:control alone: 403", async (_name, call) => {
+      const res = await call(request(app())).set("Authorization", fleetControlOnlyBearer());
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: { message: MESSAGES.missingScope } });
+    });
+
+    // The machine row in auth-service's table has no fleet:control.
+    it.each([
+      ["POST /autopilot/arm", (a: Agent) => a.post(`${V1}/autopilot/arm`).send({})],
+      ["POST /autopilot/pause", (a: Agent) => a.post(`${V1}/autopilot/pause`)],
+      ["POST /autopilot/abort", (a: Agent) => a.post(`${V1}/autopilot/abort`)],
+    ] as [string, (agent: Agent) => request.Test][])("refuses %s to the machine token: 403", async (_name, call) => {
+      const res = await call(request(app())).set("Authorization", machineBearer());
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: { message: MESSAGES.missingScope } });
+    });
+
+    // /planner/replan exists only with a scheduler; introspectionWiring.test.ts
+    // covers it (this app has none, so it would answer 404 here).
+    it("lets the machine token write a policy knob", async () => {
+      const knob = await request(app()).put(`${V1}/planner/knobs/mine.taskWeight`).set("Authorization", machineBearer()).send({ value: 2 });
+      expect(knob.status).toBe(200);
+    });
+
     it("ignores a non-bearer Authorization scheme", async () => {
       const res = await request(app())
         .post(`${V1}/autopilot/abort`)
@@ -135,7 +165,7 @@ describe("automation-service authentication", () => {
     });
   });
 
-  describe("POST /events takes fleet:control from any kind of caller", () => {
+  describe("POST /events takes events:write from any kind of caller", () => {
     it("accepts the supervisor's machine token", async () => {
       const res = await request(app())
         .post(`${V1}/events`)
@@ -171,7 +201,10 @@ describe("automation-service authentication", () => {
     it("stamps the caller's sub on lifecycle transitions", async () => {
       const gateway = app();
       await request(gateway).post(`${V1}/autopilot/arm`).set("Authorization", bearer({ sub: "user_2Specific" })).send({});
-      await request(gateway).post(`${V1}/autopilot/pause`).set("Authorization", machineBearer());
+      // A machine by kind, holding fleet:control: the actor is the sub either way.
+      await request(gateway)
+        .post(`${V1}/autopilot/pause`)
+        .set("Authorization", bearer({ sub: TEST_MACHINE, kind: "machine", scopes: ["fleet:control"] }));
       await request(gateway).post(`${V1}/autopilot/abort`).set("Authorization", bearer());
 
       const events = (await request(gateway).get(`${V1}/autopilot/events`)).body.events;
