@@ -25,18 +25,22 @@ export const TEST_MACHINE = "mch_test";
 // center that echoed SCOPE_FLEET_CONTROL would keep passing if the constant
 // itself drifted from the contract string the center really issues.
 const FLEET_CONTROL = "fleet:control";
+const EVENTS_WRITE = "events:write";
+const PLANNER_ADVISE = "planner:advise";
 const AGENT_RESET = "agent:reset";
 
 export const CONTROL_TOKEN = "test-token-fleet-control";
-export const MACHINE_TOKEN = "test-token-machine-fleet-control";
+export const MACHINE_TOKEN = "test-token-machine-advisory";
 export const SESSION_TOKEN = "test-token-session-other-scope";
 export const INACTIVE_TOKEN = "test-token-inactive";
 export const EXPIRED_TOKEN = "test-token-expired";
 export const FOREIGN_TOKEN = "test-token-foreign-signed";
 
 const fixed = new Map<string, Identity>([
-  [CONTROL_TOKEN, { sub: TEST_ACTOR, kind: "operator", scopes: [FLEET_CONTROL] }],
-  [MACHINE_TOKEN, { sub: TEST_MACHINE, kind: "machine", scopes: [FLEET_CONTROL] }],
+  // The operator's Clerk public_metadata after decision 22 step 4.
+  [CONTROL_TOKEN, { sub: TEST_ACTOR, kind: "operator", scopes: [FLEET_CONTROL, EVENTS_WRITE, PLANNER_ADVISE] }],
+  // auth-service's fixed table row for ai-service: no fleet:control.
+  [MACHINE_TOKEN, { sub: TEST_MACHINE, kind: "machine", scopes: [EVENTS_WRITE, PLANNER_ADVISE] }],
   // Signed in, holding a real permission, just not this service's.
   [SESSION_TOKEN, { sub: TEST_ACTOR, kind: "operator", scopes: [AGENT_RESET] }],
 ]);
@@ -67,7 +71,7 @@ export interface TestTokenOptions {
 
 /**
  * Ready-to-use `Authorization` value. With no options, an operator holding
- * `fleet:control`; with options, a fresh token the center will answer with
+ * `fleet:control events:write planner:advise`; with options, a fresh token the center will answer with
  * exactly that identity.
  */
 export const bearer = (options: TestTokenOptions = {}): string => {
@@ -83,8 +87,14 @@ export const bearer = (options: TestTokenOptions = {}): string => {
   return `Bearer ${token}`;
 };
 
-/** The AI supervisor: a machine holding `fleet:control` (meta#59). */
+/** The AI supervisor: a machine holding `events:write planner:advise`, not `fleet:control` (decision 22). */
 export const machineBearer = (): string => `Bearer ${MACHINE_TOKEN}`;
+
+/**
+ * An operator holding `fleet:control` and nothing else: what decision 22 says
+ * must no longer reach `/events`, `/planner/replan` or a knob write.
+ */
+export const fleetControlOnlyBearer = (): string => bearer({ scopes: [FLEET_CONTROL] });
 
 /** An operator who is signed in but holds no permission on this service. */
 export const bearerWithoutScope = (): string => `Bearer ${SESSION_TOKEN}`;

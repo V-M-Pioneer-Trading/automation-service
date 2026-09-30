@@ -15,8 +15,20 @@
  */
 
 /**
- * Arm, pause, abort, replan, knob writes and `POST /events` — everything
- * mutating and reversible. Held by the operator and by machine callers alike;
- * what separates them on a knob write is `kind`, not the scope.
+ * Arm, pause, abort and the other fleet-moving routes. Not `POST /events`,
+ * `POST /planner/replan` or `PUT /planner/knobs/:name`: those take the two
+ * scopes below, one literal per route (decisions 20 and 22).
  */
 export const SCOPE_FLEET_CONTROL = "fleet:control";
+/**
+ * `POST /events`: write `ai_` audit rows. Held by the ai-service machine
+ * (decision 22's fixed scope table in auth-service) and by the operator through
+ * Clerk `public_metadata`. `fleet:control` does not imply it.
+ */
+export const SCOPE_EVENTS_WRITE = "events:write";
+/**
+ * `POST /planner/replan` and `PUT /planner/knobs/:name`: advise the planner.
+ * Same holders as {@link SCOPE_EVENTS_WRITE}; `fleet:control` does not imply
+ * it. What fences a machine to `policy` knobs is `kind`, not this scope.
+ */
+export const SCOPE_PLANNER_ADVISE = "planner:advise";
