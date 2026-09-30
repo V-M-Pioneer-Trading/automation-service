@@ -3,7 +3,7 @@
  *
  * The package's own conformance suite drives the fixture cases against its
  * client. What it cannot see is how THIS service mounted it: which routes are
- * public, which need `fleet:control`, that the knob fence keys on the center's
+ * public, which need which scope (`fleet:control`, `planner:advise` or `events:write`, one per route), that the knob fence keys on the center's
  * `kind`, that the audit trail records the center's `sub`, and that an
  * undeclared route refuses to start. Everything here is real HTTP against a
  * stub center (`stubServers.ts`), with the package's real `fetch` client.
@@ -18,6 +18,7 @@ import request from "supertest";
 import { createPool, migrate } from "../db";
 import { createApp } from "../server";
 import {
+  bearer,
   CONTROL_TOKEN,
   fleetControlOnlyBearer,
   INACTIVE_TOKEN,
@@ -359,6 +360,12 @@ describe("introspection wiring", () => {
 
       const controlOnly = await request(app).post(`${V1}/planner/replan`).set("Authorization", fleetControlOnlyBearer());
       expect(controlOnly.status).toBe(403);
+
+      const eventsOnly = await request(app).post(`${V1}/planner/replan`).set("Authorization", bearer({ scopes: ["events:write"] }));
+      expect(eventsOnly.status).toBe(403);
+
+      const adviseOnly = await request(app).post(`${V1}/planner/replan`).set("Authorization", bearer({ scopes: ["planner:advise"] }));
+      expect(adviseOnly.status).toBe(200);
 
       const scopeless = await request(app).post(`${V1}/planner/replan`).set("Authorization", `Bearer ${SESSION_TOKEN}`);
       expect(scopeless.status).toBe(403);

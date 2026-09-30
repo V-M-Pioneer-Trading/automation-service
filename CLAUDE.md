@@ -429,7 +429,7 @@ any `detail.actor` in the body.
   one `requireScope(...)`: `SCOPE_FLEET_CONTROL` (arm, pause, abort),
   `SCOPE_PLANNER_ADVISE` (replan, knob writes) or `SCOPE_EVENTS_WRITE`
   (`POST /events`). `fleet:control` satisfies only the first; the operator
-  must carry all three in Clerk `public_metadata`. An undeclared route, a declaration in
+  needs the two new scopes added: **ADD `events:write planner:advise` to the operator's existing `public_metadata` scopes** (`fleet:control agent:reset universe:refresh`); do not replace them, or the operator loses the rest. An undeclared route, a declaration in
   second position, or `ignoreCredentials()` on a mutation throws at startup.
   Middleware ahead of the guard (`cors`, `express.json`) is wrapped in
   `passthrough()`, `cors()` stays first so it terminates preflights, and the
@@ -537,7 +537,7 @@ any `detail.actor` in the body.
 - Auth is never bypassed in tests. `createTestApp` wires the package's real
   Express adapter to an in-process stub center (`authTokens.ts`): tokens are
   opaque strings the stub knows (`bearer()`, `machineBearer()`,
-  `bearerWithoutScope()`, `fleetControlOnlyBearer()`, `bearer({ sub, kind, scopes })`; the operator token holds all three scopes, the machine token `events:write planner:advise` only), anything else is
+  `bearerWithoutScope()`, `fleetControlOnlyBearer()`, `bearer({ sub, kind, scopes })`; the operator token (and default `bearer()`) holds the operator's five scopes, the machine token `events:write planner:advise` only), anything else is
   inactive. `introspectionWiring.test.ts` does the same over real HTTP against
   `stubServers.ts`'s center; add a route and it belongs in that file's route
   list.

@@ -7,6 +7,18 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Two new scopes on three routes (meta#59 step 4, decision 22)
+
+`POST /events` now requires `events:write`; `POST /planner/replan` and
+`PUT /planner/knobs/:name` require `planner:advise`. One literal per route
+(decision 20): `fleet:control` satisfies none of the three, and arm, pause and
+abort keep it. The `policy`-only knob fence on `kind` is unchanged. ai-service's
+token carries `events:write planner:advise` and no `fleet:control`.
+
+Deploy: before this ships, ADD `events:write planner:advise` to the operator's
+existing Clerk `public_metadata` scopes (`fleet:control agent:reset
+universe:refresh`); do not replace them.
+
 ## auth-service mints the machine token (meta#59 step 2, decision 22)
 
 This service no longer mints its own Clerk M2M token. `m2mToken.ts` is gone;
@@ -33,7 +45,8 @@ What each route declares:
   keep working while auth-service is down.
 - `POST /autopilot/arm|pause|abort`, `POST /planner/replan`,
   `PUT /planner/knobs/:name` and `POST /events`: `fleet:control`, from any
-  kind of caller.
+  kind of caller (as of this step; replan, knobs and events moved to their
+  own scopes in the entry above, decision 22 step 4).
 
 The app and its API router are `secured()`, so an undeclared route refuses to
 start. Unmatched paths now get a JSON `404` rather than Express's HTML page.

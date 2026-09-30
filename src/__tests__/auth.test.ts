@@ -127,6 +127,23 @@ describe("automation-service authentication", () => {
       expect(res.body).toEqual({ error: { message: MESSAGES.missingScope } });
     });
 
+    // Each of the two new scopes opens only its own routes.
+    it("events:write alone: 201 on /events, 403 on knob writes", async () => {
+      const token = bearer({ scopes: ["events:write"] });
+      const gateway = app();
+      expect((await request(gateway).post(`${V1}/events`).set("Authorization", token).send({ type: "ai_test" })).status).toBe(201);
+      const knob = await request(gateway).put(`${V1}/planner/knobs/mine.taskWeight`).set("Authorization", token).send({ value: 2 });
+      expect(knob.status).toBe(403);
+    });
+
+    it("planner:advise alone: 200 on a knob write, 403 on /events", async () => {
+      const token = bearer({ scopes: ["planner:advise"] });
+      const gateway = app();
+      const knob = await request(gateway).put(`${V1}/planner/knobs/mine.taskWeight`).set("Authorization", token).send({ value: 2 });
+      expect(knob.status).toBe(200);
+      expect((await request(gateway).post(`${V1}/events`).set("Authorization", token).send({ type: "ai_test" })).status).toBe(403);
+    });
+
     // The machine row in auth-service's table has no fleet:control.
     it.each([
       ["POST /autopilot/arm", (a: Agent) => a.post(`${V1}/autopilot/arm`).send({})],
