@@ -43,6 +43,19 @@ export interface ServiceConfig {
 const RETIRED_M2M_VARIABLES = ["CLERK_M2M_SECRET_KEY", "DEV_M2M_SIGNING_KEY_FILE"] as const;
 
 /**
+ * Both variables the machine-token source needs, or a throw naming the first
+ * one missing (never a value). `configFromEnv` calls this too, so a
+ * deployment without them is refused before `migrate()`, not after.
+ */
+const requireM2MEnv = (env: NodeJS.ProcessEnv): { url: string; secret: string } => {
+  const url = env.AUTH_M2M_TOKEN_URL;
+  if (url === undefined || url === "") throw new Error("AUTH_M2M_TOKEN_URL must be set");
+  const secret = env.AUTH_M2M_CALLER_SECRET;
+  if (secret === undefined || secret === "") throw new Error("AUTH_M2M_CALLER_SECRET must be set");
+  return { url, secret };
+};
+
+/**
  * The *outbound* credential (auth-design.md decision 22): this service holds
  * no Clerk material and mints nothing. It asks auth-service for its machine
  * token, proving who it is with its own caller secret
@@ -61,10 +74,7 @@ export const resolveM2MTokenSource = (
   env: NodeJS.ProcessEnv = process.env,
   log: (line: string) => void = console.warn
 ): M2MTokenSource => {
-  const url = env.AUTH_M2M_TOKEN_URL;
-  if (url === undefined || url === "") throw new Error("AUTH_M2M_TOKEN_URL must be set");
-  const secret = env.AUTH_M2M_CALLER_SECRET;
-  if (secret === undefined || secret === "") throw new Error("AUTH_M2M_CALLER_SECRET must be set");
+  const { url, secret } = requireM2MEnv(env);
 
   const ignored = RETIRED_M2M_VARIABLES.filter((name) => env[name] !== undefined && env[name] !== "");
   if (ignored.length > 0) {
@@ -122,21 +132,26 @@ const positiveNumberEnv = (name: string, fallback: number): number => {
   return value;
 };
 
-export const configFromEnv = (): ServiceConfig => ({
-  port: positiveNumberEnv("PORT", 3003),
-  databaseUrl: requireEnv("DATABASE_URL"),
-  navigationServiceUrl: requireEnv("NAVIGATION_SERVICE_URL"),
-  agentServiceUrl: requireEnv("AGENT_SERVICE_URL"),
-  fleetServiceUrl: requireEnv("FLEET_SERVICE_URL"),
-  miningShipSymbol: requireEnv("MINING_SHIP_SYMBOL"),
-  schedulerIntervalMs: positiveNumberEnv("SCHEDULER_INTERVAL_MS", 5000),
-  replanIntervalMs: positiveNumberEnv("REPLAN_INTERVAL_MS", 300_000),
-  metricsRollupIntervalMs: positiveNumberEnv("METRICS_ROLLUP_INTERVAL_MS", 60_000),
-  anomalyWebhookUrl: process.env.ANOMALY_WEBHOOK_URL ?? null,
-  anomalyIntervalMs: positiveNumberEnv("ANOMALY_INTERVAL_MS", 60_000),
-  corsAllowedOrigin: process.env.CORS_ALLOWED_ORIGIN ?? "http://localhost:3000",
-  // AUTH_INTROSPECTION_URL (the full endpoint, POSTed to verbatim) and
-  // AUTH_INTROSPECTION_SECRET. Throws, naming the missing variable and never
-  // the secret, before a port is bound.
-  introspection: loadIntrospectionConfig(),
-});
+export const configFromEnv = (): ServiceConfig => {
+  // Presence only; the source itself is built later by resolveM2MTokenSource.
+  // Checked here so the failure precedes migrate().
+  requireM2MEnv(process.env);
+  return {
+    port: positiveNumberEnv("PORT", 3003),
+    databaseUrl: requireEnv("DATABASE_URL"),
+    navigationServiceUrl: requireEnv("NAVIGATION_SERVICE_URL"),
+    agentServiceUrl: requireEnv("AGENT_SERVICE_URL"),
+    fleetServiceUrl: requireEnv("FLEET_SERVICE_URL"),
+    miningShipSymbol: requireEnv("MINING_SHIP_SYMBOL"),
+    schedulerIntervalMs: positiveNumberEnv("SCHEDULER_INTERVAL_MS", 5000),
+    replanIntervalMs: positiveNumberEnv("REPLAN_INTERVAL_MS", 300_000),
+    metricsRollupIntervalMs: positiveNumberEnv("METRICS_ROLLUP_INTERVAL_MS", 60_000),
+    anomalyWebhookUrl: process.env.ANOMALY_WEBHOOK_URL ?? null,
+    anomalyIntervalMs: positiveNumberEnv("ANOMALY_INTERVAL_MS", 60_000),
+    corsAllowedOrigin: process.env.CORS_ALLOWED_ORIGIN ?? "http://localhost:3000",
+    // AUTH_INTROSPECTION_URL (the full endpoint, POSTed to verbatim) and
+    // AUTH_INTROSPECTION_SECRET. Throws, naming the missing variable and never
+    // the secret, before a port is bound.
+    introspection: loadIntrospectionConfig(),
+  };
+};

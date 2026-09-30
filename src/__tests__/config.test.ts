@@ -20,6 +20,8 @@ describe("configFromEnv: auth-service introspection", () => {
       MINING_SHIP_SYMBOL: "SHIP-1",
       AUTH_INTROSPECTION_URL: "http://localhost:3005/auth/v1/introspect",
       AUTH_INTROSPECTION_SECRET: SECRET,
+      AUTH_M2M_TOKEN_URL: "http://localhost:3005/auth/v1/m2m-token",
+      AUTH_M2M_CALLER_SECRET: "s3cr3t-caller-value",
     };
   });
 
@@ -69,5 +71,55 @@ describe("configFromEnv: auth-service introspection", () => {
     const err = refusal();
     expect(err.message).toContain("AUTH_INTROSPECTION_URL");
     expect(err.message).not.toContain(SECRET);
+  });
+});
+
+/**
+ * The machine-token variables are checked here too, not only when the source
+ * is built, because the entrypoint runs `migrate()` between the two: a
+ * deployment missing them must be refused before it touches the database.
+ */
+describe("configFromEnv: auth-service machine token", () => {
+  const saved = { ...process.env };
+
+  beforeEach(() => {
+    process.env = {
+      ...saved,
+      DATABASE_URL: "postgres://x",
+      NAVIGATION_SERVICE_URL: "http://nav",
+      AGENT_SERVICE_URL: "http://agent",
+      FLEET_SERVICE_URL: "http://fleet",
+      MINING_SHIP_SYMBOL: "SHIP-1",
+      AUTH_INTROSPECTION_URL: "http://localhost:3005/auth/v1/introspect",
+      AUTH_INTROSPECTION_SECRET: "introspection-secret",
+      AUTH_M2M_TOKEN_URL: "http://localhost:3005/auth/v1/m2m-token",
+      AUTH_M2M_CALLER_SECRET: "s3cr3t-caller-value",
+    };
+  });
+
+  afterAll(() => {
+    process.env = saved;
+  });
+
+  it("loads with both set", () => {
+    expect(() => configFromEnv()).not.toThrow();
+  });
+
+  it.each(["AUTH_M2M_TOKEN_URL", "AUTH_M2M_CALLER_SECRET"])("refuses to start without %s", (name) => {
+    delete process.env[name];
+
+    expect(() => configFromEnv()).toThrow(`${name} must be set`);
+  });
+
+  it.each(["AUTH_M2M_TOKEN_URL", "AUTH_M2M_CALLER_SECRET"])("refuses an empty %s", (name) => {
+    process.env[name] = "";
+
+    expect(() => configFromEnv()).toThrow(`${name} must be set`);
+  });
+
+  it("does not echo the caller secret when refusing", () => {
+    delete process.env.AUTH_M2M_TOKEN_URL;
+
+    expect(() => configFromEnv()).not.toThrow(/s3cr3t-caller-value/);
   });
 });

@@ -11,7 +11,7 @@
  * which is exactly the lane the autopilot belongs in (decision 2).
  */
 
-import type { M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
+import { M2MTokenError, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
 
 /**
  * One end of a nav route. SpaceTraders reports both ends with coordinates and
@@ -217,7 +217,18 @@ export function createGameClients(config: {
   authTokenSource: M2MTokenSource;
 }) {
   async function callJson<T>(url: string, init?: RequestInit): Promise<T> {
-    const m2mToken = await config.authTokenSource.getToken();
+    let m2mToken: string;
+    try {
+      m2mToken = await config.authTokenSource.getToken();
+    } catch (err) {
+      // No request was made, so this is never `internal`: the center refusing
+      // our caller secret needs an operator (`credentials`), and anything
+      // else is the center being slow, down or odd (`unavailable`). Only the
+      // error's kind goes into the message, never its text.
+      const kind: UpstreamFailureKind =
+        err instanceof M2MTokenError && err.kind === "unknown-caller" ? "credentials" : "unavailable";
+      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: machine token unavailable: ${err instanceof M2MTokenError ? err.kind : "unexpected error"}`, kind);
+    }
     let res: Response;
     try {
       res = await fetch(url, {
