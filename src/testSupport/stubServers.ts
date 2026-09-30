@@ -23,6 +23,7 @@ export interface Stub {
   close(): Promise<void>;
 }
 
+/** A string body is sent verbatim, for answers JSON.stringify cannot produce (a repeated key). */
 type Reply = (req: Recorded) => { status: number; body: unknown };
 
 export async function startStub(reply: Reply): Promise<Stub> {
@@ -35,7 +36,7 @@ export async function startStub(reply: Reply): Promise<Stub> {
       calls.push(recorded);
       const { status, body: out } = reply(recorded);
       res.writeHead(status, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(out));
+      res.end(typeof out === "string" ? out : JSON.stringify(out));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

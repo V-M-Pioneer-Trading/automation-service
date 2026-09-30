@@ -438,8 +438,8 @@ any `detail.actor` in the body.
   The one `403` of our own is `KnobClassForbiddenError`, which is a refusal
   after a valid credential, not the contract's scope `403`.
 - **The pin is a release tarball URL** in `package.json`, integrity-hashed in
-  the lockfile; it is 1.1.2, the first release that reads two `Authorization`
-  lines as no credential. `introspectionWiring.test.ts` pins that with real
+  the lockfile; it is 1.1.3: 1.1.2 was the first to read two `Authorization`
+  lines as no credential, 1.1.3 the first to refuse a repeated key in the center's answer (a 503, one center call). `introspectionWiring.test.ts` pins that with real
   separate lines on a raw socket; a downgrade to 1.1.1 turns three of them red.
 
 ## Database

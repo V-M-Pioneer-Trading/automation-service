@@ -211,6 +211,28 @@ describe("introspection wiring", () => {
       }
     });
 
+    // A repeated key is a malformed answer, not a last-one-wins one: the sub
+    // must never be picked by parser order. One attempt, then the 503.
+    it("answers 503 when the center's answer repeats a key, asking once", async () => {
+      const dup = await startStub(() => ({
+        status: 200,
+        body: '{"active":true,"sub":"user_a","sub":"user_b","scope":"fleet:control","exp":4102444800,"kind":"operator"}',
+      }));
+      try {
+        const res = await request(appWith(`${dup.url}/auth/v1/introspect`))
+          .post(`${V1}/autopilot/arm`)
+          .set("Authorization", `Bearer ${CONTROL_TOKEN}`)
+          .send({});
+
+        expect(res.status).toBe(503);
+        expect(res.body).toEqual({ error: { message: "the authentication service could not process this request" } });
+        expect(dup.calls).toHaveLength(1);
+        expect(await eventsOf("armed")).toHaveLength(0);
+      } finally {
+        await dup.close();
+      }
+    });
+
     it("answers 503 when the center rejects our caller secret, never relaying its 401", async () => {
       const res = await request(createApp({ pool, auth: createExpressAuth({ url: `${center.url}/auth/v1/introspect`, secret: "wrong" }) }))
         .post(`${V1}/autopilot/arm`)
