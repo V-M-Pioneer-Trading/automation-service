@@ -22,10 +22,15 @@ A 403 is now `credentials` only when it carries the family's scope sentence
 introspection client); any other 403 is the game's and reads as the new kind
 `denied`. A 401 stays `credentials` whatever the body: the game's own 401
 (token `reset_date` mismatch) is the gateway's credential, and still
-auth-service's to fix. The introspection 503 stays `unavailable`. `denied`
+auth-service's to fix. The sibling's scope `403` stays `credentials` on
+purpose: our machine token is genuine but under-scoped, a grant only
+auth-service can change. A machine-token failure keeps decision 22's
+mapping (`unknown-caller` is `credentials`, anything else `unavailable`)
+and never reaches a status. The introspection 503 stays `unavailable`. `denied`
 spends the unrelated budget like the other two plumbing verdicts, since
 re-planning onto another target cannot fix the ship symbol. The production
-message is pinned in `upstreamFailure.test.ts`.
+message is pinned in `upstreamFailure.test.ts`, and `gameClientsAuth.test.ts`
+drives all three refusals through the real fetch path.
 
 ## Two new scopes on three routes (meta#59 step 4, decision 22)
 

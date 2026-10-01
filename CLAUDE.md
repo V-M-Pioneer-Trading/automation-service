@@ -194,7 +194,9 @@ for callers who look there first.
   a message check route it to `credentials`.
 
   A `403` is `credentials` only when it carries the family's scope sentence
-  (`MESSAGES.missingScope` from the introspection client). Any other `403` is
+  (`MESSAGES.missingScope` from the introspection client): our machine token
+  is genuine but lacks a scope, which is auth-service's grant to fix, not a
+  wait and not the target. Any other `403` is
   the game's, relayed unchanged by the service we called, and is `denied`:
   the production case was `403 Agent does not own or cannot access ship
   RADOMSKY-TEST-1.` after a universe reset, logged as `credentials` and

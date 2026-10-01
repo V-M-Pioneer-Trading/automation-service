@@ -1,4 +1,4 @@
-import { M2MTokenError, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
+import { M2MTokenError, MESSAGES, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
 import { createGameClients, UpstreamCallError } from "../gameClients";
 import { verdictOf } from "../scheduler";
 import { startStub, type Stub } from "../testSupport/stubServers";
@@ -99,6 +99,73 @@ describe("gameClients outbound credential", () => {
 
       expect((err as Error).message).not.toContain("leaky-secret-text");
       expect((err as Error).message).toContain("unavailable");
+    });
+  });
+
+  /**
+   * Three different "you may not" answers, kept apart end to end through the
+   * real fetch path. Who wrote the refusal decides who has to act:
+   *
+   * - the center would not mint our machine token (decision 22): no request
+   *   is made, and the token source's mapping holds whatever the upstream
+   *   would have said;
+   * - a sibling's own introspection 403, `this action requires a scope this
+   *   session does not carry`: our token is genuine but under-scoped, a fault
+   *   in the scopes auth-service grants this caller. `credentials`, because
+   *   the fix is at auth-service and no waiting or re-planning helps;
+   * - SpaceTraders' own 403, relayed unchanged (meta upstream-errors.md): our
+   *   credential worked and the game refused the thing we named. `denied`.
+   */
+  describe("whose 403 it was", () => {
+    const GAME_403 = "Agent does not own or cannot access ship RADOMSKY-TEST-1.";
+
+    const verdictFrom = async (status: number, body: unknown): Promise<unknown> => {
+      upstream = await startStub(() => ({ status, body }));
+      const err = await clientsFor({ getToken: async () => KNOWN_TOKEN }, upstream.url)
+        .getShip("RADOMSKY-TEST-1")
+        .then(() => new Error("getShip did not fail"), (e: unknown) => e);
+      expect(err).toBeInstanceOf(UpstreamCallError);
+      return verdictOf(err);
+    };
+
+    it("a sibling refusing our machine token for a missing scope is credentials", async () => {
+      expect(await verdictFrom(403, { error: { message: MESSAGES.missingScope } })).toBe("credentials");
+    });
+
+    it.each([
+      ["agent-service (plain text)", GAME_403],
+      ["fleet-service (envelope)", { error: { message: GAME_403, code: 4225 } }],
+      ["navigation-service (problem+json)", { status: 403, detail: GAME_403 }],
+    ])("SpaceTraders' 403 relayed by %s is denied", async (_via, body) => {
+      expect(await verdictFrom(403, body)).toBe("denied");
+    });
+
+    it("a machine token the center refuses is credentials, before any upstream can answer 403", async () => {
+      upstream = await startStub(() => ({ status: 403, body: GAME_403 }));
+      const source: M2MTokenSource = {
+        getToken: async () => Promise.reject(new M2MTokenError("unknown-caller", "the center does not know this caller")),
+      };
+
+      const err = await clientsFor(source, upstream.url)
+        .getShip("RADOMSKY-TEST-1")
+        .then(() => new Error("getShip did not fail"), (e: unknown) => e);
+
+      expect(verdictOf(err)).toBe("credentials");
+      expect(upstream.calls).toHaveLength(0);
+    });
+
+    it("any other token failure stays unavailable, whatever the upstream would have said", async () => {
+      upstream = await startStub(() => ({ status: 403, body: { error: { message: MESSAGES.missingScope } } }));
+      const source: M2MTokenSource = {
+        getToken: async () => Promise.reject(new M2MTokenError("unavailable", "the center is down")),
+      };
+
+      const err = await clientsFor(source, upstream.url)
+        .getShip("RADOMSKY-TEST-1")
+        .then(() => new Error("getShip did not fail"), (e: unknown) => e);
+
+      expect(verdictOf(err)).toBe("unavailable");
+      expect(upstream.calls).toHaveLength(0);
     });
   });
 });

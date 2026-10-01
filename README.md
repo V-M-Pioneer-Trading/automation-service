@@ -384,7 +384,7 @@ target follows from the verdict:
 | `malformed` | We asked for something the service would not accept or could not find: a bug, a stale config, a waypoint that is gone | `mine.failureRetryLimit` |
 | `internal` | Our own code threw — a corrupt task row, a contract that vanished | `mine.failureRetryLimit` |
 | `unavailable` | The request never reached the game: network, timeout, 5xx, gateway backpressure | 100× that |
-| `credentials` | A credential was rejected: ours by the service we called (`401` `a bearer token is required` / `invalid or expired session`, or the scope `403`), the gateway's injected agent token by the game (a relayed `401`), or st-gateway holds no SpaceTraders credential (`503 SpaceTraders credential not configured`) | 100× that |
+| `credentials` | A credential was rejected or refused: auth-service would not mint our machine token (`unknown-caller`, our caller secret), ours by the service we called (`401` `a bearer token is required` / `invalid or expired session`, or the scope `403` `this action requires a scope this session does not carry`: our token lacks a scope auth-service should grant), the gateway's injected agent token by the game (a relayed `401`), or st-gateway holds no SpaceTraders credential (`503 SpaceTraders credential not configured`) | 100× that |
 | `denied` | The game refused us access and the service relayed its `403` unchanged: `Agent does not own or cannot access ship X`. A ship symbol left stale by a universe reset; the credential is fine and an operator fixes the configuration | 100× that |
 
 The first three are evidence about the target. The last three are evidence about
@@ -399,7 +399,9 @@ sentence, and any other `403` is SpaceTraders' answer relayed unchanged
 (meta's `docs/design/upstream-errors.md`). Every migrated service's
 introspection `503`, `the authentication service could not process this
 request`, stays `unavailable`: auth-service is down or restarting, which
-fixes itself.
+fixes itself. So does any machine-token failure other than `unknown-caller`
+(the center slow, down or answering oddly); no request is made, so no
+upstream status is ever consulted for it.
 
 100× is 300 ticks at the default retry limit: at least 25 minutes, nearer 75
 against a service that hangs rather than refusing (a tick that waits out the

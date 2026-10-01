@@ -207,6 +207,8 @@ export function classifyUpstreamStatus(status: number, body = ""): UpstreamFailu
   // operator looks at auth-service. A 403 is `credentials` only when the
   // family wrote it — the scope sentence — because the game's own 403 says
   // the credential was fine and the *ship* is not ours.
+  // The scope 403 stays `credentials` deliberately: our machine token is
+  // genuine but lacks a scope, and only auth-service's grant can change that.
   if (status === 401) return "credentials";
   if (status === 403) return isFamilyAuthSentence(body) ? "credentials" : "denied";
   if (status === 503 && CREDENTIAL_UNCONFIGURED.test(body)) return "credentials";
