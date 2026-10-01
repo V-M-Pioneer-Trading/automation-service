@@ -7,6 +7,43 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## A relayed upstream 403 is `denied`, not `credentials`
+
+In production the mining loop logged `mining_tick_error` with
+`failureKind=credentials` for `GET .../ships/RADOMSKY-TEST-1: 403 Agent does
+not own or cannot access ship RADOMSKY-TEST-1.` — SpaceTraders' own answer,
+relayed unchanged by agent-service, because the ship symbol was stale after a
+universe reset. `classifyUpstreamStatus` mapped every 401 and 403 to
+`credentials`, so the verdict sent an operator to auth-service for a
+configuration problem.
+
+A 403 is now `credentials` only when it carries the family's scope sentence
+(`this action requires a scope this session does not carry`, pinned by the
+introspection client, and the family's only 403); any other 403, including
+one that happens to carry a family 401 sentence, is the game's and reads as
+the new kind `denied`. A 401 stays `credentials` whatever the body: the game's own 401
+(token `reset_date` mismatch) is the gateway's credential, and still
+auth-service's to fix. The sibling's scope `403` stays `credentials` on
+purpose: our machine token is genuine but under-scoped, a grant only
+auth-service can change. A machine-token failure keeps decision 22's
+mapping (`unknown-caller` is `credentials`, anything else `unavailable`)
+and never reaches a status. The introspection 503 stays `unavailable`. `denied`
+on a dispatch spends the unrelated budget like the other two plumbing
+verdicts, since re-planning onto another target cannot fix the ship.
+
+For the stale-symbol case itself **only the label changes**. A stale symbol
+fails `getShip`, the first call of every tick, before the FSM runs; that
+failure reaches the loop's error handler, not `handleTickFailure`, so no
+budget is spent either way. The loop keeps ticking and logging
+`mining_tick_error`, now with `failureKind=denied`, until an operator fixes
+the symbol. Alerting on, or self-pausing after, a sustained `denied` from
+`getShip` is a follow-up and not part of this change.
+
+The production message is pinned in `upstreamFailure.test.ts`, at the
+classifier and end to end through a real `getShip` against a stub
+agent-service; `gameClientsAuth.test.ts` drives all three refusals through
+the real fetch path.
+
 ## Two new scopes on three routes (meta#59 step 4, decision 22)
 
 `POST /events` now requires `events:write`; `POST /planner/replan` and
