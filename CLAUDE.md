@@ -49,8 +49,7 @@ declared on the `docker` job, never at workflow level.
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
 | `auth.ts` | `SCOPE_FLEET_CONTROL`, the one scope this service declares. No verification: auth-service does that (decision 21) | nothing |
 | `config.ts` | `configFromEnv()`; every numeric env var validated positive; `loadIntrospectionConfig()` for the center | fs, introspection-client |
-| `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | m2mToken, fetch |
-| `m2mToken.ts` | Mints/caches this service's own Clerk M2M token for outbound `Authorization` | fetch, crypto |
+| `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | fetch |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs, plannerDecision |
 
 Dependency direction is strictly downward in that table's spirit: `scoring`,
@@ -463,21 +462,24 @@ any `detail.actor` in the body.
   go to **fleet-service** (`/ships/:s/orbit|dock|navigate|survey|extract/survey|refuel`,
   `/contracts/:id/deliver`); waypoints and markets go to
   **navigation-service**.
-- **One header on every outbound call** (auth-design.md decisions 5/19).
-  `Authorization: Bearer <M2M token>` is *this service's own* Clerk machine
-  token, minted and cached by `m2mToken.ts` and fetched inside `callJson`. No
+- **One header on every outbound call** (auth-design.md decisions 5/22).
+  `Authorization: Bearer <M2M token>` is *this service's own* machine
+  token, minted by auth-service, cached by the package's
+  `createCentralM2MTokenSource` and fetched inside `callJson`. No
   game credential exists in this service: st-gateway injects it. Nothing is
   threaded through the scheduler, planner or FSMs for auth — `TaskContext` has
   no token field and `AutopilotState` holds only status and mode. Reintroducing
   either is a regression.
-- M2M token sources: `createClerkM2MTokenSource` (production, mints via
-  Clerk's Backend API against `CLERK_M2M_SECRET_KEY`, cached and refreshed at
-  half its lifetime, prefers a stale-but-unexpired token over a failed
-  refresh) and `createLocalM2MTokenSource` (local dev via
-  `DEV_M2M_SIGNING_KEY_FILE`, and tests via an ephemeral keypair in
-  `createTestApp`). `createApp` falls back to a throwaway local signer when
-  `mining` is set without `authTokenSource`; that fails safe, since nothing
-  production trusts it. Test stub servers don't verify either header.
+- M2M token source: `resolveM2MTokenSource` in `config.ts` builds the
+  package's `createCentralM2MTokenSource` from `AUTH_M2M_TOKEN_URL` and
+  `AUTH_M2M_CALLER_SECRET` (both required, refused at startup when missing).
+  `CLERK_M2M_SECRET_KEY` and `DEV_M2M_SIGNING_KEY_FILE` are ignored with one
+  log line. `fetchStartupToken` runs once before listening: `unknown-caller`
+  exits 1 in the entrypoint, anything else logs and continues. Tests use a
+  stub `M2MTokenSource` in `createTestApp`; `m2mToken.test.ts` drives the
+  real source against a local HTTP center. `createApp` falls back to a token
+  no center recognises when `mining` is set without `authTokenSource`; that
+  fails safe. Test stub servers don't verify either header.
 - `getMarket` returns `tradeGoods` only when one of our ships is at the
   waypoint; otherwise navigation-service serves whatever it has cached.
 - A ship `IN_TRANSIT` flips to `IN_ORBIT` by itself once `route.arrival`

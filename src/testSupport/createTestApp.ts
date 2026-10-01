@@ -12,26 +12,19 @@
  * against a real HTTP stub center instead.
  */
 
-import { createExpressAuth } from "@v-m-pioneer-trading/introspection-client";
-import { generateKeyPairSync } from "crypto";
+import { createExpressAuth, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
 import type { Pool } from "pg";
 import type { AnomalyConfig } from "../anomalyScheduler";
-import { SCOPE_FLEET_CONTROL } from "../auth";
 import type { Clock } from "../clock";
-import { createLocalM2MTokenSource } from "../m2mToken";
 import { createApp, type MetricsConfig, type MiningConfig } from "../server";
-import { inProcessIntrospector } from "./authTokens";
+import { inProcessIntrospector, MACHINE_TOKEN } from "./authTokens";
 
-// A throwaway keypair for gameClients' own outbound Authorization header
-// (decision 19). Inbound requests to this service's own routes carry the
-// opaque tokens in authTokens.ts instead. Nothing checks the
-// content of outbound calls in tests (the stub servers they hit don't
-// verify), so a fixed local signer is all that's needed here.
-const { privateKey: TEST_M2M_SIGNING_KEY } = generateKeyPairSync("rsa", {
-  modulusLength: 2048,
-  privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  publicKeyEncoding: { type: "spki", format: "pem" },
-});
+// A stub for gameClients' own outbound Authorization header (decision 22): the
+// machine token the center would mint. Nothing checks the content of outbound
+// calls in tests (the stub servers they hit don't verify), so a fixed token
+// from the center's table is all that's needed. The real source and its fake
+// center are exercised in m2mToken.test.ts.
+const TEST_M2M_TOKEN_SOURCE: M2MTokenSource = { getToken: async () => MACHINE_TOKEN };
 
 export const createTestApp = (
   pool: Pool,
@@ -49,5 +42,5 @@ export const createTestApp = (
     metrics,
     anomaly,
     corsAllowedOrigin,
-    authTokenSource: createLocalM2MTokenSource(TEST_M2M_SIGNING_KEY, { scope: SCOPE_FLEET_CONTROL }),
+    authTokenSource: TEST_M2M_TOKEN_SOURCE,
   });

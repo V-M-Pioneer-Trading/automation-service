@@ -7,6 +7,17 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## auth-service mints the machine token (meta#59 step 2, decision 22)
+
+This service no longer mints its own Clerk M2M token. `m2mToken.ts` is gone;
+`resolveM2MTokenSource` returns the package's `createCentralM2MTokenSource`
+(`@v-m-pioneer-trading/introspection-client` 1.2.0), configured by
+`AUTH_M2M_TOKEN_URL` and `AUTH_M2M_CALLER_SECRET`, both required.
+`CLERK_M2M_SECRET_KEY` and `DEV_M2M_SIGNING_KEY_FILE` are no longer read and
+are logged as ignored when set, because the rollout keeps the old variable in
+production until step 3. The token is fetched once before listening: a `401`
+from the center exits 1, anything else logs and starts anyway.
+
 ## auth-service verifies every token (meta#80 step 8, decision 21)
 
 This service no longer verifies a Clerk token. Each guarded request's bearer
@@ -56,7 +67,7 @@ Configuration: `CLERK_JWT_KEY`, `CLERK_JWT_KEY_FILE` and `CLERK_ISSUER` are
 no longer read; `AUTH_INTROSPECTION_URL` (the full endpoint URL) and
 `AUTH_INTROSPECTION_SECRET` are required and refuse startup when missing.
 `jose` is gone from the dependencies. The *outbound* M2M token
-(`CLERK_M2M_SECRET_KEY` / `DEV_M2M_SIGNING_KEY_FILE`) is unchanged.
+(`CLERK_M2M_SECRET_KEY` / `DEV_M2M_SIGNING_KEY_FILE`) was unchanged then; decision 22 replaces it (above).
 
 The failure classifier already mapped every other service's introspection
 `503` ("the authentication service could not process this request") to

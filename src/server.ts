@@ -1,8 +1,8 @@
 import cors from "cors";
-import { generateKeyPairSync } from "crypto";
 import express from "express";
 import {
   actorOf,
+  type M2MTokenSource,
   createExpressAuth,
   kindOf,
   notFound,
@@ -16,13 +16,12 @@ import { AnomalyConfig, AnomalyScheduler } from "./anomalyScheduler";
 import { SCOPE_FLEET_CONTROL } from "./auth";
 import { AutopilotState, InvalidTransitionError } from "./autopilotState";
 import { Clock, systemClock } from "./clock";
-import { ServiceConfig, configFromEnv, resolveM2MTokenSource } from "./config";
+import { ServiceConfig, configFromEnv, fetchStartupToken, resolveM2MTokenSource } from "./config";
 import { ContractRepo } from "./contractRepo";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients } from "./gameClients";
 import { isKnobClass, KnobClass, KnobClassForbiddenError, KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
-import { createLocalM2MTokenSource, M2MTokenSource } from "./m2mToken";
 import { MarketIntelRepo } from "./marketIntelRepo";
 import { MetricsRepo } from "./metrics";
 import { MetricsScheduler } from "./metricsScheduler";
@@ -123,22 +122,12 @@ const badRequest = (res: express.Response, message: string) => res.status(400).j
  * Safety net for a direct `createApp` caller that wires up `mining` without
  * also supplying `authTokenSource` — the real entrypoint and `createTestApp`
  * both always supply one explicitly, so this only ever fires as a fallback.
- * A throwaway keypair generated once per process: gameClients' calls would
- * still 401 against a real agent/fleet-service (this signs nothing production
- * trusts), so this fails safe rather than open.
+ * It hands out a string no center recognises, so gameClients' calls would
+ * still 401 against a real agent/fleet-service: this fails safe rather than open.
  */
-let fallback: M2MTokenSource | null = null;
-const fallbackAuthTokenSource = (): M2MTokenSource => {
-  fallback ??= createLocalM2MTokenSource(
-    generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      publicKeyEncoding: { type: "spki", format: "pem" },
-    }).privateKey,
-    { scope: SCOPE_FLEET_CONTROL }
-  );
-  return fallback;
-};
+const fallbackAuthTokenSource = (): M2MTokenSource => ({
+  getToken: async () => "unconfigured-machine-token",
+});
 
 export interface MiningConfig {
   navigationServiceUrl: string;
@@ -172,11 +161,10 @@ export interface AppOptions {
   corsAllowedOrigin?: string;
   /**
    * What gameClients presents as `Authorization` on every outbound call to
-   * agent/fleet-service (auth-design.md decision 19). Only meaningful
+   * agent/fleet-service (auth-design.md decision 22). Only meaningful
    * alongside `mining`. Optional so a caller that wires no `mining` needn't
    * think about it; with `mining` set but this absent it falls back to a
-   * throwaway local signer, which fails safe (nothing in production trusts
-   * it) rather than open. The entrypoint and `createTestApp` both supply one.
+   * token no center recognises, which fails safe rather than open. The entrypoint and `createTestApp` both supply one.
    */
   authTokenSource?: M2MTokenSource;
 }
@@ -630,6 +618,16 @@ if (require.main === module) {
         // says so in the same audit trail every other knob change lands in.
         const bootLog = new EventLog(pool, systemClock);
         for (const clamp of knobClamps) await bootLog.append("knob_clamped", { ...clamp });
+        // Resolved first so a missing AUTH_M2M_* variable fails before any port
+        // is bound, then fetched once so a caller secret the center does not
+        // recognise fails loudly now rather than as a 401 on every mining tick.
+        const authTokenSource = resolveM2MTokenSource();
+        if ((await fetchStartupToken(authTokenSource)) === "unknown-caller") {
+          console.error(
+            "automation-service failed to start: auth-service did not recognise this caller (check AUTH_M2M_CALLER_SECRET)"
+          );
+          process.exit(1);
+        }
         return createApp({
           pool,
           auth: createExpressAuth(config.introspection),
@@ -642,7 +640,7 @@ if (require.main === module) {
           // anomalies are *also* posted somewhere.
           anomaly: { webhookUrl: config.anomalyWebhookUrl, intervalMs: config.anomalyIntervalMs },
           corsAllowedOrigin: config.corsAllowedOrigin,
-          authTokenSource: resolveM2MTokenSource(),
+          authTokenSource,
         }).listen(config.port, () => {
           console.log(`automation-service listening on http://localhost:${config.port}`);
         });
