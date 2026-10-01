@@ -13,7 +13,7 @@ import {
 import { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
 import { AnomalyConfig, AnomalyScheduler } from "./anomalyScheduler";
-import { SCOPE_FLEET_CONTROL } from "./auth";
+import { SCOPE_EVENTS_WRITE, SCOPE_FLEET_CONTROL, SCOPE_PLANNER_ADVISE } from "./auth";
 import { AutopilotState, InvalidTransitionError } from "./autopilotState";
 import { Clock, systemClock } from "./clock";
 import { ServiceConfig, configFromEnv, fetchStartupToken, resolveM2MTokenSource } from "./config";
@@ -183,7 +183,11 @@ export function createApp(options: AppOptions) {
 
   // Every mutating route declares this; every read declares
   // ignoreCredentials(). There is no third kind of route here.
+  // One literal per route (decisions 20, 22): fleet:control does not satisfy
+  // the events or planner-advice routes, and those scopes do not satisfy it.
   const requireControl = auth.requireScope(SCOPE_FLEET_CONTROL);
+  const requireEventsWrite = auth.requireScope(SCOPE_EVENTS_WRITE);
+  const requirePlannerAdvise = auth.requireScope(SCOPE_PLANNER_ADVISE);
   const publicRead = auth.ignoreCredentials;
 
   // secured(): a route registered on the app or on `api` below without a
@@ -367,8 +371,9 @@ export function createApp(options: AppOptions) {
   // can never spoof a lifecycle/planner event type (e.g. "armed", "knob_changed")
   // that the rest of this service treats as authoritative.
   //
-  // `fleet:control`, from any kind of caller: ai-service presents a Clerk M2M
-  // token (meta#59) like every other caller (decision 21). The shared secret
+  // `events:write` only, from any kind of caller: `fleet:control` does not
+  // satisfy it (decision 22). ai-service presents a Clerk M2M token minted by
+  // auth-service (meta#59), like every other caller (decision 21). The shared secret
   // this route used to take is gone; the center has no primitive for one.
   //
   // `detail.actor` is stamped with the verified `sub` and overrides anything
@@ -376,7 +381,7 @@ export function createApp(options: AppOptions) {
   // center said so, not because the row said so.
   api.post(
     "/events",
-    requireControl,
+    requireEventsWrite,
     asyncHandler(async (req, res) => {
       const type: unknown = req.body?.type;
       const detail: unknown = req.body?.detail;
@@ -418,7 +423,7 @@ export function createApp(options: AppOptions) {
   /**
    * Two kinds of caller may tune, and they are not trusted equally.
    *
-   * Both need `fleet:control`. An operator may then write any class. A
+   * Both need `planner:advise` (not `fleet:control`; decision 22). An operator may then write any class. A
    * machine — the AI supervisor, on its Clerk M2M token — may write `policy`
    * only: the class model is a fence around *it*, and a fence enforced only by
    * which knobs it is shown is not a fence: nothing stopped it naming
@@ -434,7 +439,7 @@ export function createApp(options: AppOptions) {
 
   api.put(
     "/planner/knobs/:name",
-    requireControl,
+    requirePlannerAdvise,
     asyncHandler(async (req, res) => {
       const value: unknown = req.body?.value;
       if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -489,7 +494,7 @@ export function createApp(options: AppOptions) {
   if (scheduler !== null) {
     api.post(
       "/planner/replan",
-      requireControl,
+      requirePlannerAdvise,
       asyncHandler(async (_req, res) => {
         scheduler.requestReplan("manual");
         res.json({ requested: true });

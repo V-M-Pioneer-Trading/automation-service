@@ -47,7 +47,7 @@ declared on the `docker` job, never at workflow level.
 | `plannerDecision.ts` | The decision record: the scoring block's type, the two `event_log.detail` layouts, and the writer/reader pair for them. Imports nothing local | nothing |
 | `shipTaskRepo.ts`, `contractRepo.ts`, `marketIntelRepo.ts` | Row ↔ object repos. Repos taking `Pool \| PoolClient` can join a transaction | clock |
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
-| `auth.ts` | `SCOPE_FLEET_CONTROL`, the one scope this service declares. No verification: auth-service does that (decision 21) | nothing |
+| `auth.ts` | `SCOPE_FLEET_CONTROL`, `SCOPE_EVENTS_WRITE`, `SCOPE_PLANNER_ADVISE`: the three scopes this service declares, one literal per route (decisions 20, 22). No verification: auth-service does that (decision 21) | nothing |
 | `config.ts` | `configFromEnv()`; every numeric env var validated positive; `loadIntrospectionConfig()` for the center | fs, introspection-client |
 | `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | fetch |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs, plannerDecision |
@@ -329,7 +329,7 @@ Both the planner's scout scoring and the `market_stale` check read
 - Classes are a security boundary, enforced on **both** paths. Reads: the
   `?class=` filter. Writes: `KnobRepo.set(name, value, allowedClasses?)`
   checks the class inside the same row lock as the write and throws
-  `KnobClassForbiddenError` (→ 403). The route requires `fleet:control` of
+  `KnobClassForbiddenError` (→ 403). The route requires `planner:advise` of
   everyone; then `kindOf(res) === "operator"` passes no restriction and may
   write any class, and every other kind (today: `machine`, the AI supervisor
   on its Clerk M2M token) is restricted to `policy`. Written as "not an
@@ -426,7 +426,10 @@ any `detail.actor` in the body.
 - **Every route declares, first handler.** `app` and `api` are `secured()`:
   every `GET` declares `ignoreCredentials()` (header never read, center never
   called, so reads survive an auth-service outage), every mutation declares
-  `requireScope(SCOPE_FLEET_CONTROL)`. An undeclared route, a declaration in
+  one `requireScope(...)`: `SCOPE_FLEET_CONTROL` (arm, pause, abort),
+  `SCOPE_PLANNER_ADVISE` (replan, knob writes) or `SCOPE_EVENTS_WRITE`
+  (`POST /events`). `fleet:control` satisfies only the first; the operator
+  needs the two new scopes added: **ADD `events:write planner:advise` to the operator's existing `public_metadata` scopes** (`fleet:control agent:reset universe:refresh`); do not replace them, or the operator loses the rest. An undeclared route, a declaration in
   second position, or `ignoreCredentials()` on a mutation throws at startup.
   Middleware ahead of the guard (`cors`, `express.json`) is wrapped in
   `passthrough()`, `cors()` stays first so it terminates preflights, and the
@@ -534,7 +537,7 @@ any `detail.actor` in the body.
 - Auth is never bypassed in tests. `createTestApp` wires the package's real
   Express adapter to an in-process stub center (`authTokens.ts`): tokens are
   opaque strings the stub knows (`bearer()`, `machineBearer()`,
-  `bearerWithoutScope()`, `bearer({ sub, kind, scopes })`), anything else is
+  `bearerWithoutScope()`, `fleetControlOnlyBearer()`, `bearer({ sub, kind, scopes })`; the operator token (and default `bearer()`) holds the operator's five scopes, the machine token `events:write planner:advise` only), anything else is
   inactive. `introspectionWiring.test.ts` does the same over real HTTP against
   `stubServers.ts`'s center; add a route and it belongs in that file's route
   list.

@@ -1,7 +1,7 @@
 import request from "supertest";
 import { Pool } from "pg";
 import { createTestApp } from "../testSupport/createTestApp";
-import { bearer, bearerWithoutScope, machineBearer, TEST_ACTOR, TEST_MACHINE } from "../testSupport/authTokens";
+import { bearer, bearerWithoutScope, fleetControlOnlyBearer, machineBearer, TEST_ACTOR, TEST_MACHINE } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { KNOB_DEFINITIONS, syncKnobDefinitions } from "../knobs";
 import { resetDatabase } from "../testSupport/resetDatabase";
@@ -124,7 +124,7 @@ describe("knob classes", () => {
       // A machine is whatever the center says is one.
       const res = await request(app())
         .put("/api/automation/v1/planner/knobs/anomaly.errorRateThreshold")
-        .set("Authorization", bearer({ sub: "user_2LooksHuman", kind: "machine" }))
+        .set("Authorization", bearer({ sub: "user_2LooksHuman", kind: "machine", scopes: ["planner:advise"] }))
         .send({ value: 1 });
       expect(res.status).toBe(403);
     });
@@ -132,7 +132,7 @@ describe("knob classes", () => {
     // The fence is written "only an operator is unfenced", not "a machine is
     // fenced", so a kind the contract never defined gets the narrower set.
     it("fences a kind it does not know, as if it were a machine", async () => {
-      const unknownKind = bearer({ sub: "svc_newKind", kind: "service" as unknown as "machine" });
+      const unknownKind = bearer({ sub: "svc_newKind", kind: "service" as unknown as "machine", scopes: ["planner:advise"] });
       const refused = await request(app())
         .put("/api/automation/v1/planner/knobs/travel.speedUnitsPerHourPrior")
         .set("Authorization", unknownKind)
@@ -147,7 +147,18 @@ describe("knob classes", () => {
       expect(policy.status).toBe(200);
     });
 
-    it("refuses a caller without fleet:control before the class is considered", async () => {
+    it("refuses fleet:control alone on every class: the route wants planner:advise", async () => {
+      for (const name of ["mine.taskWeight", "travel.speedUnitsPerHourPrior", "anomaly.errorRateThreshold"]) {
+        const res = await request(app())
+          .put(`/api/automation/v1/planner/knobs/${name}`)
+          .set("Authorization", fleetControlOnlyBearer())
+          .send({ value: 1 });
+        expect(res.status).toBe(403);
+        expect(res.body.error.message).not.toMatch(/knob/);
+      }
+    });
+
+    it("refuses a caller without planner:advise before the class is considered", async () => {
       const res = await request(app())
         .put("/api/automation/v1/planner/knobs/mine.taskWeight")
         .set("Authorization", bearerWithoutScope())

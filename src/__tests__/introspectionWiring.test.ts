@@ -3,7 +3,7 @@
  *
  * The package's own conformance suite drives the fixture cases against its
  * client. What it cannot see is how THIS service mounted it: which routes are
- * public, which need `fleet:control`, that the knob fence keys on the center's
+ * public, which need which scope (`fleet:control`, `planner:advise` or `events:write`, one per route), that the knob fence keys on the center's
  * `kind`, that the audit trail records the center's `sub`, and that an
  * undeclared route refuses to start. Everything here is real HTTP against a
  * stub center (`stubServers.ts`), with the package's real `fetch` client.
@@ -18,7 +18,9 @@ import request from "supertest";
 import { createPool, migrate } from "../db";
 import { createApp } from "../server";
 import {
+  bearer,
   CONTROL_TOKEN,
+  fleetControlOnlyBearer,
   INACTIVE_TOKEN,
   MACHINE_TOKEN,
   SESSION_TOKEN,
@@ -118,7 +120,7 @@ describe("introspection wiring", () => {
     });
   });
 
-  describe("mutations declare fleet:control", () => {
+  describe("mutations declare their scope", () => {
     it("refuses a POST with no header: 401, center not asked", async () => {
       const res = await request(app()).post(`${V1}/autopilot/arm`).send({});
 
@@ -151,6 +153,27 @@ describe("introspection wiring", () => {
       expect(res.status).toBe(403);
       expect(res.body).toEqual({ error: { message: "this action requires a scope this session does not carry" } });
       expect(center.calls).toHaveLength(1);
+    });
+
+    it.each([
+      ["POST", `${V1}/events`],
+      ["PUT", `${V1}/planner/knobs/mine.taskWeight`],
+    ])("refuses %s %s to fleet:control alone: 403 (decision 22, one literal per route)", async (method, path) => {
+      const token = fleetControlOnlyBearer();
+      const res = await request(app())
+        [method === "PUT" ? "put" : "post"](path)
+        .set("Authorization", token)
+        .send({ type: "ai_test", value: 2 });
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: { message: "this action requires a scope this session does not carry" } });
+    });
+
+    it("refuses POST /autopilot/arm to the machine token, which holds no fleet:control", async () => {
+      const res = await request(app()).post(`${V1}/autopilot/arm`).set("Authorization", `Bearer ${MACHINE_TOKEN}`).send({});
+
+      expect(res.status).toBe(403);
+      expect(await eventsOf("armed")).toHaveLength(0);
     });
 
     it("lets fleet:control through, asking the center exactly once with the form-encoded token", async () => {
@@ -329,11 +352,20 @@ describe("introspection wiring", () => {
       expect(center.calls).toHaveLength(0);
     });
 
-    it("refuses POST /planner/replan without a header, and serves it to fleet:control", async () => {
+    it("refuses POST /planner/replan without a header, and serves it to planner:advise", async () => {
       const app = miningApp();
       const anonymous = await request(app).post(`${V1}/planner/replan`);
       expect(anonymous.status).toBe(401);
       expect(center.calls).toHaveLength(0);
+
+      const controlOnly = await request(app).post(`${V1}/planner/replan`).set("Authorization", fleetControlOnlyBearer());
+      expect(controlOnly.status).toBe(403);
+
+      const eventsOnly = await request(app).post(`${V1}/planner/replan`).set("Authorization", bearer({ scopes: ["events:write"] }));
+      expect(eventsOnly.status).toBe(403);
+
+      const adviseOnly = await request(app).post(`${V1}/planner/replan`).set("Authorization", bearer({ scopes: ["planner:advise"] }));
+      expect(adviseOnly.status).toBe(200);
 
       const scopeless = await request(app).post(`${V1}/planner/replan`).set("Authorization", `Bearer ${SESSION_TOKEN}`);
       expect(scopeless.status).toBe(403);

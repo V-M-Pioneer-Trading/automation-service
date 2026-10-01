@@ -195,7 +195,7 @@ is applied server-side so the restriction holds even if a client forgets it.
 knobs is not a control: the supervisor could always have named one it wasn't
 shown. `PUT /planner/knobs/:name` now checks the knob's class against the
 caller, inside the same row lock as the write. Both kinds of caller need
-`fleet:control`. A human operator may then write any class. The supervisor,
+`planner:advise` (not `fleet:control`; decision 22). A human operator may then write any class. The supervisor,
 presenting a Clerk M2M token that auth-service reports as `kind: "machine"`,
 may write `policy` only and gets `403` otherwise — so it cannot resolve "the
 error alarm fired" by making the error alarm unable to fire. Either way the
@@ -646,11 +646,17 @@ what it declared.
 Every `GET` is public and declares `ignoreCredentials()`: the
 `Authorization` header is never read there and auth-service is never called,
 so the dashboard and health checks keep working while auth-service is down, and
-a stale token riding along is not a `401`. Every mutating route needs the
-**`fleet:control`** scope, from an operator's session or a machine's Clerk M2M
-token alike. That includes `POST /events`: ai-service is to call it with its
-own M2M token (meta#59). The `X-Service-Secret` shared secret it used to
-take is gone, and sending that header is the same as sending nothing.
+a stale token riding along is not a `401`. Every mutating route needs
+exactly one scope (auth-design decisions 20 and 22): **`fleet:control`** for
+arm, pause and abort; **`planner:advise`** for `POST /planner/replan` and
+`PUT /planner/knobs/:name`; **`events:write`** for `POST /events`. None
+implies another, so a token holding only `fleet:control` gets `403` on the
+last three. ai-service's M2M token (meta#59) carries `events:write
+planner:advise` and no `fleet:control`, so it cannot arm, pause or abort.
+Operator step, manual like `universe:refresh`'s: **ADD `events:write planner:advise` to the operator's existing `public_metadata` scopes** (`fleet:control agent:reset universe:refresh`); do not replace them, or the operator loses the rest. Without the two new
+scopes the operator loses replan, knob writes and `/events`. The dev keypair's
+default token (`meta/scripts/mint-dev-token.mjs`) carries them. The
+`X-Service-Secret` shared secret it used to take is gone, and sending that header is the same as sending nothing.
 
 | | Route | Requires |
 |---|---|---|
@@ -658,9 +664,9 @@ take is gone, and sending that header is the same as sending nothing.
 | public | `GET /planner/knobs`, `/planner/model`, `/metrics/context`, `/anomalies/digest` | none |
 | public | `GET /health`, `/api/automation/health` | none |
 | gated | `POST /autopilot/arm`, `/pause`, `/abort` | `fleet:control` |
-| gated | `POST /planner/replan` | `fleet:control` |
-| gated | `PUT /planner/knobs/:name` | `fleet:control`; then any class for `kind: "operator"`, `policy` only for `kind: "machine"` |
-| gated | `POST /events` | `fleet:control`, any kind |
+| gated | `POST /planner/replan` | `planner:advise` |
+| gated | `PUT /planner/knobs/:name` | `planner:advise`; then any class for `kind: "operator"`, `policy` only for `kind: "machine"` |
+| gated | `POST /events` | `events:write`, any kind |
 
 What a caller gets back, in the `{"error":{"message":…}}` envelope, with the
 package's exact sentences:
@@ -669,7 +675,7 @@ package's exact sentences:
 |---|---|---|
 | No `Authorization`, or one that is not `Bearer <one token>` (`Bearer abc def` included) | `401` `a bearer token is required` | no |
 | auth-service says the token is inactive (expired, foreign-signed, garbage) | `401` `invalid or expired session` | yes |
-| Active, without `fleet:control` | `403` `this action requires a scope this session does not carry`: generic, the scope is not named | yes |
+| Active, without the route's scope (`fleet:control` does not stand in for `events:write` or `planner:advise`) | `403` `this action requires a scope this session does not carry`: generic, the scope is not named | yes |
 | A machine writing a non-`policy` knob | `403` naming the knob's class: the credential is fine, the knob is out of its reach | yes |
 | auth-service unreachable, slow (1 s), erroring, or rejecting our secret | `503` `the authentication service could not process this request`, one attempt, no retry | yes |
 | A path no route matches | `404` `not found` | no |
