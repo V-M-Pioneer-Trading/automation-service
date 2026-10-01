@@ -11,7 +11,11 @@
  * which is exactly the lane the autopilot belongs in (decision 2).
  */
 
+<<<<<<< HEAD
 import { M2MTokenError, MESSAGES, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
+=======
+import { M2MTokenError, type M2MTokenSource } from "@v-m-pioneer-trading/clerk-client";
+>>>>>>> Move to @v-m-pioneer-trading/clerk-client 2.0.0 (rename only)
 
 /**
  * One end of a nav route. SpaceTraders reports both ends with coordinates and

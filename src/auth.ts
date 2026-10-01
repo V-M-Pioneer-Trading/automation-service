@@ -4,7 +4,7 @@
  * auth-service is the only component that verifies a Clerk token
  * (auth-design.md decision 21, meta#80). This service hands the caller's
  * `Authorization` header to it through the shared
- * `@v-m-pioneer-trading/introspection-client` package and compares the answer
+ * `@v-m-pioneer-trading/clerk-client` package and compares the answer
  * against the scope each route declares in `server.ts`. There is no local
  * verifier, no key and no fallback to one: a second verification path is what
  * decision 10 forbids.

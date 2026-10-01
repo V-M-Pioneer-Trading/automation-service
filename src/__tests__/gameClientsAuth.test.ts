@@ -1,4 +1,4 @@
-import { M2MTokenError, MESSAGES, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
+import { M2MTokenError, MESSAGES, type M2MTokenSource } from "@v-m-pioneer-trading/clerk-client";
 import { createGameClients, UpstreamCallError } from "../gameClients";
 import { verdictOf } from "../scheduler";
 import { startStub, type Stub } from "../testSupport/stubServers";

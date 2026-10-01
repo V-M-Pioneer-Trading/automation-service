@@ -433,7 +433,7 @@ any `detail.actor` in the body.
 ## Inbound auth (decision 21)
 
 - **This service verifies nothing.** `createApp` takes an `ExpressAuth` from
-  `@v-m-pioneer-trading/introspection-client`; production builds it with
+  `@v-m-pioneer-trading/clerk-client`; production builds it with
   `createExpressAuth(config.introspection)`, which POSTs the bearer to
   auth-service (`AUTH_INTROSPECTION_URL`, `AUTH_INTROSPECTION_SECRET`).
   Handlers read identity only through `actorOf(res)` / `kindOf(res)`; there is

@@ -7,6 +7,12 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Shared auth package renamed to clerk-client (2.0.0)
+
+The dependency moved from `@v-m-pioneer-trading/introspection-client` 1.2.0 to
+`@v-m-pioneer-trading/clerk-client` 2.0.0. Rename only; the API is the same.
+Entries below keep the old name, as it was then.
+
 ## A relayed upstream 403 is `denied`, not `credentials`
 
 In production the mining loop logged `mining_tick_error` with

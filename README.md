@@ -655,7 +655,7 @@ into a timer that fires every millisecond.
 This service verifies no token itself. auth-service is the only verifier
 (auth-design.md decision 21, meta#80): every guarded request's bearer is sent
 to its introspection endpoint through
-[`@v-m-pioneer-trading/introspection-client`](https://github.com/V-M-Pioneer-Trading/ts-introspection-client),
+[`@v-m-pioneer-trading/clerk-client`](https://github.com/V-M-Pioneer-Trading/clerk-client),
 which answers with `{sub, kind, scopes}`, and the route compares that with
 what it declared.
 

@@ -9,7 +9,7 @@
  * stub center (`stubServers.ts`), with the package's real `fetch` client.
  */
 
-import { createExpressAuth, MESSAGES, secured } from "@v-m-pioneer-trading/introspection-client";
+import { createExpressAuth, MESSAGES, secured } from "@v-m-pioneer-trading/clerk-client";
 import express from "express";
 import { connect } from "net";
 import type { AddressInfo } from "net";

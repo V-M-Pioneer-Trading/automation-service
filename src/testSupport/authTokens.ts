@@ -15,7 +15,7 @@
  * token the center calls active, carrying the scope the route declares.
  */
 
-import type { CenterAnswer, Identity, Introspector } from "@v-m-pioneer-trading/introspection-client";
+import type { CenterAnswer, Identity, Introspector } from "@v-m-pioneer-trading/clerk-client";
 
 export const TEST_ACTOR = "user_2TestOperator";
 /** The machine caller's `sub`, as Clerk issues one for an M2M token. */

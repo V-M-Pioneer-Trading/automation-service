@@ -9,7 +9,7 @@ import {
   passthrough,
   secured,
   type ExpressAuth,
-} from "@v-m-pioneer-trading/introspection-client";
+} from "@v-m-pioneer-trading/clerk-client";
 import { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
 import { AnomalyConfig, AnomalyScheduler } from "./anomalyScheduler";
