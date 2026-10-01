@@ -4,7 +4,7 @@ import {
   M2MTokenError,
   type IntrospectionConfig,
   type M2MTokenSource,
-} from "@v-m-pioneer-trading/introspection-client";
+} from "@v-m-pioneer-trading/clerk-client";
 
 export interface ServiceConfig {
   port: number;

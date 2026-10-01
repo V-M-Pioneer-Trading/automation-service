@@ -12,7 +12,7 @@
  * against a real HTTP stub center instead.
  */
 
-import { createExpressAuth, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
+import { createExpressAuth, type M2MTokenSource } from "@v-m-pioneer-trading/clerk-client";
 import type { Pool } from "pg";
 import type { AnomalyConfig } from "../anomalyScheduler";
 import type { Clock } from "../clock";

@@ -11,7 +11,7 @@
  * which is exactly the lane the autopilot belongs in (decision 2).
  */
 
-import { M2MTokenError, MESSAGES, type M2MTokenSource } from "@v-m-pioneer-trading/introspection-client";
+import { M2MTokenError, MESSAGES, type M2MTokenSource } from "@v-m-pioneer-trading/clerk-client";
 
 /**
  * One end of a nav route. SpaceTraders reports both ends with coordinates and
@@ -169,7 +169,7 @@ const CREDENTIAL_UNCONFIGURED = /credential not configured/i;
 /**
  * The one sentence an introspecting service answers a `403` with: *our*
  * machine token is genuine but lacks the route's scope (decision 21;
- * `@v-m-pioneer-trading/introspection-client` pins it byte for byte, and
+ * `@v-m-pioneer-trading/clerk-client` pins it byte for byte, and
  * meta `token-introspection.md` lists it as the family's only `403`). The
  * family's other two sentences, `a bearer token is required` and `invalid or
  * expired session`, are `401`s, and a `401` is `credentials` whatever it

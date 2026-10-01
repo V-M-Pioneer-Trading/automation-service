@@ -1,6 +1,6 @@
 import request from "supertest";
 import { Pool } from "pg";
-import { MESSAGES } from "@v-m-pioneer-trading/introspection-client";
+import { MESSAGES } from "@v-m-pioneer-trading/clerk-client";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
 import { createTestApp } from "../testSupport/createTestApp";

@@ -24,7 +24,7 @@ declared on the `docker` job, never at workflow level.
 
 | File | Owns | Depends on |
 |---|---|---|
-| `server.ts` | `createApp(options)`: wiring, routes and each route's auth declaration, `app.locals` test hooks | everything below, introspection-client |
+| `server.ts` | `createApp(options)`: wiring, routes and each route's auth declaration, `app.locals` test hooks | everything below, clerk-client |
 | `scheduler.ts` | `FleetScheduler`: the tick (replan → assign → advance one FSM step → persist) | planner, discovery, FSMs, repos |
 | `planner.ts` | `Planner`: one `DecisionContext` per decision, scores mining/contract/scout, pure `evaluateContract` | scoring, routeCost, observations, repos |
 | `scoring.ts` | The credits-per-hour arithmetic. Pure, no imports from the rest of `src` | nothing |
@@ -48,7 +48,7 @@ declared on the `docker` job, never at workflow level.
 | `shipTaskRepo.ts`, `contractRepo.ts`, `marketIntelRepo.ts` | Row ↔ object repos. Repos taking `Pool \| PoolClient` can join a transaction | clock |
 | `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
 | `auth.ts` | `SCOPE_FLEET_CONTROL`, `SCOPE_EVENTS_WRITE`, `SCOPE_PLANNER_ADVISE`: the three scopes this service declares, one literal per route (decisions 20, 22). No verification: auth-service does that (decision 21) | nothing |
-| `config.ts` | `configFromEnv()`; every numeric env var validated positive; `loadIntrospectionConfig()` for the center | fs, introspection-client |
+| `config.ts` | `configFromEnv()`; every numeric env var validated positive; `loadIntrospectionConfig()` for the center | fs, clerk-client |
 | `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | fetch |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs, plannerDecision |
 
@@ -433,7 +433,7 @@ any `detail.actor` in the body.
 ## Inbound auth (decision 21)
 
 - **This service verifies nothing.** `createApp` takes an `ExpressAuth` from
-  `@v-m-pioneer-trading/introspection-client`; production builds it with
+  `@v-m-pioneer-trading/clerk-client`; production builds it with
   `createExpressAuth(config.introspection)`, which POSTs the bearer to
   auth-service (`AUTH_INTROSPECTION_URL`, `AUTH_INTROSPECTION_SECRET`).
   Handlers read identity only through `actorOf(res)` / `kindOf(res)`; there is
