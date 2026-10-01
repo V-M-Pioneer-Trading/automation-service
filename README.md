@@ -403,6 +403,11 @@ fixes itself. So does any machine-token failure other than `unknown-caller`
 (the center slow, down or answering oddly); no request is made, so no
 upstream status is ever consulted for it.
 
+A stale ship symbol never spends any budget at all: it fails `getShip`,
+before the task runs, and that failure is only logged (`mining_tick_error`,
+`failureKind=denied`) every tick until an operator fixes the symbol. Nothing
+alerts on or pauses for a sustained `denied` yet.
+
 100× is 300 ticks at the default retry limit: at least 25 minutes, nearer 75
 against a service that hangs rather than refusing (a tick that waits out the
 15s call timeout is still one tick), and hours if the limit is raised. Any of

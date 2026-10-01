@@ -167,19 +167,23 @@ export const UNRELATED_FAILURE_KINDS: ReadonlySet<UpstreamFailureKind> = new Set
 const CREDENTIAL_UNCONFIGURED = /credential not configured/i;
 
 /**
- * The three sentences an introspecting service answers with when *our* M2M
- * token is the problem (decision 21; `@v-m-pioneer-trading/introspection-client`
- * pins them byte for byte). A 403 carrying none of them was not written by
- * the family at all: the three services relay SpaceTraders' status and
- * message unchanged (meta `docs/design/upstream-errors.md`), so it is the
- * game refusing us access to what we named. A ship symbol left stale by a
- * universe reset produced `403 Agent does not own or cannot access ship
- * RADOMSKY-TEST-1.` in production, and it was logged as `credentials` for as
- * long as it lasted, sending an operator to auth-service for a config problem.
+ * The one sentence an introspecting service answers a `403` with: *our*
+ * machine token is genuine but lacks the route's scope (decision 21;
+ * `@v-m-pioneer-trading/introspection-client` pins it byte for byte, and
+ * meta `token-introspection.md` lists it as the family's only `403`). The
+ * family's other two sentences, `a bearer token is required` and `invalid or
+ * expired session`, are `401`s, and a `401` is `credentials` whatever it
+ * says, so they are not consulted here.
+ *
+ * A `403` without this sentence was not written by the family at all: the
+ * three services relay SpaceTraders' status and message unchanged (meta
+ * `docs/design/upstream-errors.md`), so it is the game refusing us access to
+ * what we named. A ship symbol left stale by a universe reset produced `403
+ * Agent does not own or cannot access ship RADOMSKY-TEST-1.` in production,
+ * and it was logged as `credentials` for as long as it lasted, sending an
+ * operator to auth-service for a config problem.
  */
-const FAMILY_AUTH_SENTENCES: readonly string[] = [MESSAGES.missingToken, MESSAGES.invalidSession, MESSAGES.missingScope];
-
-const isFamilyAuthSentence = (body: string): boolean => FAMILY_AUTH_SENTENCES.some((sentence) => body.includes(sentence));
+const isFamilyScopeRefusal = (body: string): boolean => body.includes(MESSAGES.missingScope);
 
 /**
  * Decides the verdict from what an upstream answer actually carries.
@@ -210,7 +214,7 @@ export function classifyUpstreamStatus(status: number, body = ""): UpstreamFailu
   // The scope 403 stays `credentials` deliberately: our machine token is
   // genuine but lacks a scope, and only auth-service's grant can change that.
   if (status === 401) return "credentials";
-  if (status === 403) return isFamilyAuthSentence(body) ? "credentials" : "denied";
+  if (status === 403) return isFamilyScopeRefusal(body) ? "credentials" : "denied";
   if (status === 503 && CREDENTIAL_UNCONFIGURED.test(body)) return "credentials";
   // 429 is the gateway's token bucket telling us to come back, not a refusal;
   // 408 and 425 are a proxy talking about the connection, not about the game.

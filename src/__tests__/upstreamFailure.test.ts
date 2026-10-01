@@ -3,7 +3,7 @@ import { AutopilotState } from "../autopilotState";
 import { ContractRepo } from "../contractRepo";
 import { createPool, migrate } from "../db";
 import { EventLog } from "../eventLog";
-import { classifyUpstreamStatus, GameClients, ShipSnapshot, UpstreamCallError, UpstreamFailureKind } from "../gameClients";
+import { classifyUpstreamStatus, createGameClients, GameClients, ShipSnapshot, UpstreamCallError, UpstreamFailureKind } from "../gameClients";
 import { KnobRepo } from "../knobs";
 import { MarketIntelRepo } from "../marketIntelRepo";
 import { ObservationRepo } from "../observations";
@@ -13,6 +13,7 @@ import { ShipTask, ShipTaskRepo } from "../shipTaskRepo";
 import { FakeClock } from "../testSupport/fakeClock";
 import { fakeGameClients } from "../testSupport/fakeGameClients";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { startStub, type Stub } from "../testSupport/stubServers";
 
 /**
  * Upstream failures are classified once, at the call, and the scheduler
@@ -47,7 +48,12 @@ describe("classifyUpstreamStatus", () => {
     // was fine, the ship is not ours. The production message, byte for byte.
     [403, "Agent does not own or cannot access ship RADOMSKY-TEST-1.", "denied"],
     [403, '{"error":{"message":"Agent does not own or cannot access ship RADOMSKY-TEST-1.","code":4225}}', "denied"], // the same through fleet-service's envelope
-    [403, "", "denied"], // no family sentence, so not the family's 403
+    [403, "", "denied"], // no scope sentence, so not the family's 403
+    // The family's two 401 sentences do not make a 403 the family's: its only
+    // 403 is the scope refusal (meta token-introspection.md), so anything else
+    // with that status was relayed from the game.
+    [403, '{"error":{"message":"invalid or expired session"}}', "denied"],
+    [403, '{"error":{"message":"a bearer token is required"}}', "denied"],
     [503, '{"error":{"message":"SpaceTraders credential not configured"}}', "credentials"],
     [503, '{"error":{"message":"auth-service unavailable: cannot obtain a SpaceTraders credential"}}', "unavailable"],
     // Every migrated upstream's answer while auth-service cannot verify our
@@ -235,9 +241,13 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     expect((await tasks.get(SHIP))?.asteroidWaypoint).toBeNull();
   }, 30_000);
 
-  it("a ship the game says is not ours is treated the same way, under its own name", async () => {
-    // Re-planning onto another target cannot help: the ship symbol itself is
-    // wrong. Spending the target's budget would abandon and re-plan every
+  it("a game 403 relayed on a dispatch spends the unrelated budget, under its own name", async () => {
+    // Models the game refusing access part-way through a task: getShip
+    // answered, then a fleet action came back with SpaceTraders' 403. That is
+    // not what a stale ship symbol produces (its getShip fails first; see the
+    // next case), but the verdict reaching handleTickFailure must still be
+    // plumbing, not target. Re-planning onto another target cannot help: the
+    // ship itself is out of reach. Spending the target's budget would abandon and re-plan every
     // target in turn, each one failing identically, which is the storm this
     // taxonomy exists to prevent - only with a verdict that named the wrong
     // culprit for as long as it lasted.
@@ -257,6 +267,48 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     expect(task?.unrelatedFailureCount).toBe(10);
     expect(await eventTypes(events)).not.toContain("mining_task_failed");
     expect((await detailsOf(events, "mining_tick_error"))[0].failureKind).toBe("denied");
+  });
+
+  describe("a ship symbol left stale by a universe reset", () => {
+    // The production case, end to end: MINING_SHIP_SYMBOL names a ship the
+    // agent no longer owns, so the very first call of every tick, getShip,
+    // gets SpaceTraders' 403 relayed by agent-service as plain text. That
+    // failure is pre-FSM: it reaches the loop's error handler, not
+    // handleTickFailure, so no budget is spent and the loop keeps ticking and
+    // logging. Only the label was wrong, and only the label changes here.
+    const PRODUCTION_403 = "Agent does not own or cannot access ship RADOMSKY-TEST-1.";
+    let agentService: Stub | null = null;
+    afterEach(async () => {
+      await agentService?.close();
+      agentService = null;
+    });
+
+    it("logs every tick as mining_tick_error with failureKind=denied, and spends nothing", async () => {
+      agentService = await startStub(() => ({ status: 403, body: PRODUCTION_403 }));
+      const clients = createGameClients({
+        navigationServiceUrl: agentService.url,
+        agentServiceUrl: agentService.url,
+        fleetServiceUrl: agentService.url,
+        authTokenSource: { getToken: async () => "machine-token" },
+      });
+      const { tasks, events, scheduler: s } = arrange(new Error("unused: clients are real"), clients);
+      await seedTask(tasks);
+
+      await tick(s, 5);
+
+      expect(agentService.calls.map((c) => c.url)).toEqual(Array(5).fill(`/ships/${SHIP}`));
+      const errors = await detailsOf(events, "mining_tick_error");
+      expect(errors).toHaveLength(5);
+      for (const e of errors) {
+        expect(e.failureKind).toBe("denied");
+        expect(e.message).toContain(`403 ${PRODUCTION_403}`);
+      }
+      const task = await tasks.get(SHIP);
+      expect(task?.asteroidWaypoint).toBe("X1-BELT");
+      expect(task?.failureCount).toBe(0);
+      expect(task?.unrelatedFailureCount).toBe(0);
+      expect(await eventTypes(events)).not.toContain("mining_task_failed");
+    });
   });
 
   it("a rejected credential is treated the same way, and says so", async () => {
