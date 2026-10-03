@@ -1,4 +1,5 @@
-import { Pool } from "pg";
+import { databaseUrl } from "../testSupport/databaseUrl";
+import type { Pool } from "pg";
 import { createPool, migrate } from "../db";
 import { ObservationRepo, decayWeight, weightedMean, weightedRatio } from "../observations";
 import { FakeClock } from "../testSupport/fakeClock";
@@ -43,7 +44,7 @@ describe("ObservationRepo.calibrate", () => {
   let repo: ObservationRepo;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 

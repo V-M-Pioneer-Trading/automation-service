@@ -64,7 +64,9 @@ export function fuelAwareRoute(
     if (currentSymbol === toSymbol) return { distance: currentCost };
     settled.add(currentSymbol);
 
-    const current = bySymbol.get(currentSymbol)!;
+    const current = bySymbol.get(currentSymbol);
+    // Unreachable: every key of `best` is a symbol taken from `bySymbol`. Fails as loudly as the old `!` read did.
+    if (current === undefined) throw new Error(`routeCost: no waypoint ${currentSymbol}`);
     if (currentSymbol !== fromSymbol && !current.hasFuelStation) continue; // dead end: can't refuel to go further
 
     // Leaving the origin the ship flies on the fuel it has; leaving anywhere

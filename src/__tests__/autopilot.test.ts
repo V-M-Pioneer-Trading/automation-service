@@ -1,17 +1,28 @@
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
-import { Clock } from "../clock";
+import type { Clock } from "../clock";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { databaseUrl } from "../testSupport/databaseUrl";
+
+interface EventsBody {
+  events: { type: string; occurredAt: string }[];
+}
+interface ErrorBody {
+  error: { message: string };
+}
+interface StatusBody {
+  status: string;
+}
 
 describe("automation-service autopilot lifecycle", () => {
   let pool: Pool;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -43,9 +54,9 @@ describe("automation-service autopilot lifecycle", () => {
     expect(statusRes.body).toEqual({ status: "armed", mode: "live" });
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events");
-    expect(eventsRes.body.events).toHaveLength(1);
-    expect(eventsRes.body.events[0]).toMatchObject({ type: "armed", detail: { from: "disarmed" } });
-    expect(eventsRes.body.events[0].occurredAt).toBe("2026-07-17T10:00:00.000Z");
+    expect((eventsRes.body as EventsBody).events).toHaveLength(1);
+    expect((eventsRes.body as EventsBody).events[0]).toMatchObject({ type: "armed", detail: { from: "disarmed" } });
+    expect((eventsRes.body as EventsBody).events[0].occurredAt).toBe("2026-07-17T10:00:00.000Z");
 
   });
 
@@ -62,7 +73,7 @@ describe("automation-service autopilot lifecycle", () => {
     const res = await request(app()).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ mode: "turbo" });
     expect(res.status).toBe(400);
     const statusRes = await request(app()).get("/api/automation/v1/autopilot/status");
-    expect(statusRes.body.status).toBe("disarmed");
+    expect((statusRes.body as StatusBody).status).toBe("disarmed");
   });
 
   it("pauses from armed and logs it", async () => {
@@ -74,13 +85,13 @@ describe("automation-service autopilot lifecycle", () => {
     expect(res.body).toEqual({ status: "paused", mode: "live" });
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events");
-    expect(eventsRes.body.events[0]).toMatchObject({ type: "paused", detail: { from: "armed" } });
+    expect((eventsRes.body as EventsBody).events[0]).toMatchObject({ type: "paused", detail: { from: "armed" } });
   });
 
   it("rejects pausing when not armed", async () => {
     const res = await request(app()).post("/api/automation/v1/autopilot/pause").set("Authorization", bearer());
     expect(res.status).toBe(409);
-    expect(res.body.error.message).toMatch(/disarmed/);
+    expect((res.body as ErrorBody).error.message).toMatch(/disarmed/);
   });
 
   it("aborts from armed or paused, and logs it", async () => {
@@ -92,7 +103,7 @@ describe("automation-service autopilot lifecycle", () => {
     expect(res.body).toEqual({ status: "aborted", mode: null });
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events");
-    expect(eventsRes.body.events[0]).toMatchObject({ type: "aborted", detail: { from: "armed" } });
+    expect((eventsRes.body as EventsBody).events[0]).toMatchObject({ type: "aborted", detail: { from: "armed" } });
   });
 
   it("aborts from paused too", async () => {
@@ -126,10 +137,10 @@ describe("automation-service autopilot lifecycle", () => {
 
     const restarted = app();
     const statusRes = await request(restarted).get("/api/automation/v1/autopilot/status");
-    expect(statusRes.body.status).toBe("disarmed");
+    expect((statusRes.body as StatusBody).status).toBe("disarmed");
 
     const eventsRes = await request(restarted).get("/api/automation/v1/autopilot/events");
-    expect(eventsRes.body.events).toHaveLength(1); // event log survived the "restart"
+    expect((eventsRes.body as EventsBody).events).toHaveLength(1); // event log survived the "restart"
   });
 
   it("orders events most-recent-first and respects limit", async () => {
@@ -143,9 +154,9 @@ describe("automation-service autopilot lifecycle", () => {
     await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
 
     const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=2");
-    expect(res.body.events).toHaveLength(2);
-    expect(res.body.events[0].type).toBe("aborted");
-    expect(res.body.events[1].type).toBe("paused");
+    expect((res.body as EventsBody).events).toHaveLength(2);
+    expect((res.body as EventsBody).events[0].type).toBe("aborted");
+    expect((res.body as EventsBody).events[1].type).toBe("paused");
   });
 
   it("does not error on an oversized or malformed limit", async () => {
@@ -162,8 +173,8 @@ describe("automation-service error mapping", () => {
   // A DB failure must surface as a clean 500, not hang the request forever —
   // Express 4 does not auto-catch rejections thrown inside async handlers.
   class FailingPool {
-    async query(): Promise<never> {
-      throw new Error("db unreachable");
+    query(): Promise<never> {
+      return Promise.reject(new Error("db unreachable"));
     }
   }
   const failingApp = () => createTestApp(new FailingPool() as unknown as Pool);
@@ -171,12 +182,12 @@ describe("automation-service error mapping", () => {
   it("returns 500 instead of hanging when the event log write fails during arm", async () => {
     const res = await request(failingApp()).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     expect(res.status).toBe(500);
-    expect(res.body.error.message).toBeDefined();
+    expect((res.body as ErrorBody).error.message).toBeDefined();
   });
 
   it("returns 500 instead of hanging when the event log read fails", async () => {
     const res = await request(failingApp()).get("/api/automation/v1/autopilot/events");
     expect(res.status).toBe(500);
-    expect(res.body.error.message).toBeDefined();
+    expect((res.body as ErrorBody).error.message).toBeDefined();
   });
 });

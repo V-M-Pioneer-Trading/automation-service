@@ -63,7 +63,7 @@ export const answerFor = (token: string): CenterAnswer => {
 };
 
 export const inProcessIntrospector: Introspector = {
-  introspect: async (token: string) => answerFor(token),
+  introspect: (token: string) => Promise.resolve(answerFor(token)),
 };
 
 export interface TestTokenOptions {
@@ -83,7 +83,7 @@ export const bearer = (options: TestTokenOptions = {}): string => {
   if (options.sub === undefined && options.kind === undefined && options.scopes === undefined) {
     return `Bearer ${CONTROL_TOKEN}`;
   }
-  const token = `test-token-minted-${minted.size + 1}`;
+  const token = `test-token-minted-${String(minted.size + 1)}`;
   minted.set(token, {
     sub: options.sub ?? TEST_ACTOR,
     kind: options.kind ?? "operator",

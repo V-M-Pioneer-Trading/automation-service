@@ -1,5 +1,5 @@
-import { Pool } from "pg";
-import { Clock } from "./clock";
+import type { Pool } from "pg";
+import type { Clock } from "./clock";
 
 export interface MarketIntel {
   waypoint: string;
@@ -32,7 +32,7 @@ export class MarketIntelRepo {
   }
 
   async getAll(): Promise<MarketIntel[]> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{ waypoint: string; last_refreshed_at: Date }>(
       "SELECT waypoint, last_refreshed_at FROM market_intel ORDER BY last_refreshed_at ASC"
     );
     return rows.map((r) => ({ waypoint: r.waypoint, lastRefreshedAt: r.last_refreshed_at }));

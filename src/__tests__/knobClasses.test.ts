@@ -1,10 +1,45 @@
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer, bearerWithoutScope, fleetControlOnlyBearer, machineBearer, TEST_ACTOR, TEST_MACHINE } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { KNOB_DEFINITIONS, syncKnobDefinitions } from "../knobs";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { databaseUrl } from "../testSupport/databaseUrl";
+
+interface Knob {
+  name: string;
+  class: string;
+  description: string;
+  default: number;
+  value: number;
+  min: number;
+  max: number;
+}
+interface KnobsBody {
+  knobs: Knob[];
+}
+interface KnobBody {
+  knob: Knob;
+}
+interface ErrorBody {
+  error: { message: string };
+}
+interface EventsBody {
+  events: { type: string; detail: unknown }[];
+}
+
+function findKnob(body: KnobsBody, name: string): Knob {
+  const knob = body.knobs.find((k) => k.name === name);
+  if (knob === undefined) throw new Error(`knob ${name} not listed`);
+  return knob;
+}
+
+function findChanged(body: EventsBody): { type: string; detail: unknown } {
+  const changed = body.events.find((e) => e.type === "knob_changed");
+  if (changed === undefined) throw new Error("no knob_changed event");
+  return changed;
+}
 
 /**
  * Knob classes are the fence around the AI supervisor: it may write `policy`
@@ -15,7 +50,7 @@ describe("knob classes", () => {
   let pool: Pool;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -45,7 +80,7 @@ describe("knob classes", () => {
    */
   it("reserves cash by default, rather than shipping the death-spiral guard disabled", async () => {
     const res = await request(app()).get("/api/automation/v1/planner/knobs");
-    const floor = res.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
+    const floor = findKnob(res.body as KnobsBody, "credit.reserveFloor");
     expect(floor.default).toBeGreaterThan(0);
     expect(floor.value).toBe(floor.default);
     expect(floor.min).toBe(0); // still switchable off, but only on purpose
@@ -54,8 +89,8 @@ describe("knob classes", () => {
   it("lists every knob with its class and description", async () => {
     const res = await request(app()).get("/api/automation/v1/planner/knobs");
     expect(res.status).toBe(200);
-    expect(res.body.knobs).toHaveLength(KNOB_DEFINITIONS.length);
-    for (const knob of res.body.knobs) {
+    expect((res.body as KnobsBody).knobs).toHaveLength(KNOB_DEFINITIONS.length);
+    for (const knob of (res.body as KnobsBody).knobs) {
       expect(["model", "policy", "alert"]).toContain(knob.class);
       expect(knob.description.length).toBeGreaterThan(0);
     }
@@ -64,7 +99,7 @@ describe("knob classes", () => {
   it("filters to one class, which is how the supervisor sees only policy knobs", async () => {
     const res = await request(app()).get("/api/automation/v1/planner/knobs?class=policy");
     expect(res.status).toBe(200);
-    const names = res.body.knobs.map((k: { name: string }) => k.name);
+    const names = (res.body as KnobsBody).knobs.map((k) => k.name);
 
     expect(names).toContain("mine.taskWeight");
     expect(names).toContain("credit.reserveFloor");
@@ -74,7 +109,7 @@ describe("knob classes", () => {
     expect(names).not.toContain("anomaly.profitDropFraction");
     // Model values describe the universe; editing one changes belief, not fact.
     expect(names).not.toContain("travel.speedUnitsPerHourPrior");
-    expect(res.body.knobs.every((k: { class: string }) => k.class === "policy")).toBe(true);
+    expect((res.body as KnobsBody).knobs.every((k) => k.class === "policy")).toBe(true);
   });
 
   it("rejects an unknown class rather than silently returning everything", async () => {
@@ -100,23 +135,23 @@ describe("knob classes", () => {
     it("lets the supervisor write a policy knob", async () => {
       const res = await machineWrite("mine.taskWeight", 2);
       expect(res.status).toBe(200);
-      expect(res.body.knob.value).toBe(2);
+      expect((res.body as KnobBody).knob.value).toBe(2);
     });
 
     it("refuses to let the supervisor widen its own alarm thresholds", async () => {
       const res = await machineWrite("anomaly.errorRateThreshold", 1);
       expect(res.status).toBe(403); // the credential is valid; it just doesn't reach this class
-      expect(res.body.error.message).toMatch(/is an alert knob/);
+      expect((res.body as ErrorBody).error.message).toMatch(/is an alert knob/);
 
       const after = await request(app()).get("/api/automation/v1/planner/knobs");
-      const knob = after.body.knobs.find((k: { name: string }) => k.name === "anomaly.errorRateThreshold");
+      const knob = findKnob(after.body as KnobsBody, "anomaly.errorRateThreshold");
       expect(knob.value).toBe(0.1); // the rejected write never took effect
     });
 
     it("refuses to let the supervisor rewrite what the planner believes about the universe", async () => {
       const res = await machineWrite("travel.speedUnitsPerHourPrior", 999);
       expect(res.status).toBe(403);
-      expect(res.body.error.message).toMatch(/is a model knob/);
+      expect((res.body as ErrorBody).error.message).toMatch(/is a model knob/);
     });
 
     it("fences a machine by kind even when its sub looks like an operator's", async () => {
@@ -138,7 +173,7 @@ describe("knob classes", () => {
         .set("Authorization", unknownKind)
         .send({ value: 45 });
       expect(refused.status).toBe(403);
-      expect(refused.body.error.message).toMatch(/model knob/);
+      expect((refused.body as ErrorBody).error.message).toMatch(/model knob/);
 
       const policy = await request(app())
         .put("/api/automation/v1/planner/knobs/mine.taskWeight")
@@ -154,7 +189,7 @@ describe("knob classes", () => {
           .set("Authorization", fleetControlOnlyBearer())
           .send({ value: 1 });
         expect(res.status).toBe(403);
-        expect(res.body.error.message).not.toMatch(/knob/);
+        expect((res.body as ErrorBody).error.message).not.toMatch(/knob/);
       }
     });
 
@@ -164,7 +199,7 @@ describe("knob classes", () => {
         .set("Authorization", bearerWithoutScope())
         .send({ value: 2 });
       expect(res.status).toBe(403);
-      expect(res.body.error.message).not.toMatch(/policy knob/);
+      expect((res.body as ErrorBody).error.message).not.toMatch(/policy knob/);
     });
 
     it("treats the retired X-Service-Secret header as no credential", async () => {
@@ -178,7 +213,7 @@ describe("knob classes", () => {
     it("records the supervisor's own sub as the actor, so a tuning change is attributable", async () => {
       await machineWrite("mine.taskWeight", 3);
       const events = await request(app()).get("/api/automation/v1/autopilot/events?limit=10");
-      const changed = events.body.events.find((e: { type: string }) => e.type === "knob_changed");
+      const changed = findChanged(events.body as EventsBody);
       expect(changed.detail).toMatchObject({ name: "mine.taskWeight", newValue: 3, actor: TEST_MACHINE });
     });
   });
@@ -188,8 +223,8 @@ describe("knob classes", () => {
       .put("/api/automation/v1/planner/knobs/travel.speedUnitsPerHourPrior").set("Authorization", bearer())
       .send({ value: 45 });
     expect(res.status).toBe(200);
-    expect(res.body.knob.value).toBe(45);
-    expect(res.body.knob.class).toBe("model");
+    expect((res.body as KnobBody).knob.value).toBe(45);
+    expect((res.body as KnobBody).knob.class).toBe("model");
   });
 
   it("lets an operator write an alert knob too, and records the operator's sub", async () => {
@@ -197,10 +232,10 @@ describe("knob classes", () => {
       .put("/api/automation/v1/planner/knobs/anomaly.errorRateThreshold").set("Authorization", bearer())
       .send({ value: 0.2 });
     expect(res.status).toBe(200);
-    expect(res.body.knob.class).toBe("alert");
+    expect((res.body as KnobBody).knob.class).toBe("alert");
 
     const events = await request(app()).get("/api/automation/v1/autopilot/events?limit=10");
-    const changed = events.body.events.find((e: { type: string }) => e.type === "knob_changed");
+    const changed = findChanged(events.body as EventsBody);
     expect(changed.detail).toMatchObject({ name: "anomaly.errorRateThreshold", newValue: 0.2, actor: TEST_ACTOR });
   });
 
@@ -212,7 +247,7 @@ describe("knob classes", () => {
     await syncKnobDefinitions(pool);
 
     const res = await request(app()).get("/api/automation/v1/planner/knobs");
-    const names = res.body.knobs.map((k: { name: string }) => k.name);
+    const names = (res.body as KnobsBody).knobs.map((k) => k.name);
     expect(names).not.toContain("legacy.removedKnob");
   });
 
@@ -221,7 +256,7 @@ describe("knob classes", () => {
     const clamps = await syncKnobDefinitions(pool);
 
     const res = await request(app()).get("/api/automation/v1/planner/knobs");
-    const knob = res.body.knobs.find((k: { name: string }) => k.name === "mine.taskWeight");
+    const knob = findKnob(res.body as KnobsBody, "mine.taskWeight");
     expect(knob.max).toBe(10);
     expect(knob.value).toBe(10);
 
@@ -242,7 +277,7 @@ describe("knob classes", () => {
     await syncKnobDefinitions(pool);
 
     const res = await request(app()).get("/api/automation/v1/planner/knobs");
-    const knob = res.body.knobs.find((k: { name: string }) => k.name === "mine.taskWeight");
+    const knob = findKnob(res.body as KnobsBody, "mine.taskWeight");
     expect(knob.value).toBe(4);
   });
 });

@@ -1,12 +1,19 @@
+import { forceFleetTick } from "../testSupport/appHooks";
 import http from "http";
-import { AddressInfo } from "net";
+import type { AddressInfo } from "net";
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { databaseUrl } from "../testSupport/databaseUrl";
+
+interface ShadowEvent {
+  type: string;
+  detail: { chosen?: string };
+}
 
 function makeShip(overrides: Record<string, unknown> = {}) {
   return {
@@ -28,7 +35,7 @@ function startStubServer(handler: (req: http.IncomingMessage, body: string, res:
   const calls: { method: string; url: string; body: string }[] = [];
   const server = http.createServer((req, res) => {
     let body = "";
-    req.on("data", (c) => (body += c));
+    req.on("data", (c: Buffer | string) => (body += String(c)));
     req.on("end", () => {
       calls.push({ method: req.method ?? "", url: req.url ?? "", body });
       handler(req, body, res);
@@ -52,7 +59,7 @@ describe("automation-service shadow mode (meta#21)", () => {
   let agentUrl: string, fleetUrl: string, navUrl: string;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -82,7 +89,7 @@ describe("automation-service shadow mode (meta#21)", () => {
       respondJson(res, 404, { error: "not found" });
     });
 
-    fleet = startStubServer((_req, _body, res) => respondJson(res, 200, { data: { agent: {} } }));
+    fleet = startStubServer((_req, _body, res) => { respondJson(res, 200, { data: { agent: {} } }); });
 
     nav = startStubServer((req, _body, res) => {
       if (req.url === "/systems/X1-TEST/waypoints") {
@@ -93,7 +100,7 @@ describe("automation-service shadow mode (meta#21)", () => {
           ],
         });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
@@ -102,9 +109,9 @@ describe("automation-service shadow mode (meta#21)", () => {
       new Promise<void>((r) => fleet.server.listen(0, r)),
       new Promise<void>((r) => nav.server.listen(0, r)),
     ]);
-    agentUrl = `http://127.0.0.1:${(agent.server.address() as AddressInfo).port}`;
-    fleetUrl = `http://127.0.0.1:${(fleet.server.address() as AddressInfo).port}`;
-    navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
+    agentUrl = `http://127.0.0.1:${String((agent.server.address() as AddressInfo).port)}`;
+    fleetUrl = `http://127.0.0.1:${String((fleet.server.address() as AddressInfo).port)}`;
+    navUrl = `http://127.0.0.1:${String((nav.server.address() as AddressInfo).port)}`;
   });
 
   let gateways: ReturnType<typeof createTestApp>[] = [];
@@ -113,9 +120,9 @@ describe("automation-service shadow mode (meta#21)", () => {
     await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
-      new Promise<void>((r) => agent.server.close(() => r())),
-      new Promise<void>((r) => fleet.server.close(() => r())),
-      new Promise<void>((r) => nav.server.close(() => r())),
+      new Promise<void>((r) => agent.server.close(() => { r(); })),
+      new Promise<void>((r) => fleet.server.close(() => { r(); })),
+      new Promise<void>((r) => nav.server.close(() => { r(); })),
     ]);
   });
 
@@ -134,7 +141,7 @@ describe("automation-service shadow mode (meta#21)", () => {
 
   /** Run the fleet loop exactly `times`, in place of sleeping and hoping. */
   const tick = async (gateway: ReturnType<typeof createTestApp>, times = 1) => {
-    for (let t = 0; t < times; t++) await gateway.locals.forceFleetTick();
+    for (let t = 0; t < times; t++) await forceFleetTick(gateway);
   };
 
   it("rejects an arm with an unrecognized mode", async () => {
@@ -152,19 +159,19 @@ describe("automation-service shadow mode (meta#21)", () => {
     expect(statusRes.body).toEqual({ status: "armed", mode: "shadow" });
 
     const armedEventRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=1");
-    expect(armedEventRes.body.events[0]).toMatchObject({ type: "armed", detail: { mode: "shadow" } }); // persisted, not just echoed in the HTTP response
+    expect((armedEventRes.body as { events: unknown[] }).events[0]).toMatchObject({ type: "armed", detail: { mode: "shadow" } }); // persisted, not just echoed in the HTTP response
 
     let shadowEvents = 0;
     for (let t = 0; t < 200 && shadowEvents < 2; t++) {
       const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
-      shadowEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "planner_shadow_assignment").length;
-      if (shadowEvents < 2) await gateway.locals.forceFleetTick();
+      shadowEvents = (eventsRes.body as { events: ShadowEvent[] }).events.filter((e) => e.type === "planner_shadow_assignment").length;
+      if (shadowEvents < 2) await forceFleetTick(gateway);
     }
     expect(shadowEvents).toBeGreaterThanOrEqual(2); // the cycle replays every tick, not just once
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
-    const shadowEvent = eventsRes.body.events.find((e: { type: string }) => e.type === "planner_shadow_assignment");
-    expect(shadowEvent.detail.chosen).toBe("X1-TEST-BELT"); // full scoring inputs, same shape as live's planner_assignment
+    const shadowEvent = (eventsRes.body as { events: ShadowEvent[] }).events.find((e) => e.type === "planner_shadow_assignment");
+    expect(shadowEvent?.detail.chosen).toBe("X1-TEST-BELT"); // full scoring inputs, same shape as live's planner_assignment
 
     // No ship_task row was ever created or mutated — shadow mode never assigns for real.
     const taskRes = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
@@ -188,7 +195,7 @@ describe("automation-service shadow mode (meta#21)", () => {
     expect(reArmRes.body).toEqual({ status: "armed", mode: "live" });
 
     for (let t = 0; t < 200 && fleet.calls.length === 0; t++) {
-      await gateway.locals.forceFleetTick();
+      await forceFleetTick(gateway);
     }
     // Live mode really does dispatch a ship-action call — specifically the
     // orbit dispatch toward the newly (live-)assigned target, not just any
@@ -199,6 +206,6 @@ describe("automation-service shadow mode (meta#21)", () => {
   it("defaults to live mode when no mode is specified, preserving pre-meta#21 behavior", async () => {
     const gateway = app();
     const armRes = await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
-    expect(armRes.body.mode).toBe("live");
+    expect((armRes.body as { mode: string }).mode).toBe("live");
   });
 });

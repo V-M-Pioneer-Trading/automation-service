@@ -32,7 +32,7 @@ describe("gameClients outbound credential", () => {
   it("sends the source's token as a bearer on a game read", async () => {
     upstream = await startStub(() => ({ status: 200, body: SHIP }));
 
-    await clientsFor({ getToken: async () => KNOWN_TOKEN }, upstream.url).getShip("MINING-1");
+    await clientsFor({ getToken: () => Promise.resolve(KNOWN_TOKEN) }, upstream.url).getShip("MINING-1");
 
     expect(upstream.calls).toHaveLength(1);
     expect(upstream.calls[0].headers.authorization).toBe(`Bearer ${KNOWN_TOKEN}`);
@@ -41,7 +41,7 @@ describe("gameClients outbound credential", () => {
   it("sends it on a game action too, and asks the source again for each call", async () => {
     upstream = await startStub(() => ({ status: 200, body: {} }));
     let n = 0;
-    const clients = clientsFor({ getToken: async () => `${KNOWN_TOKEN}-${++n}` }, upstream.url);
+    const clients = clientsFor({ getToken: () => Promise.resolve(`${KNOWN_TOKEN}-${String(++n)}`) }, upstream.url);
 
     await clients.getShip("MINING-1");
     await clients.orbit("MINING-1");
@@ -53,7 +53,9 @@ describe("gameClients outbound credential", () => {
   });
 
   describe("a token that cannot be had", () => {
-    const failing = (err: unknown): M2MTokenSource => ({ getToken: async () => Promise.reject(err) });
+    // The tests deliberately reject with non-Error values (see the cases below), so the reason is typed unknown.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the rejection reason is the test input
+    const failing = (err: unknown): M2MTokenSource => ({ getToken: () => Promise.reject(err) });
 
     const failure = async (source: M2MTokenSource): Promise<unknown> => {
       try {
@@ -121,7 +123,7 @@ describe("gameClients outbound credential", () => {
 
     const verdictFrom = async (status: number, body: unknown): Promise<unknown> => {
       upstream = await startStub(() => ({ status, body }));
-      const err = await clientsFor({ getToken: async () => KNOWN_TOKEN }, upstream.url)
+      const err = await clientsFor({ getToken: () => Promise.resolve(KNOWN_TOKEN) }, upstream.url)
         .getShip("RADOMSKY-TEST-1")
         .then(() => new Error("getShip did not fail"), (e: unknown) => e);
       expect(err).toBeInstanceOf(UpstreamCallError);

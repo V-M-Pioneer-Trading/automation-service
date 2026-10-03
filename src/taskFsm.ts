@@ -1,6 +1,6 @@
-import { Clock } from "./clock";
-import { GameClients, NavRoute, ShipSnapshot } from "./gameClients";
-import { ShipTask, TaskPhase } from "./shipTaskRepo";
+import type { Clock } from "./clock";
+import type { GameClients, NavRoute, ShipSnapshot } from "./gameClients";
+import type { ShipTask, TaskPhase } from "./shipTaskRepo";
 
 /**
  * What every task state machine shares.

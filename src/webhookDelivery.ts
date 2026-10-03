@@ -1,4 +1,4 @@
-import { Anomaly } from "./anomaly";
+import type { Anomaly } from "./anomaly";
 
 const DELIVERY_TIMEOUT_MS = 10_000;
 

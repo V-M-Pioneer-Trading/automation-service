@@ -1,4 +1,4 @@
-import { Clock } from "../clock";
+import type { Clock } from "../clock";
 
 /**
  * The test adapter for the `Clock` seam.

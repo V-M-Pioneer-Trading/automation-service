@@ -1,11 +1,15 @@
-import { ContractRecord, ContractRepo } from "./contractRepo";
-import { Contract, GameClients, MarketData, ShipSnapshot, WaypointSummary } from "./gameClients";
-import { KnobRepo, KnobValues } from "./knobs";
-import { MarketIntel, MarketIntelRepo } from "./marketIntelRepo";
-import { CalibratedModel, ObservationRepo, priorsFromKnobs } from "./observations";
-import { fuelAwareRoute, RouteWaypoint } from "./routeCost";
+import type { ContractRecord, ContractRepo } from "./contractRepo";
+import type { Contract, GameClients, MarketData, ShipSnapshot, WaypointSummary } from "./gameClients";
+import type { KnobRepo, KnobValues } from "./knobs";
+import type { MarketIntel, MarketIntelRepo } from "./marketIntelRepo";
+import type { CalibratedModel, ObservationRepo } from "./observations";
+import { priorsFromKnobs } from "./observations";
+import type { RouteWaypoint } from "./routeCost";
+import { fuelAwareRoute } from "./routeCost";
 import { breachesReserveFloor, cycleHours, contractScore, isViableCandidate, miningScore, scoutScore } from "./scoring";
-import { decisionDetail, MiningDecisionRecord, PlannerCandidate } from "./plannerDecision";
+import type { MiningDecisionRecord, PlannerCandidate } from "./plannerDecision";
+import { decisionDetail } from "./plannerDecision";
+import { lookup } from "./lookup";
 
 /**
  * Decides what a ship should do next.
@@ -205,7 +209,7 @@ export class Planner {
         const route = fuelAwareRoute(routeWaypoints, ship.nav.waypointSymbol, asteroid.symbol, ship.fuel.current, ship.fuel.capacity);
         if (route === null) return { waypoint: asteroid.symbol, reachable: false };
 
-        const measuredHere = model.creditsPerCycleByWaypoint[asteroid.symbol];
+        const measuredHere = lookup(model.creditsPerCycleByWaypoint, asteroid.symbol);
         const creditsPerCycle = measuredHere ?? model.fleetCreditsPerCycle;
         const creditsPerCycleSource: PlannerCandidate["creditsPerCycleSource"] =
           measuredHere !== undefined ? "measured-here" : model.provenance.creditsPerCycle === "measured" ? "fleet-average" : "prior";
@@ -367,7 +371,7 @@ export class Planner {
       detail: { contractId: contract.id, reason, ...extra },
     });
 
-    const deliverable = contract.terms.deliver[0];
+    const deliverable = contract.terms.deliver.at(0);
     if (deliverable === undefined) return unviable("no deliverables");
 
     let cheapest: { waypoint: string; price: number } | null = null;

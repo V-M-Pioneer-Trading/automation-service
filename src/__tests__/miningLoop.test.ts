@@ -1,12 +1,40 @@
+import { forceFleetTick } from "../testSupport/appHooks";
 import http from "http";
-import { AddressInfo } from "net";
+import type { AddressInfo } from "net";
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { databaseUrl } from "../testSupport/databaseUrl";
+
+interface ShipTask {
+  phase: string;
+  waitingUntil: string | null;
+  marketWaypoint: string | null;
+  tradeSymbol: string | null;
+  cycleRevenue: number;
+  cycleStartedAt: string | null;
+}
+interface ShipBody {
+  task: ShipTask;
+}
+interface EventsBody {
+  events: { type: string }[];
+}
+interface ObservationRow {
+  asteroid_waypoint: string;
+  revenue: string | number;
+  units_extracted: string | number;
+  travel_distance: string | number;
+  cycle_hours: string | number;
+}
+interface FlightRow {
+  distance: string | number;
+  hours: string | number;
+}
 
 /** Minimal mutable SpaceTraders-shaped ship the agent-service stub serves. */
 function makeShip(overrides: Record<string, unknown> = {}) {
@@ -37,7 +65,9 @@ function startStubServer(handler: (req: http.IncomingMessage, body: string, res:
   const calls: { method: string; url: string; body: string }[] = [];
   const server = http.createServer((req, res) => {
     let body = "";
-    req.on("data", (c) => (body += c));
+    req.on("data", (c: Buffer | string) => {
+      body += String(c);
+    });
     req.on("end", () => {
       calls.push({ method: req.method ?? "", url: req.url ?? "", body });
       handler(req, body, res);
@@ -76,7 +106,7 @@ describe("automation-service mining loop", () => {
   let multiGoodMode = false;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -107,7 +137,7 @@ describe("automation-service mining loop", () => {
         if (ship.nav.status === "IN_TRANSIT" && clock.now() >= new Date(ship.nav.route.arrival)) {
           ship.nav.status = "IN_ORBIT";
         }
-        const respond = () => respondJson(res, 200, ship);
+        const respond = () => { respondJson(res, 200, ship); };
         if (agentResponseDelayMs > 0) setTimeout(respond, agentResponseDelayMs);
         else respond();
         return;
@@ -117,8 +147,8 @@ describe("automation-service mining loop", () => {
         return;
       }
       if (req.url === "/ships/MINING-1/sell" && req.method === "POST") {
-        const parsed = body.length > 0 ? JSON.parse(body) : undefined;
         if (multiGoodMode) {
+          const parsed = JSON.parse(body) as { symbol: string; units: number };
           // Each market here only buys the one good it's stocked with — a
           // sell request for the wrong good is a bug, not something to paper
           // over, so this rejects instead of silently accepting it.
@@ -145,7 +175,6 @@ describe("automation-service mining loop", () => {
     });
 
     fleet = startStubServer((req, body, res) => {
-      const parsed = body.length > 0 ? JSON.parse(body) : undefined;
       if (req.url === "/ships/MINING-1/orbit") {
         ship.nav.status = "IN_ORBIT";
         respondJson(res, 200, { data: { nav: ship.nav } });
@@ -153,6 +182,7 @@ describe("automation-service mining loop", () => {
         ship.nav.status = "DOCKED";
         respondJson(res, 200, { data: { nav: ship.nav } });
       } else if (req.url === "/ships/MINING-1/navigate") {
+        const parsed = JSON.parse(body) as { waypointSymbol: string };
         const origin = ship.nav.waypointSymbol;
         ship.nav.status = "IN_TRANSIT";
         ship.nav.waypointSymbol = parsed.waypointSymbol;
@@ -200,7 +230,7 @@ describe("automation-service mining loop", () => {
         ship.fuel.current = ship.fuel.capacity;
         respondJson(res, 200, { data: { agent: {} } });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
@@ -224,7 +254,7 @@ describe("automation-service mining loop", () => {
       } else if (req.url === "/waypoints/X1-TEST-MARKET-2/market") {
         respondJson(res, 200, { symbol: "X1-TEST-MARKET-2", tradeGoods: [{ symbol: "COPPER_ORE", sellPrice: 40 }] });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
@@ -233,9 +263,9 @@ describe("automation-service mining loop", () => {
       new Promise<void>((r) => fleet.server.listen(0, r)),
       new Promise<void>((r) => nav.server.listen(0, r)),
     ]);
-    agentUrl = `http://127.0.0.1:${(agent.server.address() as AddressInfo).port}`;
-    fleetUrl = `http://127.0.0.1:${(fleet.server.address() as AddressInfo).port}`;
-    navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
+    agentUrl = `http://127.0.0.1:${String((agent.server.address() as AddressInfo).port)}`;
+    fleetUrl = `http://127.0.0.1:${String((fleet.server.address() as AddressInfo).port)}`;
+    navUrl = `http://127.0.0.1:${String((nav.server.address() as AddressInfo).port)}`;
   });
 
   let gateways: ReturnType<typeof createTestApp>[] = [];
@@ -247,9 +277,9 @@ describe("automation-service mining loop", () => {
     await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
-      new Promise<void>((r) => agent.server.close(() => r())),
-      new Promise<void>((r) => fleet.server.close(() => r())),
-      new Promise<void>((r) => nav.server.close(() => r())),
+      new Promise<void>((r) => agent.server.close(() => { r(); })),
+      new Promise<void>((r) => fleet.server.close(() => { r(); })),
+      new Promise<void>((r) => nav.server.close(() => { r(); })),
     ]);
   });
 
@@ -268,14 +298,14 @@ describe("automation-service mining loop", () => {
 
   /** Run the fleet loop exactly `times`, in place of sleeping and hoping. */
   const tick = async (gateway: ReturnType<typeof createTestApp>, times = 1) => {
-    for (let t = 0; t < times; t++) await gateway.locals.forceFleetTick();
+    for (let t = 0; t < times; t++) await forceFleetTick(gateway);
   };
 
   const waitForPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-      if (res.status === 200 && res.body.task.phase === phase) return res.body.task;
-      await gateway.locals.forceFleetTick();
+      if (res.status === 200 && (res.body as ShipBody).task.phase === phase) return (res.body as ShipBody).task;
+      await forceFleetTick(gateway);
     }
     throw new Error(`timed out waiting for phase ${phase}`);
   };
@@ -283,8 +313,8 @@ describe("automation-service mining loop", () => {
   const waitForWaiting = async (gateway: ReturnType<typeof createTestApp>, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-      if (res.status === 200 && res.body.task.waitingUntil !== null) return res.body.task;
-      await gateway.locals.forceFleetTick();
+      if (res.status === 200 && (res.body as ShipBody).task.waitingUntil !== null) return (res.body as ShipBody).task;
+      await forceFleetTick(gateway);
     }
     throw new Error("timed out waiting for a wait to be set");
   };
@@ -300,10 +330,10 @@ describe("automation-service mining loop", () => {
   ) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-      if (res.status === 200 && res.body.task.waitingUntil !== null && res.body.task.waitingUntil !== previousWaitingUntil) {
-        return res.body.task;
+      if (res.status === 200 && (res.body as ShipBody).task.waitingUntil !== null && (res.body as ShipBody).task.waitingUntil !== previousWaitingUntil) {
+        return (res.body as ShipBody).task;
       }
-      await gateway.locals.forceFleetTick();
+      await forceFleetTick(gateway);
     }
     throw new Error("timed out waiting for a new wait to be set");
   };
@@ -337,7 +367,7 @@ describe("automation-service mining loop", () => {
     await waitForPhase(gateway, "TRAVEL_TO_ASTEROID");
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
-    const eventTypes = eventsRes.body.events.map((e: { type: string }) => e.type).reverse();
+    const eventTypes = (eventsRes.body as EventsBody).events.map((e) => e.type).reverse();
     expect(eventTypes).toEqual(
       expect.arrayContaining([
         "mining_orbit",
@@ -354,7 +384,7 @@ describe("automation-service mining loop", () => {
       ])
     );
 
-    const finalTask = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
+    const finalTask = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => (r.body as ShipBody).task);
     expect(finalTask.marketWaypoint).toBeNull();
     expect(finalTask.tradeSymbol).toBeNull();
     expect(ship.fuel.current).toBe(ship.fuel.capacity);
@@ -366,7 +396,7 @@ describe("automation-service mining loop", () => {
     // Closing the loop: what the cycle actually earned is now on record against
     // the field it was earned at, so the next planner decision scores this
     // field on evidence rather than on the cold-start prior.
-    const { rows: observations } = await pool.query(
+    const { rows: observations } = await pool.query<ObservationRow>(
       "SELECT asteroid_waypoint, revenue, units_extracted, travel_distance, cycle_hours FROM mining_observation"
     );
     expect(observations).toHaveLength(1);
@@ -378,7 +408,7 @@ describe("automation-service mining loop", () => {
     expect(Number(observations[0].cycle_hours)).toBeGreaterThan(0);
 
     // And both legs were timed, which is what calibrates ship speed.
-    const { rows: flights } = await pool.query(
+    const { rows: flights } = await pool.query<FlightRow>(
       "SELECT distance, hours FROM travel_observation WHERE hours IS NOT NULL"
     );
     expect(flights).toHaveLength(2);
@@ -408,7 +438,7 @@ describe("automation-service mining loop", () => {
 
     await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
     const statusRes = await request(gateway).get("/api/automation/v1/autopilot/status");
-    expect(statusRes.body.status).toBe("aborted");
+    expect((statusRes.body as { status: string }).status).toBe("aborted");
   }, 10_000);
 
   it("resumes from the persisted phase after a restart instead of starting over", async () => {
@@ -424,7 +454,7 @@ describe("automation-service mining loop", () => {
     const restarted = app(); // fresh app instance == fresh process, same DB
     await request(restarted).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
-    const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
+    const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => (r.body as ShipBody).task);
     expect(task.phase).toBe("SURVEY"); // resumed, not reset to TRAVEL_TO_ASTEROID
 
     await tick(restarted, 5);
@@ -469,14 +499,14 @@ describe("automation-service mining loop", () => {
     // the abort below genuinely lands mid-flight. This used to be two sleeps
     // sized by guess — 30ms to hope the tick had started, 400ms to hope it had
     // finished. Holding the promise makes both exact.
-    const inFlight = gateway.locals.forceFleetTick();
+    const inFlight = forceFleetTick(gateway);
     await request(gateway).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer());
     await inFlight;
 
     expect(fleet.calls.some((c) => c.url === "/ships/MINING-1/orbit")).toBe(true); // dispatch really happened
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
-    const eventTypes = eventsRes.body.events.map((e: { type: string }) => e.type);
+    const eventTypes = (eventsRes.body as EventsBody).events.map((e) => e.type);
     expect(eventTypes).not.toContain("mining_orbit"); // never recorded as a real, autopilot-owned action
     expect(eventTypes).toContain("mining_discarded_after_abort");
   }, 10_000);
@@ -529,14 +559,14 @@ describe("automation-service mining loop", () => {
     await waitForPhase(gateway, "TRAVEL_TO_ASTEROID");
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
-    const eventTypes = eventsRes.body.events.map((e: { type: string }) => e.type).reverse();
+    const eventTypes = (eventsRes.body as EventsBody).events.map((e) => e.type).reverse();
     expect(eventTypes).not.toContain("mining_tick_error"); // never the repeating error loop meta#36 describes
     expect(eventTypes).toContain("mining_market_reselect");
     expect(eventTypes.filter((t: string) => t === "mining_market_selected")).toHaveLength(2); // two distinct market stops
 
     const soldSymbols = agent.calls
       .filter((c) => c.url === "/ships/MINING-1/sell")
-      .map((c) => JSON.parse(c.body).symbol)
+      .map((c) => (JSON.parse(c.body) as { symbol: string }).symbol)
       .sort();
     expect(soldSymbols).toEqual(["COPPER_ORE", "IRON_ORE"]); // both goods actually sold, not jettisoned
 

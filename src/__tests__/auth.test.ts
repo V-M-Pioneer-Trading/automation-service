@@ -1,7 +1,8 @@
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { MESSAGES } from "@v-m-pioneer-trading/clerk-client";
 import { createPool, migrate } from "../db";
+import { databaseUrl } from "../testSupport/databaseUrl";
 import { resetDatabase } from "../testSupport/resetDatabase";
 import { createTestApp } from "../testSupport/createTestApp";
 import {
@@ -16,6 +17,16 @@ import {
 } from "../testSupport/authTokens";
 
 const V1 = "/api/automation/v1";
+interface EventRow {
+  type: string;
+  detail: Record<string, unknown>;
+}
+const eventsOf = (res: request.Response): EventRow[] => (res.body as { events: EventRow[] }).events;
+const findEvent = (events: EventRow[], type: string): EventRow => {
+  const found = events.find((e) => e.type === type);
+  if (found === undefined) throw new Error(`no ${type} event logged`);
+  return found;
+};
 
 /**
  * The gate itself. Everything else in this suite exercises behaviour that
@@ -35,7 +46,7 @@ describe("automation-service authentication", () => {
   let pool: Pool;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -208,8 +219,8 @@ describe("automation-service authentication", () => {
         .set("Authorization", machineBearer())
         .send({ type: "ai_intervention", detail: { actor: "user_2SomeoneElse", note: "spoof" } });
 
-      const events = (await request(gateway).get(`${V1}/autopilot/events`)).body.events;
-      const logged = events.find((e: { type: string }) => e.type === "ai_intervention");
+      const events = eventsOf(await request(gateway).get(`${V1}/autopilot/events`));
+      const logged = findEvent(events, "ai_intervention");
       expect(logged.detail).toEqual({ actor: TEST_MACHINE, note: "spoof" });
     });
   });
@@ -224,8 +235,8 @@ describe("automation-service authentication", () => {
         .set("Authorization", bearer({ sub: TEST_MACHINE, kind: "machine", scopes: ["fleet:control"] }));
       await request(gateway).post(`${V1}/autopilot/abort`).set("Authorization", bearer());
 
-      const events = (await request(gateway).get(`${V1}/autopilot/events`)).body.events;
-      const actorOf = (type: string) => events.find((e: { type: string }) => e.type === type).detail.actor;
+      const events = eventsOf(await request(gateway).get(`${V1}/autopilot/events`));
+      const actorOf = (type: string) => findEvent(events, type).detail.actor;
       expect(actorOf("armed")).toBe("user_2Specific");
       expect(actorOf("paused")).toBe(TEST_MACHINE);
       expect(actorOf("aborted")).toBe(TEST_ACTOR);
@@ -235,8 +246,8 @@ describe("automation-service authentication", () => {
       const gateway = app();
       await request(gateway).put(`${V1}/planner/knobs/mine.taskWeight`).set("Authorization", bearer()).send({ value: 2 });
 
-      const events = (await request(gateway).get(`${V1}/autopilot/events`)).body.events;
-      const changed = events.find((e: { type: string }) => e.type === "knob_changed");
+      const events = eventsOf(await request(gateway).get(`${V1}/autopilot/events`));
+      const changed = findEvent(events, "knob_changed");
       expect(changed.detail.actor).toBe(TEST_ACTOR);
     });
 

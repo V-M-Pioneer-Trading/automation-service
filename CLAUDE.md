@@ -12,10 +12,11 @@ docker run --rm -d --name automation-service-test-db -p 5433:5432 -e POSTGRES_PA
 npm test                      # full suite; needs the Postgres above (jest.env.js defaults DATABASE_URL to it)
 npx jest src/__tests__/x.test.ts
 npm run typecheck             # tsc --noEmit; run before every commit, strict mode is on
+npm run lint                  # shared ESLint config (meta#105), --max-warnings 0; CI runs it before the tests
 npm run replay -- --set mine.taskWeight=2 --since 6h --verbose
 ```
 
-CI (`.github/workflows/container.yml`) runs `npm test` on PRs and on pushes against a fresh
+CI (`.github/workflows/container.yml`) runs `npm run lint` and `npm test` on PRs and on pushes against a fresh
 Postgres 16. The image is built, pushed and redeployed only on a push to `main`, and
 only after that test job passes. Deploy permissions (`packages`, `id-token`) are
 declared on the `docker` job, never at workflow level.

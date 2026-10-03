@@ -1,4 +1,5 @@
-import { Pool } from "pg";
+import { databaseUrl } from "../testSupport/databaseUrl";
+import type { Pool } from "pg";
 import { createPool } from "../db";
 import { DispatchLock } from "../dispatchLock";
 
@@ -12,7 +13,7 @@ describe("DispatchLock", () => {
   let pool: Pool;
 
   beforeAll(() => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
   });
 
   afterAll(async () => {
@@ -66,7 +67,7 @@ describe("DispatchLock", () => {
     // With the connection still checked out, `pool.end()` would wait on it
     // forever — which is why FleetScheduler.stop() releases the lock rather
     // than leaving it to process exit.
-    const drained = createPool(process.env.DATABASE_URL!);
+    const drained = createPool(databaseUrl());
     const short = new DispatchLock(drained, "dispatch:SHIP-5");
     await short.acquire();
     await short.release();

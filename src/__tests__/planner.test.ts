@@ -1,12 +1,54 @@
+import { forceFleetTick } from "../testSupport/appHooks";
 import http from "http";
-import { AddressInfo } from "net";
+import type { AddressInfo } from "net";
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer, machineBearer, TEST_MACHINE } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
+import { databaseUrl } from "../testSupport/databaseUrl";
 import { resetDatabase } from "../testSupport/resetDatabase";
+
+interface Candidate {
+  waypoint: string;
+  reachable: boolean;
+  breachesReserveFloor: boolean;
+  score: number;
+  creditsPerCycle?: number;
+  creditsPerCycleSource?: string;
+}
+interface AssignmentDetail {
+  chosen: string;
+  currentCredits: number;
+  candidates: Candidate[];
+  model: { provenance: { creditsPerCycle: string } };
+}
+interface Knob {
+  name: string;
+  value: number;
+  default: number;
+}
+interface ModelBody {
+  model: { provenance: Record<string, string>; speedUnitsPerHour: number };
+}
+interface TaskBody {
+  task: { asteroidWaypoint: string | null };
+}
+interface EventRow {
+  type: string;
+  detail: Record<string, unknown>;
+}
+const eventsOf = (res: request.Response): EventRow[] => (res.body as { events: EventRow[] }).events;
+const assignmentOf = (res: request.Response): { detail: AssignmentDetail } | undefined =>
+  (res.body as { events: { type: string; detail: AssignmentDetail }[] }).events.find((e) => e.type === "planner_assignment");
+const candidateAt = (candidates: Candidate[], waypoint: string): Candidate => {
+  const found = candidates.find((c) => c.waypoint === waypoint);
+  if (found === undefined) throw new Error(`no candidate ${waypoint}`);
+  return found;
+};
+const taskOf = (res: request.Response): TaskBody["task"] => (res.body as TaskBody).task;
+const knobsOf = (res: request.Response): Knob[] => (res.body as { knobs: Knob[] }).knobs;
 
 function makeShip(overrides: Record<string, unknown> = {}) {
   return {
@@ -28,7 +70,9 @@ function startStubServer(handler: (req: http.IncomingMessage, body: string, res:
   const calls: { method: string; url: string; body: string }[] = [];
   const server = http.createServer((req, res) => {
     let body = "";
-    req.on("data", (c) => (body += c));
+    req.on("data", (c: Buffer | string) => {
+      body += String(c);
+    });
     req.on("end", () => {
       calls.push({ method: req.method ?? "", url: req.url ?? "", body });
       handler(req, body, res);
@@ -54,7 +98,7 @@ describe("automation-service planner (meta#10)", () => {
   let agentUrl: string, fleetUrl: string, navUrl: string;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -113,7 +157,7 @@ describe("automation-service planner (meta#10)", () => {
           ],
         });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: `unhandled: ${req.url ?? ""}` });
       }
     });
 
@@ -122,9 +166,9 @@ describe("automation-service planner (meta#10)", () => {
       new Promise<void>((r) => fleet.server.listen(0, r)),
       new Promise<void>((r) => nav.server.listen(0, r)),
     ]);
-    agentUrl = `http://127.0.0.1:${(agent.server.address() as AddressInfo).port}`;
-    fleetUrl = `http://127.0.0.1:${(fleet.server.address() as AddressInfo).port}`;
-    navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
+    agentUrl = `http://127.0.0.1:${String((agent.server.address() as AddressInfo).port)}`;
+    fleetUrl = `http://127.0.0.1:${String((fleet.server.address() as AddressInfo).port)}`;
+    navUrl = `http://127.0.0.1:${String((nav.server.address() as AddressInfo).port)}`;
   });
 
   let gateways: ReturnType<typeof createTestApp>[] = [];
@@ -133,9 +177,9 @@ describe("automation-service planner (meta#10)", () => {
     await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
-      new Promise<void>((r) => agent.server.close(() => r())),
-      new Promise<void>((r) => fleet.server.close(() => r())),
-      new Promise<void>((r) => nav.server.close(() => r())),
+      new Promise<void>((r) => agent.server.close(() => { r(); })),
+      new Promise<void>((r) => fleet.server.close(() => { r(); })),
+      new Promise<void>((r) => nav.server.close(() => { r(); })),
     ]);
   });
 
@@ -154,14 +198,17 @@ describe("automation-service planner (meta#10)", () => {
 
   /** Run the fleet loop exactly `times`, in place of sleeping and hoping. */
   const tick = async (gateway: ReturnType<typeof createTestApp>, times = 1) => {
-    for (let t = 0; t < times; t++) await gateway.locals.forceFleetTick();
+    for (let t = 0; t < times; t++) await forceFleetTick(gateway);
   };
 
   const waitForAssignment = async (gateway: ReturnType<typeof createTestApp>, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-      if (res.status === 200 && res.body.task.asteroidWaypoint !== null) return res.body.task;
-      await gateway.locals.forceFleetTick();
+      if (res.status === 200) {
+        const task = taskOf(res);
+        if (task.asteroidWaypoint !== null) return task;
+      }
+      await forceFleetTick(gateway);
     }
     throw new Error("timed out waiting for a planner assignment");
   };
@@ -218,12 +265,9 @@ describe("automation-service planner (meta#10)", () => {
       await waitForAssignment(gateway);
 
       const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
-      const assignment = eventsRes.body.events.find((e: { type: string }) => e.type === "planner_assignment");
-      const candidates = assignment.detail.candidates as {
-        waypoint: string;
-        creditsPerCycle?: number;
-        creditsPerCycleSource?: string;
-      }[];
+      const assignment = assignmentOf(eventsRes);
+      if (assignment === undefined) throw new Error("no planner_assignment event logged");
+      const candidates = assignment.detail.candidates;
 
       const near = candidates.find((c) => c.waypoint === "X1-TEST-BELT-NEAR");
       const far = candidates.find((c) => c.waypoint === "X1-TEST-BELT-FAR");
@@ -239,13 +283,13 @@ describe("automation-service planner (meta#10)", () => {
 
       const modelRes = await request(gateway).get("/api/automation/v1/planner/model");
       expect(modelRes.status).toBe(200);
-      expect(modelRes.body.model.provenance).toMatchObject({
+      expect((modelRes.body as ModelBody).model.provenance).toMatchObject({
         creditsPerCycle: "prior",
         speed: "prior",
         overhead: "prior",
         fuel: "prior",
       });
-      expect(modelRes.body.model.speedUnitsPerHour).toBe(30);
+      expect((modelRes.body as ModelBody).model.speedUnitsPerHour).toBe(30);
     });
   });
 
@@ -254,14 +298,15 @@ describe("automation-service planner (meta#10)", () => {
 
     const listRes = await request(gateway).get("/api/automation/v1/planner/knobs");
     expect(listRes.status).toBe(200);
-    const reserveFloor = listRes.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
+    const reserveFloor = knobsOf(listRes).find((k) => k.name === "credit.reserveFloor");
+    if (reserveFloor === undefined) throw new Error("credit.reserveFloor knob missing");
     // Reads back at its default, whatever that is — the value itself is
     // pinned in knobClasses.test.ts, where the reason for it lives.
     expect(reserveFloor).toMatchObject({ value: reserveFloor.default, min: 0 });
 
     const okRes = await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").set("Authorization", bearer()).send({ value: 1000 });
     expect(okRes.status).toBe(200);
-    expect(okRes.body.knob.value).toBe(1000);
+    expect((okRes.body as { knob: Knob }).knob.value).toBe(1000);
 
     const rangeRes = await request(gateway).put("/api/automation/v1/planner/knobs/credit.reserveFloor").set("Authorization", bearer()).send({ value: -5 });
     expect(rangeRes.status).toBe(400);
@@ -270,13 +315,13 @@ describe("automation-service planner (meta#10)", () => {
     expect(unknownRes.status).toBe(404);
 
     const persistedRes = await request(gateway).get("/api/automation/v1/planner/knobs");
-    const persisted = persistedRes.body.knobs.find((k: { name: string }) => k.name === "credit.reserveFloor");
-    expect(persisted.value).toBe(1000); // the rejected write never took effect
+    const persisted = knobsOf(persistedRes).find((k) => k.name === "credit.reserveFloor");
+    expect(persisted?.value).toBe(1000); // the rejected write never took effect
 
     // The one successful write above is visible in the event feed with both
     // values — the rejected out-of-range and unknown-name writes are not.
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
-    const knobEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "knob_changed");
+    const knobEvents = eventsOf(eventsRes).filter((e) => e.type === "knob_changed");
     expect(knobEvents).toHaveLength(1);
     expect(knobEvents[0].detail).toMatchObject({
       name: "credit.reserveFloor",
@@ -302,7 +347,7 @@ describe("automation-service planner (meta#10)", () => {
     expect(missingPrefixRes.status).toBe(400);
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
-    const aiEvents = eventsRes.body.events.filter((e: { type: string }) => e.type === "ai_intervention");
+    const aiEvents = eventsOf(eventsRes).filter((e) => e.type === "ai_intervention");
     expect(aiEvents).toHaveLength(1);
     expect(aiEvents[0].detail).toMatchObject({ anomalyId: "42", rationale: "raised the failure limit", actor: TEST_MACHINE });
   });
@@ -315,21 +360,20 @@ describe("automation-service planner (meta#10)", () => {
     expect(task.asteroidWaypoint).toBe("X1-TEST-BELT-NEAR");
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
-    const assignmentEvent = eventsRes.body.events.find((e: { type: string }) => e.type === "planner_assignment");
+    const assignmentEvent = assignmentOf(eventsRes);
     expect(assignmentEvent).toBeDefined();
+    if (assignmentEvent === undefined) throw new Error("no planner_assignment event logged");
     expect(assignmentEvent.detail.chosen).toBe("X1-TEST-BELT-NEAR");
     expect(assignmentEvent.detail.currentCredits).toBe(100_000);
 
-    const candidateSymbols = assignmentEvent.detail.candidates.map((c: { waypoint: string }) => c.waypoint);
+    const candidateSymbols = assignmentEvent.detail.candidates.map((c) => c.waypoint);
     expect(candidateSymbols).toEqual(
       expect.arrayContaining(["X1-TEST-BELT-NEAR", "X1-TEST-BELT-FAR", "X1-TEST-BELT-UNREACHABLE"])
     );
-    const unreachable = assignmentEvent.detail.candidates.find(
-      (c: { waypoint: string }) => c.waypoint === "X1-TEST-BELT-UNREACHABLE"
-    );
+    const unreachable = candidateAt(assignmentEvent.detail.candidates, "X1-TEST-BELT-UNREACHABLE");
     expect(unreachable.reachable).toBe(false);
-    const near = assignmentEvent.detail.candidates.find((c: { waypoint: string }) => c.waypoint === "X1-TEST-BELT-NEAR");
-    const far = assignmentEvent.detail.candidates.find((c: { waypoint: string }) => c.waypoint === "X1-TEST-BELT-FAR");
+    const near = candidateAt(assignmentEvent.detail.candidates, "X1-TEST-BELT-NEAR");
+    const far = candidateAt(assignmentEvent.detail.candidates, "X1-TEST-BELT-FAR");
     expect(near.score).toBeGreaterThan(far.score); // closer field scores higher (less time per cycle)
   });
 
@@ -347,17 +391,18 @@ describe("automation-service planner (meta#10)", () => {
     // never established.
     await tick(gateway, 3);
 
-    const task = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
+    const task = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then(taskOf);
     expect(task.asteroidWaypoint).toBeNull();
 
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
-    const eventTypes = eventsRes.body.events.map((e: { type: string }) => e.type);
+    const eventTypes = eventsOf(eventsRes).map((e) => e.type);
     expect(eventTypes).toContain("planner_no_viable_target");
 
-    const assignmentEvent = eventsRes.body.events.find((e: { type: string }) => e.type === "planner_assignment");
+    const assignmentEvent = assignmentOf(eventsRes);
+    if (assignmentEvent === undefined) throw new Error("no planner_assignment event logged");
     const allBreach = assignmentEvent.detail.candidates
-      .filter((c: { reachable: boolean }) => c.reachable)
-      .every((c: { breachesReserveFloor: boolean }) => c.breachesReserveFloor === true);
+      .filter((c) => c.reachable)
+      .every((c) => c.breachesReserveFloor);
     expect(allBreach).toBe(true);
   });
 
@@ -370,10 +415,10 @@ describe("automation-service planner (meta#10)", () => {
 
     // Pre-fix a zero-weight field scored 0, which still beat "nothing else on
     // offer" and got assigned — the weight demoted mining instead of disabling it.
-    const task = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
+    const task = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then(taskOf);
     expect(task.asteroidWaypoint).toBeNull();
     const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=50");
-    expect(eventsRes.body.events.map((e: { type: string }) => e.type)).toContain("planner_no_viable_target");
+    expect(eventsOf(eventsRes).map((e) => e.type)).toContain("planner_no_viable_target");
   });
 
   it("reassigns away from a target after it fails repeatedly, without a separate periodic planner sweep", async () => {
@@ -389,8 +434,8 @@ describe("automation-service planner (meta#10)", () => {
     let failedEventSeen = false;
     for (let t = 0; t < 200 && !failedEventSeen; t++) {
       const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
-      failedEventSeen = eventsRes.body.events.some((e: { type: string }) => e.type === "mining_task_failed");
-      if (!failedEventSeen) await gateway.locals.forceFleetTick();
+      failedEventSeen = eventsOf(eventsRes).some((e) => e.type === "mining_task_failed");
+      if (!failedEventSeen) await forceFleetTick(gateway);
     }
     expect(failedEventSeen).toBe(true);
 
@@ -399,8 +444,8 @@ describe("automation-service planner (meta#10)", () => {
     let assignmentCount = 0;
     for (let t = 0; t < 200 && assignmentCount < 2; t++) {
       const eventsRes = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
-      assignmentCount = eventsRes.body.events.filter((e: { type: string }) => e.type === "planner_assignment").length;
-      if (assignmentCount < 2) await gateway.locals.forceFleetTick();
+      assignmentCount = eventsOf(eventsRes).filter((e) => e.type === "planner_assignment").length;
+      if (assignmentCount < 2) await forceFleetTick(gateway);
     }
     expect(assignmentCount).toBeGreaterThanOrEqual(2);
   }, 10_000);

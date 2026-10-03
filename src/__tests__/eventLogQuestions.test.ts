@@ -1,4 +1,5 @@
-import { Pool } from "pg";
+import { databaseUrl } from "../testSupport/databaseUrl";
+import type { Pool } from "pg";
 import { createPool, migrate } from "../db";
 import { EventLog } from "../eventLog";
 import { FakeClock } from "../testSupport/fakeClock";
@@ -24,7 +25,7 @@ describe("what the event log can be asked", () => {
   let events: EventLog;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 

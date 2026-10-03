@@ -106,7 +106,7 @@ describe("configFromEnv: auth-service machine token", () => {
   });
 
   it.each(["AUTH_M2M_TOKEN_URL", "AUTH_M2M_CALLER_SECRET"])("refuses to start without %s", (name) => {
-    delete process.env[name];
+    Reflect.deleteProperty(process.env, name);
 
     expect(() => configFromEnv()).toThrow(`${name} must be set`);
   });

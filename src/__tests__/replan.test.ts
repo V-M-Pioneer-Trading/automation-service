@@ -1,12 +1,29 @@
+import { forceFleetTick } from "../testSupport/appHooks";
 import http from "http";
-import { AddressInfo } from "net";
+import type { AddressInfo } from "net";
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { databaseUrl } from "../testSupport/databaseUrl";
+
+interface AutopilotEvent {
+  type: string;
+  detail: Record<string, unknown>;
+}
+interface ShipTask {
+  phase: string;
+  asteroidWaypoint: string | null;
+}
+interface EventsBody {
+  events: AutopilotEvent[];
+}
+interface ShipBody {
+  task: ShipTask;
+}
 
 function makeShip(overrides: Record<string, unknown> = {}) {
   return {
@@ -28,7 +45,9 @@ function startStubServer(handler: (req: http.IncomingMessage, body: string, res:
   const calls: { method: string; url: string; body: string }[] = [];
   const server = http.createServer((req, res) => {
     let body = "";
-    req.on("data", (c) => (body += c));
+    req.on("data", (c: Buffer | string) => {
+      body += String(c);
+    });
     req.on("end", () => {
       calls.push({ method: req.method ?? "", url: req.url ?? "", body });
       handler(req, body, res);
@@ -53,7 +72,7 @@ describe("automation-service fleet replan (meta#13)", () => {
   let agentUrl: string, fleetUrl: string, navUrl: string;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -76,7 +95,7 @@ describe("automation-service fleet replan (meta#13)", () => {
       } else if (req.url === "/contracts" && req.method === "GET") {
         respondJson(res, 200, []);
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
@@ -95,7 +114,7 @@ describe("automation-service fleet replan (meta#13)", () => {
           ],
         });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
@@ -104,9 +123,9 @@ describe("automation-service fleet replan (meta#13)", () => {
       new Promise<void>((r) => fleet.server.listen(0, r)),
       new Promise<void>((r) => nav.server.listen(0, r)),
     ]);
-    agentUrl = `http://127.0.0.1:${(agent.server.address() as AddressInfo).port}`;
-    fleetUrl = `http://127.0.0.1:${(fleet.server.address() as AddressInfo).port}`;
-    navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
+    agentUrl = `http://127.0.0.1:${String((agent.server.address() as AddressInfo).port)}`;
+    fleetUrl = `http://127.0.0.1:${String((fleet.server.address() as AddressInfo).port)}`;
+    navUrl = `http://127.0.0.1:${String((nav.server.address() as AddressInfo).port)}`;
   });
 
   let gateways: ReturnType<typeof createTestApp>[] = [];
@@ -114,9 +133,9 @@ describe("automation-service fleet replan (meta#13)", () => {
     await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
-      new Promise<void>((r) => agent.server.close(() => r())),
-      new Promise<void>((r) => fleet.server.close(() => r())),
-      new Promise<void>((r) => nav.server.close(() => r())),
+      new Promise<void>((r) => agent.server.close(() => { r(); })),
+      new Promise<void>((r) => fleet.server.close(() => { r(); })),
+      new Promise<void>((r) => nav.server.close(() => { r(); })),
     ]);
   });
 
@@ -136,15 +155,15 @@ describe("automation-service fleet replan (meta#13)", () => {
   const waitForAssignment = async (gateway: ReturnType<typeof createTestApp>, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-      if (res.status === 200 && res.body.task.asteroidWaypoint !== null) return res.body.task;
-      await gateway.locals.forceFleetTick();
+      if (res.status === 200 && (res.body as ShipBody).task.asteroidWaypoint !== null) return (res.body as ShipBody).task;
+      await forceFleetTick(gateway);
     }
     throw new Error("timed out waiting for a planner assignment");
   };
 
   const countReplans = async (gateway: ReturnType<typeof createTestApp>): Promise<number> => {
     const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=1000");
-    return res.body.events.filter((e: { type: string }) => e.type === "replan_executed").length;
+    return (res.body as EventsBody).events.filter((e) => e.type === "replan_executed").length;
   };
 
   const waitForReplanCount = async (
@@ -154,11 +173,11 @@ describe("automation-service fleet replan (meta#13)", () => {
   ): Promise<{ type: string; detail: Record<string, unknown> }[]> => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=1000");
-      const replans = res.body.events.filter((e: { type: string }) => e.type === "replan_executed");
+      const replans = (res.body as EventsBody).events.filter((e) => e.type === "replan_executed");
       if (replans.length >= count) return replans;
-      await gateway.locals.forceFleetTick();
+      await forceFleetTick(gateway);
     }
-    throw new Error(`timed out waiting for ${count} replan_executed events`);
+    throw new Error(`timed out waiting for ${String(count)} replan_executed events`);
   };
 
   it("a manual replan request logs a replan_executed event", async () => {
@@ -168,7 +187,7 @@ describe("automation-service fleet replan (meta#13)", () => {
 
     const res = await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
     expect(res.status).toBe(200);
-    expect(res.body.requested).toBe(true);
+    expect((res.body as { requested: boolean }).requested).toBe(true);
 
     const replans = await waitForReplanCount(gateway, 1);
     expect(replans[0].detail.reason).toBe("manual");
@@ -198,7 +217,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     // produce a second replan_executed while the clock hasn't moved.
     await request(gateway).post("/api/automation/v1/planner/replan").set("Authorization", bearer());
     // Ticks, not a sleep: the debounce has to hold across real replan attempts.
-    for (let t = 0; t < 5; t++) await gateway.locals.forceFleetTick();
+    for (let t = 0; t < 5; t++) await forceFleetTick(gateway);
     expect(await countReplans(gateway)).toBe(1);
 
     // Advance the clock past the debounce window and trigger again — now it runs.
@@ -232,8 +251,8 @@ describe("automation-service fleet replan (meta#13)", () => {
     expect(replans[0].detail.shipsConsidered).toBe(0);
 
     const after = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-    expect(after.body.task.asteroidWaypoint).toBe("X1-TEST-BELT");
-    expect(after.body.task.phase).toBe(assigned.phase);
+    expect((after.body as ShipBody).task.asteroidWaypoint).toBe("X1-TEST-BELT");
+    expect((after.body as ShipBody).task.phase).toBe(assigned.phase);
   }, 10_000);
 
   it("a replan that finds no viable target doesn't double-dispatch the ship's assignment in the same tick", async () => {
@@ -248,7 +267,7 @@ describe("automation-service fleet replan (meta#13)", () => {
     // getOrCreate and calls assignTarget once through the normal per-ship path
     // (no replan has been requested yet).
     for (let t = 0; t < 50 && agent.calls.filter((c) => c.url === "/contracts").length < 1; t++) {
-      await gateway.locals.forceFleetTick();
+      await forceFleetTick(gateway);
     }
     expect(agent.calls.filter((c) => c.url === "/contracts").length).toBe(1);
 

@@ -1,4 +1,4 @@
-import { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { createHash } from "crypto";
 
 /**
@@ -49,7 +49,7 @@ export class DispatchLock {
     const client = await this.pool.connect();
     try {
       const { rows } = await client.query<{ locked: boolean }>("SELECT pg_try_advisory_lock($1) AS locked", [this.lockKey()]);
-      if (rows[0]?.locked !== true) {
+      if (!rows[0]?.locked) {
         client.release();
         return false;
       }

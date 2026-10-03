@@ -1,5 +1,5 @@
-import { Pool, PoolClient } from "pg";
-import { Clock } from "./clock";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
+import type { Clock } from "./clock";
 
 export type ContractStatus = "declined" | "accepted" | "assigned" | "fulfilled";
 
@@ -31,7 +31,7 @@ export class ContractRepo {
   constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
   async knownIds(): Promise<Set<string>> {
-    const { rows } = await this.pool.query("SELECT contract_id FROM contract");
+    const { rows } = await this.pool.query<{ contract_id: string }>("SELECT contract_id FROM contract");
     return new Set(rows.map((r) => r.contract_id));
   }
 
@@ -64,17 +64,17 @@ export class ContractRepo {
 
   /** Accepted contracts not yet assigned to a ship — candidates for the planner's scoring. */
   async listAccepted(): Promise<ContractRecord[]> {
-    const { rows } = await this.pool.query(`SELECT * FROM contract WHERE status = 'accepted' ORDER BY contract_id`);
+    const { rows } = await this.pool.query<ContractRow>(`SELECT * FROM contract WHERE status = 'accepted' ORDER BY contract_id`);
     return rows.map(rowToRecord);
   }
 
   async get(contractId: string): Promise<ContractRecord | null> {
-    const { rows } = await this.pool.query(`SELECT * FROM contract WHERE contract_id = $1`, [contractId]);
+    const { rows } = await this.pool.query<ContractRow>(`SELECT * FROM contract WHERE contract_id = $1`, [contractId]);
     return rows.length === 0 ? null : rowToRecord(rows[0]);
   }
 }
 
-function rowToRecord(row: {
+interface ContractRow extends QueryResultRow {
   contract_id: string;
   trade_symbol: string;
   destination_waypoint: string;
@@ -85,7 +85,9 @@ function rowToRecord(row: {
   cycle_hours: string | number;
   travel_distance: string | number | null;
   procurement_market: string | null;
-}): ContractRecord {
+}
+
+function rowToRecord(row: ContractRow): ContractRecord {
   return {
     contractId: row.contract_id,
     tradeSymbol: row.trade_symbol,

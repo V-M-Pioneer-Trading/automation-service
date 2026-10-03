@@ -1,5 +1,6 @@
 import { Pool } from "pg";
-import { KnobClamp, syncKnobDefinitions } from "./knobs";
+import type { KnobClamp } from "./knobs";
+import { syncKnobDefinitions } from "./knobs";
 
 export function createPool(databaseUrl: string): Pool {
   return new Pool({ connectionString: databaseUrl });

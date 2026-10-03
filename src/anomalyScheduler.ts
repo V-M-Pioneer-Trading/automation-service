@@ -1,12 +1,12 @@
-import { Anomaly, AnomalyChecker, AnomalyRepo } from "./anomaly";
-import { AutopilotState } from "./autopilotState";
-import { Clock } from "./clock";
-import { EventLog } from "./eventLog";
-import { GameClients } from "./gameClients";
+import type { Anomaly, AnomalyChecker, AnomalyRepo } from "./anomaly";
+import type { AutopilotState } from "./autopilotState";
+import type { Clock } from "./clock";
+import type { EventLog } from "./eventLog";
+import type { GameClients } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
-import { KnobRepo } from "./knobs";
-import { ShipTaskRepo } from "./shipTaskRepo";
-import { WebhookDelivery } from "./webhookDelivery";
+import type { KnobRepo } from "./knobs";
+import type { ShipTaskRepo } from "./shipTaskRepo";
+import type { WebhookDelivery } from "./webhookDelivery";
 
 export interface AnomalyConfig {
   intervalMs: number;
@@ -101,12 +101,20 @@ export class AnomalyScheduler {
     return this.loop.runOnce();
   }
 
+  /**
+   * A call, not a property read: stop() can land at any await, and TypeScript
+   * keeps a `this.loop.stopped` it saw as false narrowed to false across them.
+   */
+  private isStopped(): boolean {
+    return this.loop.stopped;
+  }
+
   private async tick(): Promise<void> {
-    const { repo, checker, webhook, knobs, clock, tasks, shipSymbol, onAnomalyRecorded } = this.deps;
+    const { repo, checker, knobs, clock, tasks, shipSymbol, onAnomalyRecorded } = this.deps;
     await this.maybeSnapshotCredits();
     // stop() may have landed during that (real, potentially slow) HTTP call —
     // a tick that was told to stop must not go on to read or write state.
-    if (this.loop.stopped) return;
+    if (this.isStopped()) return;
 
     // One snapshot for the whole tick, the same rule `DecisionContext` enforces
     // for the planner. Nine separate reads meant an operator changing a
@@ -116,20 +124,20 @@ export class AnomalyScheduler {
 
     const task = shipSymbol === null ? null : await tasks.get(shipSymbol);
     const candidates = await checker.runChecks(shipSymbol ?? "unknown", task, knobValues);
-    if (this.loop.stopped) return;
+    if (this.isStopped()) return;
 
     const cooldownMs = knobValues["anomaly.dedupeCooldownMinutes"] * 60_000;
     const now = clock.now();
 
     for (const candidate of candidates) {
-      if (this.loop.stopped) return;
+      if (this.isStopped()) return;
       const recent = await repo.latestForKey(candidate.dedupeKey);
       if (recent !== null && now.getTime() - new Date(recent.detectedAt).getTime() < cooldownMs) continue;
-      if (this.loop.stopped) return; // latestForKey's await is itself a gap stop() could land in
+      if (this.isStopped()) return; // latestForKey's await is itself a gap stop() could land in
 
       const anomaly = await repo.record(candidate);
       onAnomalyRecorded?.();
-      if (this.loop.stopped) return; // don't attempt delivery for a stop that landed mid-persist
+      if (this.isStopped()) return; // don't attempt delivery for a stop that landed mid-persist
       await this.attemptDelivery(anomaly);
     }
 
@@ -154,7 +162,7 @@ export class AnomalyScheduler {
     if (webhook === null) return;
     const pending = await repo.listUndelivered(MAX_DELIVERY_ROUNDS, REDELIVERY_BATCH);
     for (const anomaly of pending) {
-      if (this.loop.stopped) return;
+      if (this.isStopped()) return;
       await this.attemptDelivery(anomaly);
     }
   }
@@ -178,7 +186,7 @@ export class AnomalyScheduler {
     if (state.getStatus() !== "armed" || state.getMode() !== "live") return;
     try {
       const agent = await gameClients.getAgent();
-      if (this.loop.stopped) return; // a leaked in-flight tick must not persist after stop()
+      if (this.isStopped()) return; // a leaked in-flight tick must not persist after stop()
       await events.append("agent_credits_snapshot", { credits: agent.credits });
     } catch {
       // Upstream hiccup — skip this tick's snapshot rather than failing the whole check cycle.

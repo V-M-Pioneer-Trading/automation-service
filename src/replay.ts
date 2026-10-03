@@ -1,9 +1,12 @@
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { createPool } from "./db";
 import { KNOB_DEFINITIONS_BY_NAME } from "./knobs";
+import { lookup } from "./lookup";
+import type {
+  MiningDecisionRecord,
+} from "./plannerDecision";
 import {
   DECISION_EVENT_TYPES,
-  MiningDecisionRecord,
   readMiningRecord,
   REPLAYABLE_DECISION_PREDICATE,
 } from "./plannerDecision";
@@ -49,12 +52,12 @@ interface ReplayDecision extends MiningDecisionRecord {
 }
 
 /** The `model` block, read back with each field optional: old rows predate some of them. */
-type ReplayedModel = {
+interface ReplayedModel {
   speedUnitsPerHour?: number;
   overheadHours?: number;
   fuelCreditsPerUnitDistance?: number;
   fleetCreditsPerCycle?: number;
-};
+}
 
 export interface ReplayOutcome {
   decision: ReplayDecision;
@@ -76,7 +79,7 @@ export function parseOverrides(pairs: string[]): Record<string, number> {
     if (definition === undefined) throw new Error(`unknown knob "${name}"`);
     if (!Number.isFinite(value)) throw new Error(`value for "${name}" must be a finite number`);
     if (value < definition.min || value > definition.max) {
-      throw new Error(`${name} must be between ${definition.min} and ${definition.max}, got ${value}`);
+      throw new Error(`${name} must be between ${String(definition.min)} and ${String(definition.max)}, got ${String(value)}`);
     }
     overrides[name] = value;
   }
@@ -101,7 +104,7 @@ export function parseDuration(raw: string): number {
  * whether the reserve floor excludes a candidate — is recomputed.
  */
 export function replayDecision(decision: ReplayDecision, overrides: Record<string, number>): ReplayOutcome {
-  const knob = (name: string, fallback: number): number => overrides[name] ?? decision.knobsUsed[name] ?? fallback;
+  const knob = (name: string, fallback: number): number => lookup(overrides, name) ?? lookup(decision.knobsUsed, name) ?? fallback;
   const model = decision.model as ReplayedModel;
 
   const speedUnitsPerHour = model.speedUnitsPerHour ?? knob("travel.speedUnitsPerHourPrior", 30);
@@ -151,9 +154,9 @@ export function replayDecision(decision: ReplayDecision, overrides: Record<strin
   });
 
   const best = replayedCandidates
-    .filter((c) => c.excluded === null && c.score !== null)
+    .filter((c) => c.excluded === null)
     .reduce<{ waypoint: string; score: number } | null>(
-      (winner, c) => (winner === null || (c.score as number) > winner.score ? { waypoint: c.waypoint, score: c.score as number } : winner),
+      (winner, c) => (winner === null || c.score > winner.score ? { waypoint: c.waypoint, score: c.score } : winner),
       null
     );
 
@@ -206,10 +209,10 @@ export async function loadDecisions(pool: Pool, since: Date, limit: number): Pro
 export function formatReport(outcomes: ReplayOutcome[], overrides: Record<string, number>, verbose: boolean): string {
   const lines: string[] = [];
   const overrideList = Object.entries(overrides)
-    .map(([name, value]) => `${name}=${value}`)
+    .map(([name, value]) => `${name}=${String(value)}`)
     .join(", ");
 
-  lines.push(`Replaying ${outcomes.length} decision(s) with ${overrideList || "no overrides"}`);
+  lines.push(`Replaying ${String(outcomes.length)} decision(s) with ${overrideList || "no overrides"}`);
   lines.push("");
 
   if (outcomes.length === 0) {
@@ -236,7 +239,7 @@ export function formatReport(outcomes: ReplayOutcome[], overrides: Record<string
   }
 
   lines.push("");
-  lines.push(`${changed.length} of ${outcomes.length} decision(s) would have changed.`);
+  lines.push(`${String(changed.length)} of ${String(outcomes.length)} decision(s) would have changed.`);
   if (changed.length === 0 && overrideList !== "") {
     lines.push("This knob change would not have altered any past assignment.");
   }
@@ -292,7 +295,7 @@ if (require.main === module) {
     }
   };
 
-  run().catch((err) => {
+  run().catch((err: unknown) => {
     console.error(String(err instanceof Error ? err.message : err));
     process.exit(1);
   });

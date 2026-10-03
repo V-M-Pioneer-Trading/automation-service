@@ -1,12 +1,15 @@
-import { GameClients } from "./gameClients";
-import { idleTask, ShipTask } from "./shipTaskRepo";
+import type { GameClients } from "./gameClients";
+import type { ShipTask } from "./shipTaskRepo";
+import { idleTask } from "./shipTaskRepo";
+import type {
+  TaskContext,
+  TickResult,
+} from "./taskFsm";
 import {
   dockIfNeeded,
   refuelIfNeeded,
   requireTarget,
   resolveWaitIfElapsed,
-  TaskContext,
-  TickResult,
   travelTo,
   withPhase,
   withWait,
@@ -77,7 +80,7 @@ async function dispatchSurvey(ctx: TaskContext): Promise<TickResult> {
     return { task: withPhase(task, "EXTRACT"), event: "mining_survey_ready", detail: { shipSymbol: task.shipSymbol } };
   }
   const res = await clients.survey(task.shipSymbol);
-  const survey = res.data.surveys[0] ?? null;
+  const survey = res.data.surveys.at(0) ?? null; // `.at(0)`, not `[0]`: typed as possibly absent
   return {
     task: withWait({ ...task, survey }, new Date(res.data.cooldown.expiration)),
     event: "mining_survey",
@@ -150,7 +153,7 @@ async function travelToMarket(ctx: TaskContext): Promise<TickResult> {
   // whatever's actually still in the hold — dispatchSell re-enters here (with
   // marketWaypoint reset) for each distinct good the chosen market doesn't
   // buy, so every stop picks the best market for whatever's left.
-  const remaining = ship.cargo.inventory[0]?.symbol ?? task.tradeSymbol ?? "";
+  const remaining = ship.cargo.inventory.at(0)?.symbol ?? task.tradeSymbol ?? "";
   const { waypoint: market, checked } = await findBestMarket(ship.nav.systemSymbol, remaining, clients);
   if (market === null) {
     return { task, event: "mining_no_market_found", detail: { shipSymbol: task.shipSymbol, tradeSymbol: remaining } };
