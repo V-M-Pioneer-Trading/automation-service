@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import type { Pool } from "pg";
 
 /**
  * Returns the database to a known state between tests.

@@ -1,7 +1,7 @@
-import { ContractRecord, ContractRepo, ContractStatus } from "./contractRepo";
-import { EventLog } from "./eventLog";
-import { Contract, GameClients, ShipSnapshot } from "./gameClients";
-import { ContractEvaluation, Planner } from "./planner";
+import type { ContractRecord, ContractRepo, ContractStatus } from "./contractRepo";
+import type { EventLog } from "./eventLog";
+import type { Contract, GameClients, ShipSnapshot } from "./gameClients";
+import type { ContractEvaluation, Planner } from "./planner";
 
 /**
  * Discovers contracts not yet seen, evaluates each deterministically
@@ -75,7 +75,8 @@ export async function discoverAndEvaluateContracts(deps: {
 
 /** What's frozen about a contract once it's been decided. Tracks only the first deliverable — see README. */
 function toRecord(contract: Contract, evaluation: ContractEvaluation, status: ContractStatus): ContractRecord {
-  const deliverable = contract.terms.deliver[0];
+  // `.at(0)`, unlike `[0]`, is typed as possibly absent, which an empty `deliver` list is.
+  const deliverable = contract.terms.deliver.at(0);
   return {
     contractId: contract.id,
     tradeSymbol: deliverable?.tradeSymbol ?? "",

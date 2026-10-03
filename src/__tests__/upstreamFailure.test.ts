@@ -1,18 +1,21 @@
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { AutopilotState } from "../autopilotState";
 import { ContractRepo } from "../contractRepo";
 import { createPool, migrate } from "../db";
 import { EventLog } from "../eventLog";
-import { classifyUpstreamStatus, createGameClients, GameClients, ShipSnapshot, UpstreamCallError, UpstreamFailureKind } from "../gameClients";
+import type { GameClients, ShipSnapshot, UpstreamFailureKind } from "../gameClients";
+import { classifyUpstreamStatus, createGameClients, UpstreamCallError } from "../gameClients";
 import { KnobRepo } from "../knobs";
 import { MarketIntelRepo } from "../marketIntelRepo";
 import { ObservationRepo } from "../observations";
 import { Planner } from "../planner";
 import { FleetScheduler, UNRELATED_FAILURE_RETRY_MULTIPLIER } from "../scheduler";
-import { ShipTask, ShipTaskRepo } from "../shipTaskRepo";
+import type { ShipTask } from "../shipTaskRepo";
+import { ShipTaskRepo } from "../shipTaskRepo";
 import { FakeClock } from "../testSupport/fakeClock";
 import { fakeGameClients } from "../testSupport/fakeGameClients";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { databaseUrl } from "../testSupport/databaseUrl";
 import { startStub, type Stub } from "../testSupport/stubServers";
 
 /**
@@ -104,7 +107,7 @@ describe("the scheduler branches on the verdict, not the status code", () => {
   let scheduler: FleetScheduler | null = null;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -151,7 +154,7 @@ describe("the scheduler branches on the verdict, not the status code", () => {
    * contract at CONTRACT_DELIVER never orbits, so an orbit-only stub let it
    * succeed and made the test about something else entirely.
    */
-  const arrange = (err: unknown | ((tick: number) => unknown), override?: GameClients, hold: { symbol: string; units: number }[] = []) => {
+  const arrange = (err: unknown, override?: GameClients, hold: { symbol: string; units: number }[] = []) => {
     let n = 0;
     const nextError = () => (typeof err === "function" ? (err as (tick: number) => unknown)(n++) : err);
     const clients =
@@ -159,11 +162,10 @@ describe("the scheduler branches on the verdict, not the status code", () => {
       (new Proxy({} as GameClients, {
         get: (_target, prop: string) =>
           prop === "getShip"
-            ? async () => ship(hold)
-            : async () => {
-                throw nextError();
-              },
-      }) as GameClients);
+            ? () => Promise.resolve(ship(hold))
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the rejection reason is the test input (deliberately not always an Error)
+            : () => Promise.reject(nextError()),
+      }));
     const tasks = new ShipTaskRepo(pool, clock);
     const events = new EventLog(pool, clock);
     const knobs = new KnobRepo(pool);
@@ -200,7 +202,7 @@ describe("the scheduler branches on the verdict, not the status code", () => {
 
   const eventTypes = async (events: EventLog): Promise<string[]> => (await events.list(200)).map((e) => e.type);
   const detailsOf = async (events: EventLog, type: string): Promise<Record<string, unknown>[]> =>
-    (await events.list(200)).filter((e) => e.type === type).map((e) => e.detail as Record<string, unknown>);
+    (await events.list(200)).filter((e) => e.type === type).map((e) => e.detail);
 
   it("an unreachable upstream does not spend the target's retry budget", async () => {
     // fleet-service is down. Nothing about X1-BELT is wrong, and no
@@ -289,7 +291,7 @@ describe("the scheduler branches on the verdict, not the status code", () => {
         navigationServiceUrl: agentService.url,
         agentServiceUrl: agentService.url,
         fleetServiceUrl: agentService.url,
-        authTokenSource: { getToken: async () => "machine-token" },
+        authTokenSource: { getToken: () => Promise.resolve("machine-token") },
       });
       const { tasks, events, scheduler: s } = arrange(new Error("unused: clients are real"), clients);
       await seedTask(tasks);
@@ -385,7 +387,9 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     // check whose job is to notice it.
     const { tasks, scheduler: s } = arrange(new UpstreamCallError("fleet-service: connect ECONNREFUSED", "unavailable"));
     await seedTask(tasks);
-    const before = (await tasks.get(SHIP))!.updatedAt;
+    const beforeTask = await tasks.get(SHIP);
+    if (beforeTask === null) throw new Error("expected the seeded task");
+    const before = beforeTask.updatedAt;
 
     clock.advance(20 * 60_000);
     await tick(s, 3);
@@ -504,9 +508,7 @@ describe("the scheduler branches on the verdict, not the status code", () => {
     // through handleTickFailure, and during an outage those are most of the
     // failures there are. A digest filtering on failureKind saw none of them.
     const clients = fakeGameClients({
-      getShip: async () => {
-        throw new UpstreamCallError("agent-service: connect ETIMEDOUT", "unavailable");
-      },
+      getShip: () => Promise.reject(new UpstreamCallError("agent-service: connect ETIMEDOUT", "unavailable")),
     });
     const { tasks, events, scheduler: s } = arrange(new Error("unused"), clients);
     await seedTask(tasks);

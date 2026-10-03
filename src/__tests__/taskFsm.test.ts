@@ -1,11 +1,12 @@
-import { Clock } from "../clock";
-import { ContractRecord } from "../contractRepo";
+import type { Clock } from "../clock";
+import type { ContractRecord } from "../contractRepo";
 import { advanceContractTask, startContractTask } from "../contractTask";
-import { ShipSnapshot } from "../gameClients";
+import type { ShipSnapshot } from "../gameClients";
 import { advanceMiningTask, startMiningTask } from "../miningTask";
 import { advanceScoutTask, startScoutTask } from "../scoutTask";
-import { ShipTask } from "../shipTaskRepo";
-import { refuelIfNeeded, resolveWaitIfElapsed, TaskContext } from "../taskFsm";
+import type { ShipTask } from "../shipTaskRepo";
+import type { TaskContext } from "../taskFsm";
+import { refuelIfNeeded, resolveWaitIfElapsed } from "../taskFsm";
 import { fakeGameClients } from "../testSupport/fakeGameClients";
 
 /**

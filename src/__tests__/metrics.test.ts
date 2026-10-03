@@ -1,17 +1,24 @@
+import { forceMetricsTick, stopBackgroundSchedulers } from "../testSupport/appHooks";
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
 import { MetricsRepo } from "../metrics";
+import { databaseUrl } from "../testSupport/databaseUrl";
+
+interface ContextBody {
+  rollups: { creditsPerHour: number; extractionUnits: number; errorRate: number; windowEnd: string }[];
+  events: unknown[];
+}
 
 describe("automation-service metrics rollups (meta#14)", () => {
   let pool: Pool;
   let clock: FakeClock;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -29,7 +36,7 @@ describe("automation-service metrics rollups (meta#14)", () => {
     // Otherwise a leaked MetricsScheduler keeps ticking against (and
     // polluting) the next test's freshly-truncated tables — see meta#15's
     // stopBackgroundSchedulers, added after this exact leak broke anomaly.test.ts.
-    await Promise.all(gateways.map((g) => g.locals.stopBackgroundSchedulers?.()));
+    await Promise.all(gateways.map((g) => stopBackgroundSchedulers(g)));
     gateways = [];
   });
 
@@ -73,8 +80,8 @@ describe("automation-service metrics rollups (meta#14)", () => {
     let rollups: { creditsPerHour: number; extractionUnits: number; errorRate: number }[] = [];
     for (let t = 0; t < 50 && rollups.length < 2; t++) {
       const res = await request(gateway).get("/api/automation/v1/metrics/context");
-      rollups = res.body.rollups;
-      if (rollups.length < 2) await gateway.locals.forceMetricsTick();
+      rollups = (res.body as ContextBody).rollups;
+      if (rollups.length < 2) await forceMetricsTick(gateway);
     }
     expect(rollups.length).toBeGreaterThanOrEqual(2); // the seeded baseline + the one just computed
 
@@ -92,11 +99,11 @@ describe("automation-service metrics rollups (meta#14)", () => {
     const gateway = app();
     clock.advance(1000);
 
-    let body: { rollups: unknown[]; events: unknown[] } = { rollups: [], events: [] };
+    let body: ContextBody = { rollups: [], events: [] };
     for (let t = 0; t < 50 && body.rollups.length < 2; t++) {
       const res = await request(gateway).get("/api/automation/v1/metrics/context");
-      body = res.body;
-      if (body.rollups.length < 2) await gateway.locals.forceMetricsTick();
+      body = res.body as ContextBody;
+      if (body.rollups.length < 2) await forceMetricsTick(gateway);
     }
     expect(body.rollups.length).toBeGreaterThanOrEqual(2);
     expect(body.events.length).toBeGreaterThan(0);
@@ -112,21 +119,21 @@ describe("automation-service metrics rollups (meta#14)", () => {
     let firstRollupCount = 0;
     for (let t = 0; t < 50 && firstRollupCount < 2; t++) {
       const res = await request(firstRun).get("/api/automation/v1/metrics/context");
-      firstRollupCount = res.body.rollups.length;
-      if (firstRollupCount < 2) await firstRun.locals.forceMetricsTick();
+      firstRollupCount = (res.body as ContextBody).rollups.length;
+      if (firstRollupCount < 2) await forceMetricsTick(firstRun);
     }
     expect(firstRollupCount).toBeGreaterThanOrEqual(2);
 
-    const rollupsBeforeRestart = (await request(firstRun).get("/api/automation/v1/metrics/context")).body.rollups;
+    const rollupsBeforeRestart = ((await request(firstRun).get("/api/automation/v1/metrics/context")).body as ContextBody).rollups;
     const latestWindowEnd = rollupsBeforeRestart[0].windowEnd;
 
     // Simulated restart: a fresh app instance, same DB, same (unadvanced) clock.
     const restarted = app();
     // Real ticks: the claim is that the restarted scheduler *ran* and computed
     // nothing because no time had elapsed, not merely that it was idle.
-    for (let t = 0; t < 5; t++) await restarted.locals.forceMetricsTick();
+    for (let t = 0; t < 5; t++) await forceMetricsTick(restarted);
 
-    const rollupsAfterRestart = (await request(restarted).get("/api/automation/v1/metrics/context")).body.rollups;
+    const rollupsAfterRestart = ((await request(restarted).get("/api/automation/v1/metrics/context")).body as ContextBody).rollups;
     // Same rollup count and same latest window_end as before the restart — no
     // new window opened until time actually elapses, and nothing was double-counted.
     expect(rollupsAfterRestart).toHaveLength(rollupsBeforeRestart.length);
@@ -147,7 +154,7 @@ describe("MetricsRepo.latestAgainstTrailingAverage", () => {
   let pool: Pool;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -177,11 +184,12 @@ describe("MetricsRepo.latestAgainstTrailingAverage", () => {
 
     const result = await new MetricsRepo(pool, { now: () => NOW }).latestAgainstTrailingAverage(NOW, 6 * 3_600_000);
     expect(result).not.toBeNull();
-    expect(result!.latest).toBe(300);
+    if (result === null) throw new Error("expected a result");
+    expect(result.latest).toBe(300);
     // 1500, not 1100: including the collapsed window would drag the baseline
     // toward it and make a real drop look shallower than it is.
-    expect(result!.trailingAverage).toBe(1500);
-    expect(result!.sampleCount).toBe(2);
+    expect(result.trailingAverage).toBe(1500);
+    expect(result.sampleCount).toBe(2);
   });
 
   it("does not reach past the trailing window", async () => {
@@ -190,8 +198,9 @@ describe("MetricsRepo.latestAgainstTrailingAverage", () => {
     await insertRollup(hoursAgo(1), 300);
 
     const result = await new MetricsRepo(pool, { now: () => NOW }).latestAgainstTrailingAverage(NOW, 6 * 3_600_000);
-    expect(result!.trailingAverage).toBe(1000);
-    expect(result!.sampleCount).toBe(1);
+    if (result === null) throw new Error("expected a result");
+    expect(result.trailingAverage).toBe(1000);
+    expect(result.sampleCount).toBe(1);
   });
 
   it("has no answer at all before the first rollup exists", async () => {

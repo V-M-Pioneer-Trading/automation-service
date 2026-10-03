@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import type { Pool, QueryResultRow } from "pg";
 import { withTransaction } from "./transaction";
 
 /**
@@ -342,7 +342,7 @@ export class KnobClassForbiddenError extends Error {
 
 export class KnobOutOfRangeError extends Error {
   constructor(name: string, value: number, min: number, max: number) {
-    super(`${name} must be between ${min} and ${max}, got ${value}`);
+    super(`${name} must be between ${String(min)} and ${String(max)}, got ${String(value)}`);
   }
 }
 
@@ -364,7 +364,7 @@ const KNOB_SELECT = "SELECT name, knob_class, value, default_value, min_value, m
 export async function syncKnobDefinitions(pool: Pool): Promise<KnobClamp[]> {
   const clamps: KnobClamp[] = [];
   for (const def of KNOB_DEFINITIONS) {
-    const { rows } = await pool.query(
+    const { rows } = await pool.query<{ value: string | number; previous_value: string | number | null }>(
       `INSERT INTO knob (name, knob_class, value, default_value, min_value, max_value)
        VALUES ($1, $2, $3, $3, $4, $5)
        ON CONFLICT (name) DO UPDATE SET
@@ -378,8 +378,10 @@ export async function syncKnobDefinitions(pool: Pool): Promise<KnobClamp[]> {
     );
     // The sub-select reads the pre-update row, so a difference here is a value
     // this boot changed without anyone asking — see KnobClamp.
-    const previous = rows[0]?.previous_value;
-    const value = Number(rows[0]?.value);
+    // `.at(0)`: typed as possibly absent, as the old `rows[0]?.` read was.
+    const row = rows.at(0);
+    const previous = row?.previous_value;
+    const value = Number(row?.value);
     if (previous !== null && previous !== undefined && Number(previous) !== value) {
       clamps.push({ name: def.name, previousValue: Number(previous), newValue: value, min: def.min, max: def.max });
     }
@@ -392,18 +394,18 @@ export class KnobRepo {
   constructor(private pool: Pool) {}
 
   async getAll(): Promise<Knob[]> {
-    const { rows } = await this.pool.query(`${KNOB_SELECT} ORDER BY name`);
+    const { rows } = await this.pool.query<KnobRow>(`${KNOB_SELECT} ORDER BY name`);
     return rows.map(rowToKnob);
   }
 
   /** Just the knobs of one class — how the AI supervisor's tool surface is narrowed to `policy`. */
   async getByClass(knobClass: KnobClass): Promise<Knob[]> {
-    const { rows } = await this.pool.query(`${KNOB_SELECT} WHERE knob_class = $1 ORDER BY name`, [knobClass]);
+    const { rows } = await this.pool.query<KnobRow>(`${KNOB_SELECT} WHERE knob_class = $1 ORDER BY name`, [knobClass]);
     return rows.map(rowToKnob);
   }
 
   async get(name: KnobName): Promise<number> {
-    const { rows } = await this.pool.query("SELECT value FROM knob WHERE name = $1", [name]);
+    const { rows } = await this.pool.query<{ value: string | number }>("SELECT value FROM knob WHERE name = $1", [name]);
     if (rows.length === 0) throw new KnobNotFoundError(name);
     return Number(rows[0].value);
   }
@@ -415,9 +417,9 @@ export class KnobRepo {
    * than turning up as `undefined` inside a score.
    */
   async getValues(): Promise<KnobValues> {
-    const { rows } = await this.pool.query("SELECT name, value FROM knob");
+    const { rows } = await this.pool.query<{ name: string; value: string | number }>("SELECT name, value FROM knob");
     const values: Partial<KnobValues> = {};
-    for (const row of rows as { name: string; value: string | number }[]) {
+    for (const row of rows) {
       if (KNOB_DEFINITIONS_BY_NAME.has(row.name)) values[row.name as KnobName] = Number(row.value);
     }
     for (const name of KNOB_NAMES) {
@@ -434,7 +436,7 @@ export class KnobRepo {
    */
   async set(name: string, value: number, allowedClasses?: readonly KnobClass[]): Promise<{ knob: Knob; previousValue: number }> {
     return withTransaction(this.pool, async (client) => {
-      const { rows } = await client.query(`${KNOB_SELECT} WHERE name = $1 FOR UPDATE`, [name]);
+      const { rows } = await client.query<KnobRow>(`${KNOB_SELECT} WHERE name = $1 FOR UPDATE`, [name]);
       if (rows.length === 0) throw new KnobNotFoundError(name);
       const knob = rowToKnob(rows[0]);
       // Checked here, inside the same row lock as the write, rather than by
@@ -452,14 +454,16 @@ export class KnobRepo {
   }
 }
 
-function rowToKnob(row: {
+interface KnobRow extends QueryResultRow {
   name: string;
   knob_class: string;
   value: string | number;
   default_value: string | number;
   min_value: string | number;
   max_value: string | number;
-}): Knob {
+}
+
+function rowToKnob(row: KnobRow): Knob {
   return {
     name: row.name,
     class: row.knob_class as KnobClass,

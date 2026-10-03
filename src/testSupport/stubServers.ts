@@ -30,7 +30,9 @@ export async function startStub(reply: Reply): Promise<Stub> {
   const calls: Recorded[] = [];
   const server: Server = createServer((req, res) => {
     let body = "";
-    req.on("data", (chunk) => (body += chunk));
+    req.on("data", (chunk: Buffer | string) => {
+      body += String(chunk);
+    });
     req.on("end", () => {
       const recorded = { method: req.method ?? "", url: req.url ?? "", headers: req.headers, body };
       calls.push(recorded);
@@ -42,12 +44,12 @@ export async function startStub(reply: Reply): Promise<Stub> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return {
-    url: `http://127.0.0.1:${port}`,
+    url: `http://127.0.0.1:${String(port)}`,
     calls,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
-        server.close(() => resolve());
+        server.close(() => { resolve(); });
       }),
   };
 }

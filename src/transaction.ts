@@ -1,4 +1,4 @@
-import { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 /**
  * Runs fn against a single checked-out client inside a BEGIN/COMMIT block,

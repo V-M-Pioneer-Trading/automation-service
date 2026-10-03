@@ -12,6 +12,7 @@
     "dev": "npm run build && npm start",
     "typecheck": "tsc --noEmit",
     "test": "jest",
+    "lint": "eslint . --max-warnings 0",
     "replay": "npm run build && node dist/replay.js"
   },
   "dependencies": {
@@ -27,9 +28,12 @@
     "@types/node": "^22.10.5",
     "@types/pg": "^8.11.10",
     "@types/supertest": "^6.0.2",
+    "@v-m-pioneer-trading/eslint-config": "https://github.com/V-M-Pioneer-Trading/eslint-config/releases/download/v1.0.0/v-m-pioneer-trading-eslint-config-1.0.0.tgz",
+    "eslint": "^10.12.0",
     "jest": "^29.7.0",
     "supertest": "^6.3.4",
     "ts-jest": "^29.2.5",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.71.0"
   }
 }

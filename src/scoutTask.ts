@@ -1,5 +1,7 @@
-import { idleTask, ShipTask } from "./shipTaskRepo";
-import { dockIfNeeded, refuelIfNeeded, requireTarget, resolveWaitIfElapsed, TaskContext, TickResult, travelTo } from "./taskFsm";
+import type { ShipTask } from "./shipTaskRepo";
+import { idleTask } from "./shipTaskRepo";
+import type { TaskContext, TickResult } from "./taskFsm";
+import { dockIfNeeded, refuelIfNeeded, requireTarget, resolveWaitIfElapsed, travelTo } from "./taskFsm";
 
 /**
  * SCOUT_TRAVEL → SCOUT_REFRESH → idle
@@ -54,6 +56,7 @@ async function dispatchRefresh(ctx: TaskContext, market: string): Promise<TickRe
  *
  * Takes the task it ignores, so all three predicates share one shape.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- the parameter is the shared predicate shape (see above); dropping it would make the three predicates differ
 export const scoutCargoAtStake = (_task: ShipTask): boolean => false;
 
 /**

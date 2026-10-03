@@ -24,7 +24,7 @@ import { inProcessIntrospector, MACHINE_TOKEN } from "./authTokens";
 // calls in tests (the stub servers they hit don't verify), so a fixed token
 // from the center's table is all that's needed. The real source and its fake
 // center are exercised in m2mToken.test.ts.
-const TEST_M2M_TOKEN_SOURCE: M2MTokenSource = { getToken: async () => MACHINE_TOKEN };
+const TEST_M2M_TOKEN_SOURCE: M2MTokenSource = { getToken: () => Promise.resolve(MACHINE_TOKEN) };
 
 export const createTestApp = (
   pool: Pool,

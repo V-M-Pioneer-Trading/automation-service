@@ -10,18 +10,22 @@ import {
   secured,
   type ExpressAuth,
 } from "@v-m-pioneer-trading/clerk-client";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
-import { AnomalyConfig, AnomalyScheduler } from "./anomalyScheduler";
+import type { AnomalyConfig } from "./anomalyScheduler";
+import { AnomalyScheduler } from "./anomalyScheduler";
 import { SCOPE_EVENTS_WRITE, SCOPE_FLEET_CONTROL, SCOPE_PLANNER_ADVISE } from "./auth";
 import { AutopilotState, InvalidTransitionError } from "./autopilotState";
-import { Clock, systemClock } from "./clock";
-import { ServiceConfig, configFromEnv, fetchStartupToken, resolveM2MTokenSource } from "./config";
+import type { Clock } from "./clock";
+import { systemClock } from "./clock";
+import type { ServiceConfig } from "./config";
+import { configFromEnv, fetchStartupToken, resolveM2MTokenSource } from "./config";
 import { ContractRepo } from "./contractRepo";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients } from "./gameClients";
-import { isKnobClass, KnobClass, KnobClassForbiddenError, KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
+import type { KnobClass } from "./knobs";
+import { isKnobClass, KnobClassForbiddenError, KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
 import { MetricsRepo } from "./metrics";
 import { MetricsScheduler } from "./metricsScheduler";
@@ -108,8 +112,10 @@ const NOTABLE_EVENT_TYPES = [
 
 /** Express 4 does not forward async-handler rejections to error middleware on its own. */
 type AsyncHandler = (req: express.Request, res: express.Response) => Promise<void>;
-const asyncHandler = (fn: AsyncHandler) => (req: express.Request, res: express.Response, next: express.NextFunction) =>
+// Returns void: Express 4 ignores the return value of a handler, so the promise was never used by anyone.
+const asyncHandler = (fn: AsyncHandler) => (req: express.Request, res: express.Response, next: express.NextFunction): void => {
   fn(req, res).catch(next);
+};
 
 const clampLimit = (raw: unknown, fallback: number, max: number): number => {
   const parsed = typeof raw === "string" ? Number(raw) : NaN;
@@ -126,7 +132,7 @@ const badRequest = (res: express.Response, message: string) => res.status(400).j
  * still 401 against a real agent/fleet-service: this fails safe rather than open.
  */
 const fallbackAuthTokenSource = (): M2MTokenSource => ({
-  getToken: async () => "unconfigured-machine-token",
+  getToken: () => Promise.resolve("unconfigured-machine-token"),
 });
 
 export interface MiningConfig {
@@ -188,7 +194,7 @@ export function createApp(options: AppOptions) {
   const requireControl = auth.requireScope(SCOPE_FLEET_CONTROL);
   const requireEventsWrite = auth.requireScope(SCOPE_EVENTS_WRITE);
   const requirePlannerAdvise = auth.requireScope(SCOPE_PLANNER_ADVISE);
-  const publicRead = auth.ignoreCredentials;
+  const publicRead = () => auth.ignoreCredentials();
 
   // secured(): a route registered on the app or on `api` below without a
   // declaration as its first handler refuses to start. "Public" is something a
@@ -306,7 +312,7 @@ export function createApp(options: AppOptions) {
     "/autopilot/arm",
     requireControl,
     asyncHandler(async (req, res) => {
-      const mode: unknown = req.body?.mode ?? "live";
+      const mode: unknown = (req.body as { mode?: unknown } | undefined)?.mode ?? "live";
       if (mode !== "live" && mode !== "shadow") {
         badRequest(res, 'mode must be "live" or "shadow"');
         return;
@@ -383,8 +389,9 @@ export function createApp(options: AppOptions) {
     "/events",
     requireEventsWrite,
     asyncHandler(async (req, res) => {
-      const type: unknown = req.body?.type;
-      const detail: unknown = req.body?.detail;
+      const body = req.body as { type?: unknown; detail?: unknown } | undefined;
+      const type: unknown = body?.type;
+      const detail: unknown = body?.detail;
       if (typeof type !== "string" || !type.startsWith("ai_")) {
         badRequest(res, 'type must be a string starting with "ai_"');
         return;
@@ -441,7 +448,7 @@ export function createApp(options: AppOptions) {
     "/planner/knobs/:name",
     requirePlannerAdvise,
     asyncHandler(async (req, res) => {
-      const value: unknown = req.body?.value;
+      const value: unknown = (req.body as { value?: unknown } | undefined)?.value;
       if (typeof value !== "number" || !Number.isFinite(value)) {
         badRequest(res, "value must be a finite number");
         return;
@@ -495,6 +502,7 @@ export function createApp(options: AppOptions) {
     api.post(
       "/planner/replan",
       requirePlannerAdvise,
+      // eslint-disable-next-line @typescript-eslint/require-await -- asyncHandler wants a promise-returning handler, and a throw from requestReplan must still reach next() as a rejection
       asyncHandler(async (_req, res) => {
         scheduler.requestReplan("manual");
         res.json({ requested: true });
@@ -561,6 +569,7 @@ export function createApp(options: AppOptions) {
     "entity.parse.failed": [400, "malformed JSON body"],
     "entity.too.large": [413, "request body too large"],
   };
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Express identifies an error handler by its four parameters, so `_next` must stay
   const onError: express.ErrorRequestHandler = (err: Error & { type?: unknown }, _req, res, _next) => {
     const bodyError = typeof err.type === "string" ? BODY_ERRORS[err.type] : undefined;
     if (bodyError !== undefined) {
@@ -647,11 +656,11 @@ if (require.main === module) {
           corsAllowedOrigin: config.corsAllowedOrigin,
           authTokenSource,
         }).listen(config.port, () => {
-          console.log(`automation-service listening on http://localhost:${config.port}`);
+          console.log(`automation-service listening on http://localhost:${String(config.port)}`);
         });
       });
     })
-    .catch((err) => {
+    .catch((err: unknown) => {
       console.error("automation-service failed to start:", err);
       process.exit(1);
     });

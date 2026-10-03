@@ -1,4 +1,4 @@
-import { GameClients } from "../gameClients";
+import type { GameClients } from "../gameClients";
 
 /**
  * The test adapter for the `GameClients` seam.

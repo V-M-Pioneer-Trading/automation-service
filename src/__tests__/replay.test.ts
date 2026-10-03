@@ -1,7 +1,8 @@
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { createPool, migrate } from "../db";
 import { formatReport, loadDecisions, parseDuration, parseOverrides, replayDecision } from "../replay";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { databaseUrl } from "../testSupport/databaseUrl";
 
 /**
  * Replay is what makes "every decision is replayable" a fact rather than a
@@ -90,10 +91,12 @@ describe("replayDecision", () => {
     const far = outcome.replayedCandidates.find((c) => c.waypoint === "X1-FAR");
     // Both scale by the same weight — the ranking between them is unchanged,
     // which is the honest answer: a global weight cannot reorder fields.
-    expect((far?.score ?? 0) / (near?.score ?? 1)).toBeCloseTo(
-      replayDecision(decision, {}).replayedCandidates.find((c) => c.waypoint === "X1-FAR")!.score! /
-        replayDecision(decision, {}).replayedCandidates.find((c) => c.waypoint === "X1-NEAR")!.score!
-    );
+    const baselineScore = (waypoint: string): number => {
+      const score = replayDecision(decision, {}).replayedCandidates.find((c) => c.waypoint === waypoint)?.score;
+      if (score === undefined || score === null) throw new Error(`no baseline score for ${waypoint}`);
+      return score;
+    };
+    expect((far?.score ?? 0) / (near?.score ?? 1)).toBeCloseTo(baselineScore("X1-FAR") / baselineScore("X1-NEAR"));
   });
 
   it("reports plainly when a change would have altered nothing", () => {
@@ -126,7 +129,7 @@ describe("loadDecisions", () => {
   let pool: Pool;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 

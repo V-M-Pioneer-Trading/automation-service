@@ -7,6 +7,16 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Shared ESLint config (meta#105)
+
+`@v-m-pioneer-trading/eslint-config` 1.0.0 (strict, type-checked typescript-eslint)
+is a devDependency, `eslint.config.mjs` only calls `base({ tsconfigRootDir })`,
+and `npm run lint` runs in the existing CI test job. Every violation was fixed
+in code; there is no baseline. Each `eslint-disable` carries its reason after
+` -- `. Typing changes only, no behaviour change: `pool.query` calls name their
+row type, `res.body` in tests is cast to the shape the test reads, and the
+test-only `app.locals` hooks are reached through `testSupport/appHooks.ts`.
+
 ## clerk-client 2.0.1: what separates scopes, and key case (meta fixture v6)
 
 The shared auth package moved from 2.0.0 to 2.0.1 (clerk-client#11,

@@ -1,5 +1,5 @@
-import { Pool } from "pg";
-import { Clock } from "./clock";
+import type { Pool } from "pg";
+import type { Clock } from "./clock";
 import { ACTION_ERROR_PREDICATE, EVENT_REVENUE_SQL, TASK_EVENT_PREDICATE } from "./fleetEvents";
 
 export interface MetricsRollup {
@@ -23,7 +23,12 @@ export class MetricsRepo {
 
   async computeAndSave(windowStart: Date, windowEnd: Date): Promise<MetricsRollup> {
     const computedAt = this.clock.now(); // read once so the returned rollup and the persisted row agree exactly
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{
+      revenue: string | number;
+      extraction_units: string | number;
+      total_task_events: string | number;
+      error_events: string | number;
+    }>(
       `SELECT
          COALESCE(SUM(${EVENT_REVENUE_SQL}), 0) AS revenue,
          COALESCE(SUM(CASE WHEN type = 'mining_extract' THEN (detail->>'units')::double precision ELSE 0 END), 0) AS extraction_units,
@@ -71,13 +76,13 @@ export class MetricsRepo {
     at: Date,
     trailingMs: number
   ): Promise<{ latest: number; trailingAverage: number; sampleCount: number } | null> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{ credits_per_hour: string | number; window_end: Date }>(
       `SELECT credits_per_hour, window_end FROM metrics_rollup WHERE window_end <= $1 ORDER BY window_end DESC LIMIT 1`,
       [at]
     );
     if (rows.length === 0) return null;
     const latestWindowEnd: Date = rows[0].window_end;
-    const { rows: trailing } = await this.pool.query(
+    const { rows: trailing } = await this.pool.query<{ avg: string | number | null; count: string | number }>(
       `SELECT AVG(credits_per_hour) AS avg, COUNT(*) AS count FROM metrics_rollup
        WHERE window_end > $1 AND window_end < $2`,
       [new Date(at.getTime() - trailingMs), latestWindowEnd]
@@ -91,12 +96,19 @@ export class MetricsRepo {
 
   /** The window_end of the most recent rollup, or null if none exist yet. */
   async latestWindowEnd(): Promise<Date | null> {
-    const { rows } = await this.pool.query("SELECT MAX(window_end) AS latest FROM metrics_rollup");
-    return rows[0]?.latest ?? null;
+    const { rows } = await this.pool.query<{ latest: Date | null }>("SELECT MAX(window_end) AS latest FROM metrics_rollup");
+    return rows.at(0)?.latest ?? null;
   }
 
   async list(limit = 20): Promise<MetricsRollup[]> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{
+      window_start: Date;
+      window_end: Date;
+      computed_at: Date;
+      credits_per_hour: number;
+      extraction_units: number;
+      error_rate: number;
+    }>(
       `SELECT window_start, window_end, computed_at, credits_per_hour, extraction_units, error_rate
        FROM metrics_rollup ORDER BY window_end DESC LIMIT $1`,
       [limit]

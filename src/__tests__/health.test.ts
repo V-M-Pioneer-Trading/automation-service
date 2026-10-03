@@ -1,5 +1,6 @@
+import { databaseUrl } from "../testSupport/databaseUrl";
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { createTestApp } from "../testSupport/createTestApp";
 import { createPool, migrate } from "../db";
 
@@ -7,7 +8,7 @@ describe("automation-service health endpoint", () => {
   let pool: Pool;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -31,7 +32,7 @@ describe("automation-service health endpoint", () => {
       .get("/health")
       .set("If-None-Match", 'W/"stale-etag-from-a-previous-poll"');
 
-    expect(res.headers["etag"]).toBeUndefined();
+    expect(res.headers.etag).toBeUndefined();
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "ok" });
   });

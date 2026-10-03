@@ -9,13 +9,15 @@
  * stub center (`stubServers.ts`), with the package's real `fetch` client.
  */
 
+import { stopBackgroundSchedulers } from "../testSupport/appHooks";
 import { createExpressAuth, MESSAGES, secured } from "@v-m-pioneer-trading/clerk-client";
 import express from "express";
 import { connect } from "net";
 import type { AddressInfo } from "net";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import request from "supertest";
 import { createPool, migrate } from "../db";
+import { databaseUrl } from "../testSupport/databaseUrl";
 import { createApp } from "../server";
 import {
   bearer,
@@ -31,6 +33,14 @@ import { resetDatabase } from "../testSupport/resetDatabase";
 import { startStub, startStubCenter, STUB_SECRET, type Stub } from "../testSupport/stubServers";
 
 const V1 = "/api/automation/v1";
+
+interface LoggedEvent {
+  type: string;
+  detail: Record<string, unknown>;
+}
+interface ErrorBody {
+  error: { message: string };
+}
 
 /** Every GET this service serves, with lifecycle-only wiring plus metrics and anomaly on. */
 const PUBLIC_READS = [
@@ -71,12 +81,12 @@ describe("introspection wiring", () => {
   };
 
   const eventsOf = async (type: string) =>
-    (await request(app()).get(`${V1}/autopilot/events?limit=100`)).body.events.filter(
-      (e: { type: string }) => e.type === type
+    ((await request(app()).get(`${V1}/autopilot/events?limit=100`)).body as { events: LoggedEvent[] }).events.filter(
+      (e) => e.type === type
     );
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
     center = await startStubCenter();
   });
@@ -92,7 +102,7 @@ describe("introspection wiring", () => {
   });
 
   afterEach(async () => {
-    for (const a of apps.splice(0)) await a.locals.stopBackgroundSchedulers();
+    for (const a of apps.splice(0)) await stopBackgroundSchedulers(a);
   });
 
   describe("public reads declare ignoreCredentials()", () => {
@@ -396,8 +406,8 @@ describe("introspection wiring", () => {
       const res = await write(MACHINE_TOKEN, name, 1);
 
       expect(res.status).toBe(403);
-      expect(res.body.error.message).toMatch(message);
-      expect(res.body.error.message).not.toBe(MESSAGES.missingScope);
+      expect((res.body as ErrorBody).error.message).toMatch(message);
+      expect((res.body as ErrorBody).error.message).not.toBe(MESSAGES.missingScope);
       expect(await eventsOf("knob_changed")).toHaveLength(0);
     });
 
@@ -450,23 +460,23 @@ describe("introspection wiring", () => {
       lines: string[]
     ): Promise<{ status: number; body: unknown }> => {
       const server = app().listen(0, "127.0.0.1");
-      await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+      await new Promise<void>((resolve) => server.once("listening", () => { resolve(); }));
       const { port } = server.address() as AddressInfo;
       try {
         const response = await new Promise<string>((resolve, reject) => {
           const socket = connect(port, "127.0.0.1");
           let data = "";
           socket.on("data", (chunk) => (data += chunk.toString("utf8")));
-          socket.on("end", () => resolve(data));
+          socket.on("end", () => { resolve(data); });
           socket.on("error", reject);
           const body = method === "POST" ? "{}" : "";
           socket.write(
             [
               `${method} ${path} HTTP/1.1`,
-              `Host: 127.0.0.1:${port}`,
+              `Host: 127.0.0.1:${String(port)}`,
               ...lines,
               ...(method === "POST" ? ["Content-Type: application/json"] : []),
-              `Content-Length: ${body.length}`,
+              `Content-Length: ${String(body.length)}`,
               "Connection: close",
               "",
               body,
@@ -478,7 +488,7 @@ describe("introspection wiring", () => {
         return { status, body: text.length > 0 ? JSON.parse(text) : null };
       } finally {
         server.closeAllConnections();
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await new Promise<void>((resolve) => server.close(() => { resolve(); }));
       }
     };
 

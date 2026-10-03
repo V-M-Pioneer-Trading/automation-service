@@ -1,5 +1,5 @@
-import { Pool } from "pg";
-import { Clock } from "./clock";
+import type { Pool, QueryResultRow } from "pg";
+import type { Clock } from "./clock";
 import {
   ACTION_ERROR_PREDICATE,
   CREDITS_SNAPSHOT_TYPE,
@@ -63,13 +63,13 @@ export class EventLog {
   }
 
   async list(limit = 100): Promise<EventLogEntry[]> {
-    const { rows } = await this.pool.query(`${ENTRY_SELECT} ${NEWEST_FIRST} LIMIT $1`, [limit]);
+    const { rows } = await this.pool.query<EntryRow>(`${ENTRY_SELECT} ${NEWEST_FIRST} LIMIT $1`, [limit]);
     return rows.map(rowToEntry);
   }
 
   /** Events at or after `since`, newest first, optionally restricted to `types`. */
   async listSince(since: Date, limit: number, types?: string[]): Promise<EventLogEntry[]> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<EntryRow>(
       `${ENTRY_SELECT}
        WHERE occurred_at >= $1 AND ($2::text[] IS NULL OR type = ANY($2::text[]))
        ${NEWEST_FIRST} LIMIT $3`,
@@ -87,12 +87,12 @@ export class EventLog {
    * perfectly well.
    */
   async creditsAt(at: Date): Promise<CreditsReading | null> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{ id: string | number; detail: { credits: number | string } }>(
       `SELECT id, detail FROM event_log WHERE type = $1 AND occurred_at <= $2 ${NEWEST_FIRST} LIMIT 1`,
       [CREDITS_SNAPSHOT_TYPE, at]
     );
     if (rows.length === 0) return null;
-    return { id: String(rows[0].id), credits: Number((rows[0].detail as { credits: number }).credits) };
+    return { id: String(rows[0].id), credits: Number(rows[0].detail.credits) };
   }
 
   /**
@@ -101,7 +101,7 @@ export class EventLog {
    * not been watching long enough?"
    */
   async firstCreditsSnapshotAt(): Promise<Date | null> {
-    const { rows } = await this.pool.query(`SELECT MIN(occurred_at) AS earliest FROM event_log WHERE type = $1`, [
+    const { rows } = await this.pool.query<{ earliest: Date | null }>(`SELECT MIN(occurred_at) AS earliest FROM event_log WHERE type = $1`, [
       CREDITS_SNAPSHOT_TYPE,
     ]);
     return rows[0].earliest === null ? null : new Date(rows[0].earliest);
@@ -113,7 +113,7 @@ export class EventLog {
    * so a freshly armed fleet gets a full window before it is called stalled.
    */
   async lastLifecycleTransitionAt(): Promise<Date | null> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{ occurred_at: Date }>(
       `SELECT occurred_at FROM event_log WHERE type = ANY($1::text[]) ${NEWEST_FIRST} LIMIT 1`,
       [LIFECYCLE_EVENT_TYPES]
     );
@@ -122,12 +122,12 @@ export class EventLog {
 
   /** What the fleet earned between two instants — every way it can earn, not just sells. */
   async earningsBetween(since: Date, until: Date): Promise<EarningsInWindow> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{ last_earned: Date | null; earnings: string | number }>(
       `SELECT MAX(occurred_at) AS last_earned, COUNT(*) AS earnings FROM event_log
        WHERE ${EARNING_EVENT_PREDICATE} AND occurred_at >= $1 AND occurred_at <= $2`,
       [since, until]
     );
-    return { count: Number(rows[0].earnings), lastEarnedAt: (rows[0].last_earned as Date | null) ?? null };
+    return { count: Number(rows[0].earnings), lastEarnedAt: rows[0].last_earned };
   }
 
   /**
@@ -136,7 +136,7 @@ export class EventLog {
    * from the same rows so they cannot describe different populations.
    */
   async taskOutcomesBetween(since: Date, until: Date): Promise<TaskOutcomes> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{ total: string | number; errors: string | number }>(
       `SELECT
          COUNT(*) FILTER (WHERE ${TASK_EVENT_PREDICATE}) AS total,
          COUNT(*) FILTER (WHERE ${ACTION_ERROR_PREDICATE}) AS errors
@@ -153,16 +153,23 @@ export class EventLog {
    * knowing about, whether or not a ship ever docked there.
    */
   async marketsPricedSince(since: Date): Promise<string[]> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{ market: string }>(
       `SELECT DISTINCT jsonb_array_elements_text(COALESCE(detail->'marketsChecked', '[]'::jsonb)) AS market
        FROM event_log WHERE type = $1 AND occurred_at >= $2`,
       [MARKET_SELECTION_TYPE, since]
     );
-    return (rows as { market: string }[]).map((r) => r.market);
+    return rows.map((r) => r.market);
   }
 }
 
-function rowToEntry(row: { id: string | number; occurred_at: Date; type: string; detail: Record<string, unknown> }): EventLogEntry {
+interface EntryRow extends QueryResultRow {
+  id: string | number;
+  occurred_at: Date;
+  type: string;
+  detail: Record<string, unknown>;
+}
+
+function rowToEntry(row: EntryRow): EventLogEntry {
   return {
     id: String(row.id),
     occurredAt: row.occurred_at.toISOString(),

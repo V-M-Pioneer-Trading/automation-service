@@ -235,7 +235,7 @@ export function classifyUpstreamStatus(status: number, body = ""): UpstreamFailu
 
 function hasValidationFields(body: string): boolean {
   try {
-    const parsed = JSON.parse(body) as { error?: { fields?: unknown } };
+    const parsed = JSON.parse(body) as { error?: { fields?: unknown } } | null;
     return parsed?.error?.fields !== undefined;
   } catch {
     return false; // not our envelope at all; fall back to the status
@@ -287,7 +287,7 @@ export function createGameClients(config: {
     }
     const text = await res.text();
     if (!res.ok) {
-      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: ${res.status} ${text}`, classifyUpstreamStatus(res.status, text));
+      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: ${String(res.status)} ${text}`, classifyUpstreamStatus(res.status, text));
     }
     return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
   }
@@ -361,7 +361,7 @@ export function createGameClients(config: {
     // calibrate fuel cost (observations.ts) — a refuel that reports no price
     // still refuels the ship, it just teaches us nothing.
     refuel: (shipSymbol: string) =>
-      fleetAction<{ data?: { transaction?: { units?: number; totalPrice?: number } } }>(shipSymbol, "refuel"),
+      fleetAction<{ data?: { transaction?: { units?: number; totalPrice?: number } } } | undefined>(shipSymbol, "refuel"),
 
     purchase: (shipSymbol: string, tradeSymbol: string, units: number) =>
       agentShipAction<{ data: { transaction: { totalPrice: number } } }>(shipSymbol, "purchase", {

@@ -1,21 +1,23 @@
-import { Pool } from "pg";
-import { AutopilotState } from "./autopilotState";
-import { Clock } from "./clock";
+import type { Pool } from "pg";
+import type { AutopilotState } from "./autopilotState";
+import type { Clock } from "./clock";
 import { discoverAndEvaluateContracts } from "./contractDiscovery";
 import { ContractRepo } from "./contractRepo";
 import { DispatchLock } from "./dispatchLock";
 import { advanceContractTask, contractCargoAtStake, startContractTask } from "./contractTask";
-import { EventLog } from "./eventLog";
-import { GameClients, ShipSnapshot, UNRELATED_FAILURE_KINDS, UpstreamCallError, UpstreamFailureKind } from "./gameClients";
+import type { EventLog } from "./eventLog";
+import type { GameClients, ShipSnapshot, UpstreamFailureKind } from "./gameClients";
+import { UNRELATED_FAILURE_KINDS, UpstreamCallError } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
-import { KnobRepo } from "./knobs";
-import { MarketIntelRepo } from "./marketIntelRepo";
+import type { KnobRepo } from "./knobs";
+import type { MarketIntelRepo } from "./marketIntelRepo";
 import { advanceMiningTask, miningCargoAtStake, startMiningTask } from "./miningTask";
-import { ObservationRepo } from "./observations";
-import { Planner } from "./planner";
+import type { ObservationRepo } from "./observations";
+import type { Planner } from "./planner";
 import { advanceScoutTask, scoutCargoAtStake, startScoutTask } from "./scoutTask";
-import { idleTask, isIdle, ShipTask, ShipTaskRepo } from "./shipTaskRepo";
-import { TickObservations, TickResult } from "./taskFsm";
+import type { ShipTask } from "./shipTaskRepo";
+import { idleTask, isIdle, ShipTaskRepo } from "./shipTaskRepo";
+import type { TickObservations, TickResult } from "./taskFsm";
 import { withTransaction } from "./transaction";
 
 /**
@@ -275,7 +277,7 @@ export class FleetScheduler {
         return advanceScoutTask(ctx);
       case "contract": {
         const contract = task.contractId === null ? null : await contracts.get(task.contractId);
-        if (contract === null) throw new Error(`contract ${task.contractId} not found for ship ${task.shipSymbol}`);
+        if (contract === null) throw new Error(`contract ${String(task.contractId)} not found for ship ${task.shipSymbol}`);
         return advanceContractTask({ ...ctx, contract });
       }
     }
@@ -378,7 +380,7 @@ export class FleetScheduler {
 
   /** `ship` is passed in wherever the caller already read it, so one assignment costs one ship read. */
   private async assignTarget(task: ShipTask, preloadedShip?: ShipSnapshot): Promise<void> {
-    const { clients, planner, clock, state, events, tasks, contracts, pool } = this.deps;
+    const { clients, planner, clock, state, events, tasks, pool } = this.deps;
     const ship = preloadedShip ?? (await clients.getShip(task.shipSymbol));
 
     const assignment = await planner.assignTarget({ ship, now: clock.now() });

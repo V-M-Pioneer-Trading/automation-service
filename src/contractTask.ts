@@ -1,12 +1,15 @@
-import { ContractRecord } from "./contractRepo";
-import { ContractPhase, idleTask, ShipTask, TaskPhase } from "./shipTaskRepo";
+import type { ContractRecord } from "./contractRepo";
+import type { ContractPhase, ShipTask, TaskPhase } from "./shipTaskRepo";
+import { idleTask } from "./shipTaskRepo";
+import type {
+  TaskContext,
+  TickResult,
+} from "./taskFsm";
 import {
   dockIfNeeded,
   refuelIfNeeded,
   requireTarget,
   resolveWaitIfElapsed,
-  TaskContext,
-  TickResult,
   travelTo,
   withPhase,
 } from "./taskFsm";
@@ -133,7 +136,10 @@ async function dispatchFulfill(ctx: TaskContext, contract: ContractRecord): Prom
   // `payment` is the key the earnings checks and the credits/hour rollup read
   // (see fleetEvents.ts) — without it a contract-running fleet reads as having
   // earned nothing at all.
-  const settled = await clients.fulfillContract(contract.contractId);
+  // Widened to what may really be missing: an empty response body parses to `undefined` (see `callJson`).
+  const settled = (await clients.fulfillContract(contract.contractId)) as
+    | { contract?: { terms?: { payment?: { onFulfilled?: number } } } }
+    | undefined;
   // Idle hands the ship back to the planner on its very next tick — mining, or
   // the next accepted contract, whichever scores higher.
   return {

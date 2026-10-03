@@ -1,11 +1,11 @@
-import { Pool } from "pg";
-import { AutopilotState } from "./autopilotState";
-import { Clock } from "./clock";
-import { KnobValues } from "./knobs";
-import { MarketIntelRepo } from "./marketIntelRepo";
-import { ShipTask } from "./shipTaskRepo";
-import { EventLog } from "./eventLog";
-import { MetricsRepo } from "./metrics";
+import type { Pool, QueryResultRow } from "pg";
+import type { AutopilotState } from "./autopilotState";
+import type { Clock } from "./clock";
+import type { KnobValues } from "./knobs";
+import type { MarketIntelRepo } from "./marketIntelRepo";
+import type { ShipTask } from "./shipTaskRepo";
+import type { EventLog } from "./eventLog";
+import type { MetricsRepo } from "./metrics";
 
 export interface Anomaly {
   id: string;
@@ -36,12 +36,12 @@ export class AnomalyRepo {
 
   /** Most recent anomaly recorded for a dedupe key, or null if this key has never fired. */
   async latestForKey(dedupeKey: string): Promise<Anomaly | null> {
-    const { rows } = await this.pool.query(`${ANOMALY_SELECT} WHERE dedupe_key = $1 ORDER BY detected_at DESC LIMIT 1`, [dedupeKey]);
+    const { rows } = await this.pool.query<AnomalyRow>(`${ANOMALY_SELECT} WHERE dedupe_key = $1 ORDER BY detected_at DESC LIMIT 1`, [dedupeKey]);
     return rows.length === 0 ? null : rowToAnomaly(rows[0]);
   }
 
   async record(candidate: AnomalyCandidate): Promise<Anomaly> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<AnomalyRow>(
       `INSERT INTO anomaly (type, dedupe_key, detected_at, detail) VALUES ($1, $2, $3, $4)
        RETURNING id, type, dedupe_key, detected_at, detail, delivered_at, delivery_attempts`,
       [candidate.type, candidate.dedupeKey, this.clock.now(), candidate.detail]
@@ -70,7 +70,7 @@ export class AnomalyRepo {
    * condition cleared, no re-fire would ever replace the missed page.
    */
   async listUndelivered(maxRounds: number, limit: number): Promise<Anomaly[]> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<AnomalyRow>(
       // delivery_attempts counts *rounds* — one per deliver() call, each of
       // which retries internally — not individual HTTP requests.
       `${ANOMALY_SELECT} WHERE delivered_at IS NULL AND delivery_attempts < $1
@@ -82,12 +82,12 @@ export class AnomalyRepo {
 
   /** Anomalies detected at or after `since`, newest first — feeds the digest endpoint. */
   async listSince(since: Date, limit: number): Promise<Anomaly[]> {
-    const { rows } = await this.pool.query(`${ANOMALY_SELECT} WHERE detected_at >= $1 ORDER BY detected_at DESC LIMIT $2`, [since, limit]);
+    const { rows } = await this.pool.query<AnomalyRow>(`${ANOMALY_SELECT} WHERE detected_at >= $1 ORDER BY detected_at DESC LIMIT $2`, [since, limit]);
     return rows.map(rowToAnomaly);
   }
 }
 
-function rowToAnomaly(row: {
+interface AnomalyRow extends QueryResultRow {
   id: string | number;
   type: string;
   dedupe_key: string;
@@ -95,7 +95,9 @@ function rowToAnomaly(row: {
   detail: Record<string, unknown>;
   delivered_at: Date | null;
   delivery_attempts: number;
-}): Anomaly {
+}
+
+function rowToAnomaly(row: AnomalyRow): Anomaly {
   return {
     id: String(row.id),
     type: row.type,
@@ -107,7 +109,7 @@ function rowToAnomaly(row: {
   };
 }
 
-type Reason = { reason: string; detail: Record<string, unknown> };
+interface Reason { reason: string; detail: Record<string, unknown> }
 
 /**
  * Five health checks, each answering a different question about the fleet:
@@ -183,6 +185,7 @@ export class AnomalyChecker {
    * idleness, so a long transit doesn't page; the clock starts when the wait
    * ends and the row still hasn't moved.
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- stays async so a throw is a rejected promise, as for its siblings in runChecks' Promise.all
   private async checkShipIdle(shipSymbol: string, task: ShipTask, now: Date, knobs: KnobValues): Promise<AnomalyCandidate | null> {
     const thresholdMinutes = knobs["anomaly.shipIdleMinutes"];
     const idleSince = task.waitingUntil !== null && task.waitingUntil > task.updatedAt ? task.waitingUntil : task.updatedAt;
@@ -228,7 +231,7 @@ export class AnomalyChecker {
     return {
       type: "earnings_stalled",
       dedupeKey: "earnings_stalled",
-      detail: { reasons: reasons.map((r) => r.reason), ...Object.assign({}, ...reasons.map((r) => r.detail)) },
+      detail: { reasons: reasons.map((r) => r.reason), ...(Object.assign({}, ...reasons.map((r) => r.detail)) as Record<string, unknown>) },
     };
   }
 
@@ -314,10 +317,10 @@ export class AnomalyChecker {
     };
   }
 
-  private async checkConsecutiveFailures(shipSymbol: string, failureCount: number, knobs: KnobValues): Promise<AnomalyCandidate | null> {
+  private checkConsecutiveFailures(shipSymbol: string, failureCount: number, knobs: KnobValues): Promise<AnomalyCandidate | null> {
     const limit = knobs["anomaly.consecutiveFailureLimit"];
-    if (failureCount < limit) return null;
-    return { type: "consecutive_failures", dedupeKey: `consecutive_failures:${shipSymbol}`, detail: { shipSymbol, failureCount, limit } };
+    if (failureCount < limit) return Promise.resolve(null);
+    return Promise.resolve({ type: "consecutive_failures", dedupeKey: `consecutive_failures:${shipSymbol}`, detail: { shipSymbol, failureCount, limit } });
   }
 
   private async checkErrorRate(now: Date, knobs: KnobValues): Promise<AnomalyCandidate | null> {

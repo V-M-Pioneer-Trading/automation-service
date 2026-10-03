@@ -1,7 +1,9 @@
+import { databaseUrl } from "../testSupport/databaseUrl";
+import { forceFleetTick } from "../testSupport/appHooks";
 import http from "http";
-import { AddressInfo } from "net";
+import type { AddressInfo } from "net";
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
@@ -42,11 +44,17 @@ function makeContract(overrides: Record<string, unknown> = {}) {
   };
 }
 
+interface StubBody { symbol: string; units: number; waypointSymbol: string; tradeSymbol: string }
+interface EventRow { type: string; detail: Record<string, unknown> }
+interface TaskRow { taskKind: string; contractId: string | null; asteroidWaypoint: string | null; phase: string; waitingUntil: string | null }
+
 function startStubServer(handler: (req: http.IncomingMessage, body: string, res: http.ServerResponse) => void) {
   const calls: { method: string; url: string; body: string }[] = [];
   const server = http.createServer((req, res) => {
     let body = "";
-    req.on("data", (c) => (body += c));
+    req.on("data", (c: Buffer | string) => {
+      body += String(c);
+    });
     req.on("end", () => {
       calls.push({ method: req.method ?? "", url: req.url ?? "", body });
       handler(req, body, res);
@@ -67,10 +75,12 @@ const respondJson = (res: http.ServerResponse, status: number, data: unknown) =>
  * the transient DB failure meta#28/#30 guard against, without needing to
  * actually break Postgres.
  */
+type LooseFn = (...args: unknown[]) => unknown;
+
 function makeFlakyPool(pool: Pool, shouldFail: (sql: string) => boolean): Pool {
   let failed = false;
-  const flakyQuery = (originalQuery: (...args: any[]) => any) => {
-    return (...args: any[]) => {
+  const flakyQuery = (originalQuery: LooseFn) => {
+    return (...args: unknown[]) => {
       const sql = args[0];
       if (!failed && typeof sql === "string" && shouldFail(sql)) {
         failed = true;
@@ -81,22 +91,22 @@ function makeFlakyPool(pool: Pool, shouldFail: (sql: string) => boolean): Pool {
   };
 
   return new Proxy(pool, {
-    get(target: any, prop, receiver) {
+    get(target, prop, receiver) {
       if (prop === "query") return flakyQuery(target.query.bind(target));
       if (prop === "connect") {
-        return async (...args: any[]) => {
-          const client = await target.connect(...args);
+        return async (...args: unknown[]) => {
+          const client = await (target.connect.bind(target) as unknown as (...a: unknown[]) => Promise<PoolClient>)(...args);
           return new Proxy(client, {
-            get(ctarget: any, cprop, creceiver) {
+            get(ctarget, cprop, creceiver) {
               if (cprop === "query") return flakyQuery(ctarget.query.bind(ctarget));
-              return Reflect.get(ctarget, cprop, creceiver);
+              return Reflect.get(ctarget, cprop, creceiver) as unknown;
             },
           });
         };
       }
-      return Reflect.get(target, prop, receiver);
+      return Reflect.get(target, prop, receiver) as unknown;
     },
-  }) as unknown as Pool;
+  });
 }
 
 describe("automation-service contract loop (meta#11)", () => {
@@ -114,7 +124,7 @@ describe("automation-service contract loop (meta#11)", () => {
   let agentUrl: string, fleetUrl: string, navUrl: string;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -133,8 +143,14 @@ describe("automation-service contract loop (meta#11)", () => {
     includeAsteroidField = false;
     failPurchase = false;
 
+    const contractById = (id: string | undefined) => {
+      const found = contracts.find((c) => c.id === id);
+      if (found === undefined) throw new Error(`no stub contract ${String(id)}`);
+      return found;
+    };
+
     agent = startStubServer((req, body, res) => {
-      const parsed = body.length > 0 ? JSON.parse(body) : undefined;
+      const parsed = (body.length > 0 ? JSON.parse(body) : undefined) as StubBody;
       if (req.url === "/agent" && req.method === "GET") {
         respondJson(res, 200, { credits: 100_000 });
       } else if (req.url === "/ships/MINING-1" && req.method === "GET") {
@@ -146,12 +162,12 @@ describe("automation-service contract loop (meta#11)", () => {
         respondJson(res, 200, contracts);
       } else if (req.url?.match(/^\/contracts\/[\w-]+\/accept$/) && req.method === "POST") {
         const id = req.url.split("/")[2];
-        const contract = contracts.find((c) => c.id === id)!;
+        const contract = contractById(id);
         contract.accepted = true;
         respondJson(res, 200, { agent: { credits: 100_000 - contract.terms.payment.onAccepted }, contract });
       } else if (req.url?.match(/^\/contracts\/[\w-]+\/fulfill$/) && req.method === "POST") {
         const id = req.url.split("/")[2];
-        const contract = contracts.find((c) => c.id === id)!;
+        const contract = contractById(id);
         contract.fulfilled = true;
         respondJson(res, 200, { agent: { credits: 100_000 + contract.terms.payment.onFulfilled }, contract });
       } else if (req.url === "/ships/MINING-1/purchase") {
@@ -168,13 +184,12 @@ describe("automation-service contract loop (meta#11)", () => {
         ship.cargo.units += parsed.units;
         respondJson(res, 200, { data: { transaction: { totalPrice: parsed.units * purchasePrice } } });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
-      void parsed;
     });
 
     fleet = startStubServer((req, body, res) => {
-      const parsed = body.length > 0 ? JSON.parse(body) : undefined;
+      const parsed = (body.length > 0 ? JSON.parse(body) : undefined) as StubBody;
       if (req.url === "/ships/MINING-1/orbit") {
         ship.nav.status = "IN_ORBIT";
         respondJson(res, 200, { data: { nav: ship.nav } });
@@ -194,7 +209,7 @@ describe("automation-service contract loop (meta#11)", () => {
         }
         respondJson(res, 200, { data: { contract: {} } });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
@@ -211,7 +226,7 @@ describe("automation-service contract loop (meta#11)", () => {
       } else if (req.url === "/waypoints/X1-TEST-MARKET/market") {
         respondJson(res, 200, { symbol: "X1-TEST-MARKET", tradeGoods: [{ symbol: "IRON_ORE", sellPrice: 3, purchasePrice }] });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
@@ -220,9 +235,9 @@ describe("automation-service contract loop (meta#11)", () => {
       new Promise<void>((r) => fleet.server.listen(0, r)),
       new Promise<void>((r) => nav.server.listen(0, r)),
     ]);
-    agentUrl = `http://127.0.0.1:${(agent.server.address() as AddressInfo).port}`;
-    fleetUrl = `http://127.0.0.1:${(fleet.server.address() as AddressInfo).port}`;
-    navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
+    agentUrl = `http://127.0.0.1:${String((agent.server.address() as AddressInfo).port)}`;
+    fleetUrl = `http://127.0.0.1:${String((fleet.server.address() as AddressInfo).port)}`;
+    navUrl = `http://127.0.0.1:${String((nav.server.address() as AddressInfo).port)}`;
   });
 
   let gateways: ReturnType<typeof createTestApp>[] = [];
@@ -230,9 +245,9 @@ describe("automation-service contract loop (meta#11)", () => {
     await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
-      new Promise<void>((r) => agent.server.close(() => r())),
-      new Promise<void>((r) => fleet.server.close(() => r())),
-      new Promise<void>((r) => nav.server.close(() => r())),
+      new Promise<void>((r) => agent.server.close(() => { r(); })),
+      new Promise<void>((r) => fleet.server.close(() => { r(); })),
+      new Promise<void>((r) => nav.server.close(() => { r(); })),
     ]);
   });
 
@@ -251,15 +266,15 @@ describe("automation-service contract loop (meta#11)", () => {
 
   /** Run the fleet loop exactly `times`, in place of sleeping and hoping. */
   const tick = async (gateway: ReturnType<typeof createTestApp>, times = 1) => {
-    for (let t = 0; t < times; t++) await gateway.locals.forceFleetTick();
+    for (let t = 0; t < times; t++) await forceFleetTick(gateway);
   };
 
   const waitForEvent = async (gateway: ReturnType<typeof createTestApp>, type: string, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
-      const found = res.body.events.find((e: { type: string }) => e.type === type);
+      const found = (res.body as { events: EventRow[] }).events.find((e) => e.type === type);
       if (found !== undefined) return found;
-      await gateway.locals.forceFleetTick();
+      await forceFleetTick(gateway);
     }
     throw new Error(`timed out waiting for event ${type}`);
   };
@@ -267,8 +282,9 @@ describe("automation-service contract loop (meta#11)", () => {
   const waitForTaskPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-      if (res.status === 200 && res.body.task.phase === phase) return res.body.task;
-      await gateway.locals.forceFleetTick();
+      const body = res.body as { task: TaskRow };
+      if (res.status === 200 && body.task.phase === phase) return body.task;
+      await forceFleetTick(gateway);
     }
     throw new Error(`timed out waiting for phase ${phase}`);
   };
@@ -276,8 +292,9 @@ describe("automation-service contract loop (meta#11)", () => {
   const waitForWaiting = async (gateway: ReturnType<typeof createTestApp>, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-      if (res.status === 200 && res.body.task.waitingUntil !== null) return res.body.task;
-      await gateway.locals.forceFleetTick();
+      const body = res.body as { task: TaskRow };
+      if (res.status === 200 && body.task.waitingUntil !== null) return body.task;
+      await forceFleetTick(gateway);
     }
     throw new Error("timed out waiting for a wait to be set");
   };
@@ -326,7 +343,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
     expect(agent.calls.some((c) => c.url === "/contracts/CONTRACT-1/fulfill")).toBe(true);
 
-    const finalTask = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
+    const finalTask = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => (r.body as { task: TaskRow }).task);
     expect(finalTask.taskKind).toBe("mining");
     expect(finalTask.contractId).toBeNull();
   }, 20_000);
@@ -345,7 +362,7 @@ describe("automation-service contract loop (meta#11)", () => {
     await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     await waitForEvent(gateway, "contract_accepted");
 
-    const { rows } = await pool.query("SELECT cycle_hours, travel_distance FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
+    const { rows } = await pool.query<{ cycle_hours: string; travel_distance: string }>("SELECT cycle_hours, travel_distance FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
     const frozenHours = Number(rows[0].cycle_hours);
     const distance = Number(rows[0].travel_distance);
     expect(distance).toBeGreaterThan(0); // the route is on record, not just the hours it implied
@@ -358,7 +375,7 @@ describe("automation-service contract loop (meta#11)", () => {
       .send({ value: 60 });
 
     const modelRes = await request(gateway).get("/api/automation/v1/planner/model");
-    const speed = modelRes.body.model.speedUnitsPerHour;
+    const speed = (modelRes.body as { model: { speedUnitsPerHour: number } }).model.speedUnitsPerHour;
     expect(speed).toBe(60);
 
     // 0.1h is cycle.transactOverheadHoursPrior: a contract docks and transacts,
@@ -384,7 +401,7 @@ describe("automation-service contract loop (meta#11)", () => {
 
     const assignmentEvent = await waitForEvent(gateway, "planner_assignment");
     expect(assignmentEvent.detail.contractId).toBe("CONTRACT-1");
-    expect(assignmentEvent.detail.contractScore).toBeGreaterThan(assignmentEvent.detail.miningScore);
+    expect(assignmentEvent.detail.contractScore).toBeGreaterThan(assignmentEvent.detail.miningScore as number);
   }, 20_000);
 
   it("resumes a contract task from its persisted phase after a restart instead of restarting it", async () => {
@@ -400,7 +417,7 @@ describe("automation-service contract loop (meta#11)", () => {
     const restarted = app();
     await request(restarted).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
 
-    const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
+    const task = await request(restarted).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => (r.body as { task: TaskRow }).task);
     expect(task.phase).toBe("CONTRACT_TRAVEL_TO_DESTINATION"); // resumed, not reset to CONTRACT_TRAVEL_TO_MARKET
 
     // The restarted app has to actually run for "did it re-buy?" to mean
@@ -427,11 +444,11 @@ describe("automation-service contract loop (meta#11)", () => {
     // the test times out retrying CONTRACT_PURCHASE forever.
     await waitForEvent(gateway, "mining_task_failed");
 
-    const finalTask = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
+    const finalTask = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => (r.body as { task: TaskRow }).task);
     expect(finalTask.taskKind).toBe("mining"); // reassigned away, not stuck retrying forever
     expect(finalTask.contractId).toBeNull();
 
-    const { rows } = await pool.query("SELECT status FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
+    const { rows } = await pool.query<{ status: string }>("SELECT status FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
     expect(rows[0].status).toBe("accepted"); // released back to the pool, not left "assigned"
   }, 20_000);
 
@@ -458,10 +475,10 @@ describe("automation-service contract loop (meta#11)", () => {
     const skipped = await waitForEvent(gateway, "contract_deliver_skipped");
     expect(skipped.detail.reason).toBe("cargo hold has none of the contract good");
 
-    const task = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => r.body.task);
+    const task = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1").then((r) => (r.body as { task: TaskRow }).task);
     expect(task.phase).toBe("CONTRACT_TRAVEL_TO_MARKET"); // sent back to re-procure, not stuck on 0-unit delivers
 
-    expect(fleet.calls.some((c) => c.url?.match(/^\/contracts\/[\w-]+\/deliver$/))).toBe(false); // deliver never actually dispatched
+    expect(fleet.calls.some((c) => /^\/contracts\/[\w-]+\/deliver$/.exec(c.url))).toBe(false); // deliver never actually dispatched
   }, 20_000);
 
   it("meta#30: a crash between marking a contract assigned and saving ship_task rolls back instead of orphaning it", async () => {
@@ -488,7 +505,7 @@ describe("automation-service contract loop (meta#11)", () => {
     // is invisible to the planner forever and this next line times out.
     await waitForTaskPhase(gateway, "CONTRACT_PURCHASE");
 
-    const { rows } = await pool.query("SELECT status FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
+    const { rows } = await pool.query<{ status: string }>("SELECT status FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
     expect(rows[0].status).toBe("assigned");
   }, 20_000);
 
@@ -541,7 +558,7 @@ describe("automation-service contract loop (meta#11)", () => {
     await waitForEvent(gateway, "contract_reconciled");
     expect(agent.calls.filter((c) => c.url === "/contracts/CONTRACT-1/accept")).toHaveLength(1); // still never re-accepted
 
-    const { rows } = await pool.query("SELECT status, procurement_market FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
+    const { rows } = await pool.query<{ status: string; procurement_market: string | null }>("SELECT status, procurement_market FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
     expect(rows).toHaveLength(1);
     // "accepted" (just reconciled) or already "assigned" (the scheduler's next
     // tick can win the race and assign it before this query runs) — either way

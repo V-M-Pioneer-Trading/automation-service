@@ -23,10 +23,10 @@ export class IntervalLoop {
   constructor(
     private readonly intervalMs: number,
     private readonly tick: () => Promise<void>,
-    private readonly onError: (err: unknown) => void | Promise<void> = () => {}
+    private readonly onError: (err: unknown) => void | Promise<void> = () => undefined
   ) {
     if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
-      throw new Error(`IntervalLoop needs a positive interval, got ${intervalMs}`);
+      throw new Error(`IntervalLoop needs a positive interval, got ${String(intervalMs)}`);
     }
   }
 
@@ -43,7 +43,8 @@ export class IntervalLoop {
     this.stopRequested = false;
     this.timer = setInterval(() => void this.run(), this.intervalMs);
     // Never keep the process alive on its own — the HTTP server does that.
-    this.timer.unref?.();
+    // Typed as possibly absent: a timer from a non-Node or faked `setInterval` may not have it.
+    (this.timer as { unref?: () => unknown }).unref?.();
   }
 
   async stop(): Promise<void> {
@@ -77,7 +78,7 @@ export class IntervalLoop {
     this.inFlight = this.tick()
       // The error handler is usually an event-log write, which can itself
       // fail; that must not surface as an unhandled rejection.
-      .catch((err) => Promise.resolve(this.onError(err)).catch(() => {}))
+      .catch((err: unknown) => Promise.resolve(this.onError(err)).catch(() => undefined))
       .finally(() => {
         this.inFlight = null;
       });

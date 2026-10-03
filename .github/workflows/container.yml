@@ -70,6 +70,10 @@ jobs:
 
       - run: npm ci
 
+      # Shared ESLint config (meta#105). A step in this job, not a job of its own,
+      # so branch protection's required checks are unchanged.
+      - run: npm run lint
+
       - run: npm test
         env:
           DATABASE_URL: postgres://postgres:test@localhost:5432/automation_test

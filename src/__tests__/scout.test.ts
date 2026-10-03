@@ -1,12 +1,30 @@
+import { forceFleetTick } from "../testSupport/appHooks";
 import http from "http";
-import { AddressInfo } from "net";
+import type { AddressInfo } from "net";
 import request from "supertest";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
 import { resetDatabase } from "../testSupport/resetDatabase";
+import { databaseUrl } from "../testSupport/databaseUrl";
+
+interface AutopilotEvent {
+  type: string;
+  detail: Record<string, unknown>;
+}
+interface ShipTask {
+  phase: string;
+  taskKind: string;
+  asteroidWaypoint: string | null;
+}
+interface EventsBody {
+  events: AutopilotEvent[];
+}
+interface ShipBody {
+  task: ShipTask;
+}
 
 function makeShip(overrides: Record<string, unknown> = {}) {
   return {
@@ -28,7 +46,9 @@ function startStubServer(handler: (req: http.IncomingMessage, body: string, res:
   const calls: { method: string; url: string; body: string }[] = [];
   const server = http.createServer((req, res) => {
     let body = "";
-    req.on("data", (c) => (body += c));
+    req.on("data", (c: Buffer | string) => {
+      body += String(c);
+    });
     req.on("end", () => {
       calls.push({ method: req.method ?? "", url: req.url ?? "", body });
       handler(req, body, res);
@@ -53,7 +73,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
   let agentUrl: string, fleetUrl: string, navUrl: string;
 
   beforeAll(async () => {
-    pool = createPool(process.env.DATABASE_URL!);
+    pool = createPool(databaseUrl());
     await migrate(pool);
   });
 
@@ -79,12 +99,11 @@ describe("automation-service market scouting loop (meta#12)", () => {
       } else if (req.url === "/contracts" && req.method === "GET") {
         respondJson(res, 200, []);
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
     fleet = startStubServer((req, body, res) => {
-      const parsed = body.length > 0 ? JSON.parse(body) : undefined;
       if (req.url === "/ships/MINING-1/orbit") {
         ship.nav.status = "IN_ORBIT";
         respondJson(res, 200, { data: { nav: ship.nav } });
@@ -92,12 +111,13 @@ describe("automation-service market scouting loop (meta#12)", () => {
         ship.nav.status = "DOCKED";
         respondJson(res, 200, { data: { nav: ship.nav } });
       } else if (req.url === "/ships/MINING-1/navigate") {
+        const parsed = JSON.parse(body) as { waypointSymbol: string };
         ship.nav.status = "IN_TRANSIT";
         ship.nav.waypointSymbol = parsed.waypointSymbol;
         ship.nav.route = { arrival: new Date(clock.now().getTime() + 1000).toISOString() };
         respondJson(res, 200, { data: { nav: ship.nav } });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
@@ -116,7 +136,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
       } else if (req.url === "/waypoints/X1-TEST-MARKET/market") {
         respondJson(res, 200, { symbol: "X1-TEST-MARKET", tradeGoods: [{ symbol: "IRON_ORE", sellPrice: 100, purchasePrice: 50 }] });
       } else {
-        respondJson(res, 404, { error: "unhandled: " + req.url });
+        respondJson(res, 404, { error: "unhandled: " + String(req.url) });
       }
     });
 
@@ -125,9 +145,9 @@ describe("automation-service market scouting loop (meta#12)", () => {
       new Promise<void>((r) => fleet.server.listen(0, r)),
       new Promise<void>((r) => nav.server.listen(0, r)),
     ]);
-    agentUrl = `http://127.0.0.1:${(agent.server.address() as AddressInfo).port}`;
-    fleetUrl = `http://127.0.0.1:${(fleet.server.address() as AddressInfo).port}`;
-    navUrl = `http://127.0.0.1:${(nav.server.address() as AddressInfo).port}`;
+    agentUrl = `http://127.0.0.1:${String((agent.server.address() as AddressInfo).port)}`;
+    fleetUrl = `http://127.0.0.1:${String((fleet.server.address() as AddressInfo).port)}`;
+    navUrl = `http://127.0.0.1:${String((nav.server.address() as AddressInfo).port)}`;
   });
 
   let gateways: ReturnType<typeof createTestApp>[] = [];
@@ -135,9 +155,9 @@ describe("automation-service market scouting loop (meta#12)", () => {
     await Promise.all(gateways.map((g) => request(g).post("/api/automation/v1/autopilot/abort").set("Authorization", bearer())));
     gateways = [];
     await Promise.all([
-      new Promise<void>((r) => agent.server.close(() => r())),
-      new Promise<void>((r) => fleet.server.close(() => r())),
-      new Promise<void>((r) => nav.server.close(() => r())),
+      new Promise<void>((r) => agent.server.close(() => { r(); })),
+      new Promise<void>((r) => fleet.server.close(() => { r(); })),
+      new Promise<void>((r) => nav.server.close(() => { r(); })),
     ]);
   });
 
@@ -157,9 +177,9 @@ describe("automation-service market scouting loop (meta#12)", () => {
   const waitForEvent = async (gateway: ReturnType<typeof createTestApp>, type: string, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/events?limit=100");
-      const found = res.body.events.find((e: { type: string }) => e.type === type);
+      const found = (res.body as EventsBody).events.find((e) => e.type === type);
       if (found !== undefined) return found;
-      await gateway.locals.forceFleetTick();
+      await forceFleetTick(gateway);
     }
     throw new Error(`timed out waiting for event ${type}`);
   };
@@ -167,8 +187,8 @@ describe("automation-service market scouting loop (meta#12)", () => {
   const waitForTaskPhase = async (gateway: ReturnType<typeof createTestApp>, phase: string, maxTicks = 200) => {
     for (let tick = 0; tick <= maxTicks; tick++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-      if (res.status === 200 && res.body.task.phase === phase) return res.body.task;
-      await gateway.locals.forceFleetTick();
+      if (res.status === 200 && (res.body as ShipBody).task.phase === phase) return (res.body as ShipBody).task;
+      await forceFleetTick(gateway);
     }
     throw new Error(`timed out waiting for phase ${phase}`);
   };
@@ -223,7 +243,7 @@ describe("automation-service market scouting loop (meta#12)", () => {
 
     // Ship is at X1-TEST-BELT (not at the market), so it needs to navigate.
     await waitForTaskPhase(gateway, "SCOUT_TRAVEL");
-    await gateway.locals.forceFleetTick(); // dispatch the navigate
+    await forceFleetTick(gateway); // dispatch the navigate
     // Advance clock past the travel ETA so the wait resolves.
     clock.advance(2000);
 
@@ -251,16 +271,16 @@ describe("automation-service market scouting loop (meta#12)", () => {
     // score drops to ~0 (elapsed = 0), so the ship should be assigned mining.
     // Poll until asteroidWaypoint is filled in (not just TRAVEL_TO_ASTEROID phase,
     // which fires immediately on FRESH_MINING_TASK before assignment runs).
-    let miningTask: Record<string, unknown> | null = null;
+    let miningTask: ShipTask | null = null;
     for (let t = 0; t < 200; t++) {
       const res = await request(gateway).get("/api/automation/v1/autopilot/ships/MINING-1");
-      if (res.status === 200 && res.body.task.taskKind === "mining" && res.body.task.asteroidWaypoint !== null) {
-        miningTask = res.body.task;
+      if (res.status === 200 && (res.body as ShipBody).task.taskKind === "mining" && (res.body as ShipBody).task.asteroidWaypoint !== null) {
+        miningTask = (res.body as ShipBody).task;
         break;
       }
-      await gateway.locals.forceFleetTick();
+      await forceFleetTick(gateway);
     }
     expect(miningTask).not.toBeNull();
-    expect(miningTask!.asteroidWaypoint).toBe("X1-TEST-BELT");
+    expect(miningTask?.asteroidWaypoint).toBe("X1-TEST-BELT");
   }, 20_000);
 });

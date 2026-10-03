@@ -1,4 +1,5 @@
-import { decisionDetail, MiningDecisionRecord, readMiningRecord } from "../plannerDecision";
+import type { MiningDecisionRecord } from "../plannerDecision";
+import { decisionDetail, readMiningRecord } from "../plannerDecision";
 
 /**
  * The planner writes a decision; `replay.ts` reads it back and re-scores it

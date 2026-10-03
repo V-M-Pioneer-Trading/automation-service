@@ -1,6 +1,6 @@
-import { Pool, PoolClient } from "pg";
-import { Clock } from "./clock";
-import { KnobValues } from "./knobs";
+import type { Pool, PoolClient } from "pg";
+import type { Clock } from "./clock";
+import type { KnobValues } from "./knobs";
 
 /**
  * What the fleet has actually learned by flying.
@@ -165,7 +165,14 @@ export class ObservationRepo {
    * loop. Ranking within each waypoint keeps every field's own evidence.
    */
   async recentMining(since: Date, limit = MAX_OBSERVATIONS_PER_WAYPOINT): Promise<MiningObservation[]> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{
+      asteroid_waypoint: string;
+      revenue: string | number;
+      cycle_hours: string | number;
+      travel_distance: string | number | null;
+      units_extracted: string | number;
+      observed_at: Date;
+    }>(
       `SELECT asteroid_waypoint, revenue, cycle_hours, travel_distance, units_extracted, observed_at FROM (
          SELECT *, ROW_NUMBER() OVER (PARTITION BY asteroid_waypoint ORDER BY observed_at DESC) AS rank
          FROM mining_observation WHERE observed_at >= $1
@@ -174,27 +181,32 @@ export class ObservationRepo {
        ORDER BY observed_at DESC`,
       [since, limit]
     );
-    return rows.map((r: Record<string, unknown>) => ({
-      asteroidWaypoint: r.asteroid_waypoint as string,
+    return rows.map((r) => ({
+      asteroidWaypoint: r.asteroid_waypoint,
       revenue: Number(r.revenue),
       cycleHours: Number(r.cycle_hours),
       travelDistance: Number(r.travel_distance),
       unitsExtracted: Number(r.units_extracted),
-      observedAt: r.observed_at as Date,
+      observedAt: r.observed_at,
     }));
   }
 
   async recentTravel(since: Date, limit = MAX_OBSERVATIONS): Promise<TravelObservation[]> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<{
+      distance: string | number;
+      hours: string | number | null;
+      fuel_credits: string | number | null;
+      observed_at: Date;
+    }>(
       `SELECT distance, hours, fuel_credits, observed_at
        FROM travel_observation WHERE observed_at >= $1 ORDER BY observed_at DESC LIMIT $2`,
       [since, limit]
     );
-    return rows.map((r: Record<string, unknown>) => ({
+    return rows.map((r) => ({
       distance: Number(r.distance),
       hours: r.hours === null ? null : Number(r.hours),
       fuelCredits: r.fuel_credits === null ? null : Number(r.fuel_credits),
-      observedAt: r.observed_at as Date,
+      observedAt: r.observed_at,
     }));
   }
 
@@ -213,20 +225,17 @@ export class ObservationRepo {
 
     // --- Speed: total distance flown over total time flown, recency-weighted ---
     const speed = weightedRatio(
-      travel
-        .filter((t) => t.hours !== null)
-        .map((t) => ({ numerator: t.distance, denominator: t.hours as number, weight: weightOf(t.observedAt) }))
+      travel.flatMap((t) => (t.hours === null ? [] : [{ numerator: t.distance, denominator: t.hours, weight: weightOf(t.observedAt) }]))
     );
     const speedUnitsPerHour = speed ?? priors.speedUnitsPerHourPrior;
 
     // --- Fuel: credits per unit of distance covered, from real refuel purchases ---
     const fuelSamples = travel.filter((t) => t.fuelCredits !== null && t.distance > 0);
     const fuel = weightedRatio(
-      fuelSamples.map((t) => ({
-        numerator: t.fuelCredits as number,
-        denominator: t.distance,
-        weight: weightOf(t.observedAt),
-      }))
+      fuelSamples.flatMap((t) =>
+        // The filter above already dropped the nulls; this narrows the type for the compiler.
+        t.fuelCredits === null ? [] : [{ numerator: t.fuelCredits, denominator: t.distance, weight: weightOf(t.observedAt) }]
+      )
     );
     const fuelCreditsPerUnitDistance = fuel ?? priors.fuelCreditsPerUnitDistancePrior;
 

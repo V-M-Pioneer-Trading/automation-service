@@ -1,6 +1,6 @@
-import { Pool, PoolClient } from "pg";
-import { Clock } from "./clock";
-import { SurveyData } from "./gameClients";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
+import type { Clock } from "./clock";
+import type { SurveyData } from "./gameClients";
 
 export type MiningPhase = "TRAVEL_TO_ASTEROID" | "SURVEY" | "EXTRACT" | "TRAVEL_TO_MARKET" | "SELL";
 export type ContractPhase =
@@ -96,7 +96,7 @@ const TASK_COLUMNS = `ship_symbol, task_kind, phase, waiting_until, survey, trad
        asteroid_waypoint, failure_count, unrelated_failure_count, contract_id, destination_waypoint, units_delivered,
        cycle_started_at, cycle_revenue, cycle_travel_distance, cycle_units_extracted, updated_at`;
 
-function rowToTask(row: {
+interface TaskRow extends QueryResultRow {
   ship_symbol: string;
   task_kind: TaskKind;
   phase: TaskPhase;
@@ -115,7 +115,9 @@ function rowToTask(row: {
   cycle_travel_distance: string | number;
   cycle_units_extracted: string | number;
   updated_at: Date;
-}): ShipTask {
+}
+
+function rowToTask(row: TaskRow): ShipTask {
   return {
     shipSymbol: row.ship_symbol,
     taskKind: row.task_kind,
@@ -154,11 +156,12 @@ export class ShipTaskRepo {
        ON CONFLICT (ship_symbol) DO NOTHING`,
       [shipSymbol, this.clock.now()]
     );
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- the INSERT above guarantees the row exists, and nothing deletes ship_task rows
     return (await this.get(shipSymbol))!;
   }
 
   async get(shipSymbol: string): Promise<ShipTask | null> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<TaskRow>(
       `SELECT ${TASK_COLUMNS} FROM ship_task WHERE ship_symbol = $1`,
       [shipSymbol]
     );
@@ -172,7 +175,7 @@ export class ShipTaskRepo {
    * mid-task never matches this, so a replan can never preempt work in flight.
    */
   async listIdle(): Promise<ShipTask[]> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.pool.query<TaskRow>(
       `SELECT ${TASK_COLUMNS} FROM ship_task WHERE asteroid_waypoint IS NULL AND contract_id IS NULL`
     );
     return rows.map(rowToTask);

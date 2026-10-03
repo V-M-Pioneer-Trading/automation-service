@@ -1,6 +1,6 @@
-import { Clock } from "./clock";
+import type { Clock } from "./clock";
 import { IntervalLoop } from "./intervalLoop";
-import { MetricsRepo } from "./metrics";
+import type { MetricsRepo } from "./metrics";
 
 /**
  * Computes and persists one metrics rollup per tick, independent of autopilot
@@ -33,9 +33,7 @@ export class MetricsScheduler {
 
   private async tick(): Promise<void> {
     const windowEnd = this.clock.now();
-    if (this.windowStart === null) {
-      this.windowStart = (await this.repo.latestWindowEnd()) ?? windowEnd;
-    }
+    this.windowStart ??= (await this.repo.latestWindowEnd()) ?? windowEnd;
     if (windowEnd <= this.windowStart) return; // no time has elapsed yet
     if (this.loop.stopped) return; // stop() landed during the bootstrap read
 
