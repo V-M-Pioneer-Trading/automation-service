@@ -7,6 +7,18 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## clerk-client 2.0.1: what separates scopes, and key case (meta fixture v6)
+
+The shared auth package moved from 2.0.0 to 2.0.1 (clerk-client#11,
+meta#107). The API is unchanged, but two behaviours change, and both now match
+the Go and Java clients:
+
+- A session's `scope` is split on runs of space, tab, CR and LF only.
+  Before, it was split on every Unicode space, so a scope joined to the next
+  one by a no-break space also granted that next scope.
+- A center answer with two top-level keys equal ignoring case, or with a
+  contract key in another case, is a 503. Before, keys were compared exactly.
+
 ## Shared auth package renamed to clerk-client (2.0.0)
 
 The dependency moved from `@v-m-pioneer-trading/introspection-client` 1.2.0 to
