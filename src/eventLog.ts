@@ -1,4 +1,4 @@
-import type { Pool, QueryResultRow } from "pg";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type { Clock } from "./clock";
 import {
   ACTION_ERROR_PREDICATE,
@@ -52,7 +52,9 @@ const NEWEST_FIRST = "ORDER BY occurred_at DESC, id DESC";
  * against. The vocabulary itself still lives in `fleetEvents.ts`.
  */
 export class EventLog {
-  constructor(private pool: Pool, private clock: Clock) {}
+  // Pool | PoolClient so a lifecycle change can write its event inside the
+  // same transaction as the state it describes (autopilotLifecycle.ts).
+  constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
   async append(type: string, detail: Record<string, unknown> = {}): Promise<void> {
     await this.pool.query("INSERT INTO event_log (occurred_at, type, detail) VALUES ($1, $2, $3)", [

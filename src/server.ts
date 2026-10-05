@@ -10,11 +10,13 @@ import {
   secured,
   type ExpressAuth,
 } from "@v-m-pioneer-trading/clerk-client";
+import type { Server } from "http";
 import type { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
 import type { AnomalyConfig } from "./anomalyScheduler";
 import { AnomalyScheduler } from "./anomalyScheduler";
 import { SCOPE_EVENTS_WRITE, SCOPE_FLEET_CONTROL, SCOPE_PLANNER_ADVISE } from "./auth";
+import { AutopilotLifecycle, LifecycleClosedError } from "./autopilotLifecycle";
 import { AutopilotState, InvalidTransitionError } from "./autopilotState";
 import type { Clock } from "./clock";
 import { systemClock } from "./clock";
@@ -33,7 +35,16 @@ import { ObservationRepo, priorsFromKnobs } from "./observations";
 import { Planner } from "./planner";
 import { FleetScheduler } from "./scheduler";
 import { ShipTaskRepo } from "./shipTaskRepo";
+import { installShutdownHandlers, shutdownGracefully, type ShutdownSteps } from "./shutdown";
 import { WebhookDelivery } from "./webhookDelivery";
+
+/**
+ * How long a SIGTERM may take before the process gives up and exits 1. Under
+ * ECS's default 30s stop timeout, so the service exits on its own terms rather
+ * than being SIGKILLed: a fleet tick is bounded by the 15s upstream timeout,
+ * which this outlasts.
+ */
+const SHUTDOWN_TIMEOUT_MS = 25_000;
 
 const MAX_EVENTS_LIMIT = 1000;
 const MAX_ROLLUPS_LIMIT = 200;
@@ -123,6 +134,44 @@ const clampLimit = (raw: unknown, fallback: number, max: number): number => {
 };
 
 const badRequest = (res: express.Response, message: string) => res.status(400).json({ error: { message } });
+
+/** What the entrypoint needs from an app beyond the Express handler itself. */
+interface AppLifecycleHandles {
+  /** Settles once the persisted autopilot state is restored; rejects if it could not be. */
+  autopilotRestored: Promise<void>;
+  /** Shutdown steps 1 and 2: refuse lifecycle changes, then drain and stop every scheduler. */
+  closeLifecycle: () => Promise<void>;
+  stopSchedulers: () => Promise<void>;
+}
+// Keyed by the app rather than hung on app.locals, which is untyped and is
+// where the test-only hooks live; these are for the entrypoint.
+const appHandles = new WeakMap<object, AppLifecycleHandles>();
+const handlesOf = (app: object): AppLifecycleHandles => {
+  const handles = appHandles.get(app);
+  if (handles === undefined) throw new TypeError("not an app built by createApp");
+  return handles;
+};
+
+/** Resolves once `app` has restored the persisted autopilot state (Q29). */
+export const autopilotRestored = (app: object): Promise<void> => handlesOf(app).autopilotRestored;
+/** Refuses further arm/pause/abort and waits until every accepted one is persisted. */
+export const closeLifecycle = (app: object): Promise<void> => handlesOf(app).closeLifecycle();
+/** Stops the fleet, anomaly and metrics loops, each awaiting its in-flight tick. Not an abort: nothing is persisted. */
+export const stopSchedulers = (app: object): Promise<void> => handlesOf(app).stopSchedulers();
+
+/** The entrypoint's shutdown, step by step (see `ShutdownSteps` for why this order). Exported so a test runs the same wiring. */
+export const shutdownStepsFor = (app: object, server: Server, pool: Pool): ShutdownSteps => ({
+  closeLifecycle: () => closeLifecycle(app),
+  stopSchedulers: () => stopSchedulers(app),
+  closeServer: () =>
+    new Promise<void>((resolve, reject) => {
+      server.close((err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    }),
+  closePool: () => pool.end(),
+});
 
 /**
  * Safety net for a direct `createApp` caller that wires up `mining` without
@@ -278,6 +327,18 @@ export function createApp(options: AppOptions) {
       : null;
   anomalyScheduler?.start();
 
+  // Constructed last: it starts restoring the persisted state immediately, and
+  // a restore that finds the autopilot armed starts the fleet loop above.
+  const lifecycle = new AutopilotLifecycle({
+    state,
+    pool,
+    clock,
+    startFleet: () => scheduler?.start(),
+    stopFleet: async () => {
+      await scheduler?.stop();
+    },
+  });
+
   const health = (_req: express.Request, res: express.Response) => {
     res.set("Cache-Control", "no-store");
     res.json({ status: "ok" });
@@ -304,10 +365,20 @@ export function createApp(options: AppOptions) {
 
   const lifecycleStatus = () => ({ status: state.getStatus(), mode: state.getMode() });
 
-  api.get("/autopilot/status", publicRead(), (_req, res) => {
-    res.json(lifecycleStatus());
-  });
+  // Waits for the restore (milliseconds, once per process), so a status read
+  // never reports the "disarmed" a process starts with before it has looked.
+  // A failed restore leaves the process disarmed, and that is what it reports.
+  api.get(
+    "/autopilot/status",
+    publicRead(),
+    asyncHandler(async (_req, res) => {
+      await lifecycle.restored.catch(() => undefined);
+      res.json(lifecycleStatus());
+    })
+  );
 
+  // Every lifecycle change goes through `lifecycle`, which persists it and
+  // queues it behind the restore and behind any other change (Q29).
   api.post(
     "/autopilot/arm",
     requireControl,
@@ -317,19 +388,14 @@ export function createApp(options: AppOptions) {
         badRequest(res, 'mode must be "live" or "shadow"');
         return;
       }
-      const from = state.getStatus();
-      state.arm(mode);
-      scheduler?.start();
-      await events.append("armed", { from, mode, actor: actorOf(res) });
-      res.json(lifecycleStatus());
+      res.json(await lifecycle.arm(mode, actorOf(res)));
     })
   );
 
   const transition = (action: "pause" | "abort") =>
     asyncHandler(async (_req, res) => {
-      const from = state.getStatus();
       try {
-        state[action]();
+        res.json(await lifecycle[action](actorOf(res)));
       } catch (err) {
         if (err instanceof InvalidTransitionError) {
           res.status(409).json({ error: { message: err.message } });
@@ -337,11 +403,6 @@ export function createApp(options: AppOptions) {
         }
         throw err;
       }
-      // Awaited so the abort response only returns once any in-flight tick has
-      // actually finished, not just been told to stop.
-      if (action === "abort") await scheduler?.stop();
-      await events.append(action === "pause" ? "paused" : "aborted", { from, actor: actorOf(res) });
-      res.json(lifecycleStatus());
     });
 
   api.post("/autopilot/pause", requireControl, transition("pause"));
@@ -575,6 +636,12 @@ export function createApp(options: AppOptions) {
       res.status(bodyError[0]).json({ error: { message: bodyError[1] } });
       return;
     }
+    // A lifecycle change that arrived after shutdown began. Retryable against
+    // the next process, which restores whatever this one persisted.
+    if (err instanceof LifecycleClosedError) {
+      res.status(503).json({ error: { message: err.message } });
+      return;
+    }
     // Anything else is our defect, and its message is ours to read, not the
     // caller's: a Postgres or parser message names tables and encodings.
     console.error("automation-service: unhandled error", err);
@@ -618,6 +685,14 @@ export function createApp(options: AppOptions) {
     };
   }
 
+  appHandles.set(app, {
+    autopilotRestored: lifecycle.restored,
+    closeLifecycle: () => lifecycle.close(),
+    stopSchedulers: async () => {
+      await Promise.all([scheduler?.stop(), metricsScheduler?.stop(), anomalyScheduler?.stop()]);
+    },
+  });
+
   return app;
 }
 
@@ -641,7 +716,7 @@ if (require.main === module) {
           );
           process.exit(1);
         }
-        return createApp({
+        const app = createApp({
           pool,
           auth: createExpressAuth(config.introspection),
           mining: config,
@@ -654,9 +729,19 @@ if (require.main === module) {
           anomaly: { webhookUrl: config.anomalyWebhookUrl, intervalMs: config.anomalyIntervalMs },
           corsAllowedOrigin: config.corsAllowedOrigin,
           authTokenSource,
-        }).listen(config.port, () => {
+        });
+        // Before listening, so the first request already sees the restored
+        // state; a restore that fails exits 1 below and the orchestrator
+        // retries, rather than serving a disarmed autopilot that should not be.
+        await autopilotRestored(app);
+        const server = app.listen(config.port, () => {
           console.log(`automation-service listening on http://localhost:${String(config.port)}`);
         });
+        installShutdownHandlers(
+          process,
+          () => shutdownGracefully(shutdownStepsFor(app, server, pool), SHUTDOWN_TIMEOUT_MS),
+          (code) => process.exit(code)
+        );
       });
     })
     .catch((err: unknown) => {

@@ -22,6 +22,7 @@ const STATE_TABLES = [
   "contract",
   "mining_observation",
   "travel_observation",
+  "autopilot_state",
 ];
 
 export interface ResetOptions {

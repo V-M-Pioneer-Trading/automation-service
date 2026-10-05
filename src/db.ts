@@ -27,10 +27,9 @@ export async function migrate(pool: Pool): Promise<KnobClamp[]> {
     CREATE INDEX IF NOT EXISTS event_log_type_occurred_at_idx ON event_log (type, occurred_at)
   `);
 
-  // One row per ship under autopilot control. Survives restarts (per story 14)
-  // even though AutopilotState's armed/paused/aborted status does not — a
-  // restart disarms, but re-arming resumes each ship from its persisted phase
-  // instead of re-running completed work.
+  // One row per ship under autopilot control. Survives restarts (per story 14),
+  // so a live re-arm resumes each ship from its persisted phase instead of
+  // re-running completed work.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ship_task (
       ship_symbol TEXT PRIMARY KEY,
@@ -75,6 +74,23 @@ export async function migrate(pool: Pool): Promise<KnobClamp[]> {
     `ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS cycle_travel_distance DOUBLE PRECISION NOT NULL DEFAULT 0`
   );
   await pool.query(`ALTER TABLE ship_task ADD COLUMN IF NOT EXISTS cycle_units_extracted DOUBLE PRECISION NOT NULL DEFAULT 0`);
+
+  // The autopilot's lifecycle (owner decision Q29): one row, the last status
+  // and mode an operator (or a restart) set. A boot restores it, except that
+  // live never survives a restart — see restoredAfterRestart in
+  // autopilotLifecycle.ts. The CHECKs keep out a row the restore could
+  // misread: mode is present exactly when the autopilot is armed or paused,
+  // which is how AutopilotState itself keeps it.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS autopilot_state (
+      singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+      status TEXT NOT NULL CHECK (status IN ('disarmed', 'armed', 'paused', 'aborted')),
+      mode TEXT CHECK (mode IN ('live', 'shadow')),
+      updated_at TIMESTAMPTZ NOT NULL,
+      updated_by TEXT,
+      CHECK ((status IN ('armed', 'paused')) = (mode IS NOT NULL))
+    )
+  `);
 
   // Knobs: value + class + default + min/max, schema-validated on write.
   // Synced from KNOB_DEFINITIONS below on every boot.

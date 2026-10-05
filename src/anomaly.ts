@@ -1,4 +1,4 @@
-import type { Pool, QueryResultRow } from "pg";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type { AutopilotState } from "./autopilotState";
 import type { Clock } from "./clock";
 import type { KnobValues } from "./knobs";
@@ -33,7 +33,9 @@ const PROFIT_TREND_WINDOW_MS = 6 * 60 * 60 * 1000;
 const ANOMALY_SELECT = "SELECT id, type, dedupe_key, detected_at, detail, delivered_at, delivery_attempts FROM anomaly";
 
 export class AnomalyRepo {
-  constructor(private pool: Pool, private clock: Clock) {}
+  // Pool | PoolClient so a restart can record its anomaly inside the same
+  // transaction as the state it downgraded (autopilotLifecycle.ts).
+  constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
   /** Most recent anomaly recorded for a dedupe key, or null if this key has never fired. */
   async latestForKey(dedupeKey: string): Promise<Anomaly | null> {

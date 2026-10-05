@@ -3,11 +3,12 @@ import { forceFleetTick } from "../testSupport/appHooks";
 import http from "http";
 import type { AddressInfo } from "net";
 import request from "supertest";
-import type { Pool, PoolClient } from "pg";
+import type { Pool } from "pg";
 import { FakeClock } from "../testSupport/fakeClock";
 import { createTestApp } from "../testSupport/createTestApp";
 import { bearer } from "../testSupport/authTokens";
 import { createPool, migrate } from "../db";
+import { makeFlakyPool } from "../testSupport/flakyPool";
 import { resetDatabase } from "../testSupport/resetDatabase";
 
 function makeShip(overrides: Record<string, unknown> = {}) {
@@ -67,47 +68,6 @@ const respondJson = (res: http.ServerResponse, status: number, data: unknown) =>
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
 };
-
-/**
- * Wraps a real Pool so exactly one query matching `shouldFail` rejects
- * (both direct pool.query calls and queries run on a connect()ed client, so
- * it also intercepts inside withTransaction's BEGIN/COMMIT block) — simulates
- * the transient DB failure meta#28/#30 guard against, without needing to
- * actually break Postgres.
- */
-type LooseFn = (...args: unknown[]) => unknown;
-
-function makeFlakyPool(pool: Pool, shouldFail: (sql: string) => boolean): Pool {
-  let failed = false;
-  const flakyQuery = (originalQuery: LooseFn) => {
-    return (...args: unknown[]) => {
-      const sql = args[0];
-      if (!failed && typeof sql === "string" && shouldFail(sql)) {
-        failed = true;
-        return Promise.reject(new Error("simulated transient DB failure"));
-      }
-      return originalQuery(...args);
-    };
-  };
-
-  return new Proxy(pool, {
-    get(target, prop, receiver) {
-      if (prop === "query") return flakyQuery(target.query.bind(target));
-      if (prop === "connect") {
-        return async (...args: unknown[]) => {
-          const client = await (target.connect.bind(target) as unknown as (...a: unknown[]) => Promise<PoolClient>)(...args);
-          return new Proxy(client, {
-            get(ctarget, cprop, creceiver) {
-              if (cprop === "query") return flakyQuery(ctarget.query.bind(ctarget));
-              return Reflect.get(ctarget, cprop, creceiver) as unknown;
-            },
-          });
-        };
-      }
-      return Reflect.get(target, prop, receiver) as unknown;
-    },
-  });
-}
 
 describe("automation-service contract loop (meta#11)", () => {
   let pool: Pool;
