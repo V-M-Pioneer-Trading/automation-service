@@ -569,7 +569,6 @@ export function createApp(options: AppOptions) {
     "entity.parse.failed": [400, "malformed JSON body"],
     "entity.too.large": [413, "request body too large"],
   };
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Express identifies an error handler by its four parameters, so `_next` must stay
   const onError: express.ErrorRequestHandler = (err: Error & { type?: unknown }, _req, res, _next) => {
     const bodyError = typeof err.type === "string" ? BODY_ERRORS[err.type] : undefined;
     if (bodyError !== undefined) {
