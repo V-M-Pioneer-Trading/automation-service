@@ -243,6 +243,9 @@ function hasValidationFields(body: string): boolean {
 }
 
 export class UpstreamCallError extends Error {
+  /** The ship the failing call asked about, when it asked about one (set by `getShip`). */
+  requestedShip?: string;
+
   constructor(message: string, public kind: UpstreamFailureKind) {
     super(message);
   }
@@ -307,8 +310,16 @@ export function createGameClients(config: {
     });
 
   return {
-    getShip: (shipSymbol: string) =>
-      callJson<ShipSnapshot>(`${config.agentServiceUrl}/ships/${shipSymbol}`),
+    getShip: async (shipSymbol: string) => {
+      try {
+        return await callJson<ShipSnapshot>(`${config.agentServiceUrl}/ships/${shipSymbol}`);
+      } catch (err) {
+        // So an event can name the ship that was actually asked about, not
+        // whichever ship the scheduler is configured for.
+        if (err instanceof UpstreamCallError) err.requestedShip = shipSymbol;
+        throw err;
+      }
+    },
 
     getAgent: () => callJson<AgentSnapshot>(`${config.agentServiceUrl}/agent`),
 

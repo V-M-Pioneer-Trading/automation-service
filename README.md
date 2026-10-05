@@ -473,7 +473,10 @@ All triggers share one debounce clock, so a storm of knob changes coalesces into
 a single replan.
 
 **Running work is never preempted.** A replan only touches ships with no
-assigned target. Tasks are kept short and bounded, one mining round trip or one
+assigned target, and only for the ship(s) this service dispatches: a leftover
+`ship_task` row for another ship is ignored with a log line, never deleted.
+Five identical `denied` failures in a row raise one `repeated_denied` anomaly,
+re-armed by a clean tick. Tasks are kept short and bounded, one mining round trip or one
 delivery leg, so a stale assignment costs minutes at most. Abort is the only
 interrupt.
 

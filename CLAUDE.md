@@ -91,7 +91,9 @@ for callers who look there first.
   `mining_discarded_after_abort` and *not* saved. `paused` still lets the
   in-flight result land (that is what pause means). See `isStillLive()`.
 - **Idle predicate** is `asteroid_waypoint IS NULL AND contract_id IS NULL`
-  (`isIdle`, `ShipTaskRepo.listIdle`). Only idle ships are ever (re)assigned;
+  (`isIdle`, `ShipTaskRepo.listIdle(shipSymbols)`). Only idle ships *this service
+  dispatches* are ever (re)assigned (rows for other ships are ignored, logged
+  once, never deleted, #40);
   running work is never preempted.
 - **`idleTask(task)` is the base for every assignment and every completion.**
   It resets task kind, phase, all targets, `failureCount`, and the cycle

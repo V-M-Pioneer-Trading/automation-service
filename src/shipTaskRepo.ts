@@ -170,15 +170,31 @@ export class ShipTaskRepo {
   }
 
   /**
-   * Every ship with no assigned target (a brand new task, or one whose cycle
-   * just completed) — the candidate set a fleet-wide replan reassigns. A ship
-   * mid-task never matches this, so a replan can never preempt work in flight.
+   * Of the given ships, those with no assigned target (a brand new task, or
+   * one whose cycle just completed) — the candidate set a fleet-wide replan
+   * reassigns. A ship mid-task never matches this, so a replan can never
+   * preempt work in flight.
+   *
+   * Scoped to the ships the service dispatches: a leftover row for a ship it
+   * no longer owns (a universe reset) is not a candidate, because asking the
+   * game about that ship fails and would fail every replan with it.
    */
-  async listIdle(): Promise<ShipTask[]> {
+  async listIdle(shipSymbols: string[]): Promise<ShipTask[]> {
     const { rows } = await this.pool.query<TaskRow>(
-      `SELECT ${TASK_COLUMNS} FROM ship_task WHERE asteroid_waypoint IS NULL AND contract_id IS NULL`
+      `SELECT ${TASK_COLUMNS} FROM ship_task
+       WHERE asteroid_waypoint IS NULL AND contract_id IS NULL AND ship_symbol = ANY($1::text[])`,
+      [shipSymbols]
     );
     return rows.map(rowToTask);
+  }
+
+  /** Symbols of every task row for a ship outside `shipSymbols` — what a replan ignores, so it can say so. */
+  async listOtherShipSymbols(shipSymbols: string[]): Promise<string[]> {
+    const { rows } = await this.pool.query<{ ship_symbol: string }>(
+      `SELECT ship_symbol FROM ship_task WHERE NOT (ship_symbol = ANY($1::text[])) ORDER BY ship_symbol`,
+      [shipSymbols]
+    );
+    return rows.map((r) => r.ship_symbol);
   }
 
   async save(task: ShipTask): Promise<void> {

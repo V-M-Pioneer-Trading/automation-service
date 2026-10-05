@@ -5,6 +5,7 @@ import { discoverAndEvaluateContracts } from "./contractDiscovery";
 import { ContractRepo } from "./contractRepo";
 import { DispatchLock } from "./dispatchLock";
 import { advanceContractTask, contractCargoAtStake, startContractTask } from "./contractTask";
+import { AnomalyRepo } from "./anomaly";
 import type { EventLog } from "./eventLog";
 import type { GameClients, ShipSnapshot, UpstreamFailureKind } from "./gameClients";
 import { UNRELATED_FAILURE_KINDS, UpstreamCallError } from "./gameClients";
@@ -55,6 +56,16 @@ export const verdictOf = (err: unknown): FailureVerdict =>
  */
 export const UNRELATED_FAILURE_RETRY_MULTIPLIER = 100;
 
+/**
+ * How many identical `denied` failures in a row raise a `repeated_denied`
+ * anomaly. `denied` never clears itself (the game says the agent does not own
+ * that ship), so a repeat is a stuck fleet, not a blip. A hiccup (token
+ * rotation, a deploy mid-flight) can fail a couple in a row; five clears that
+ * and still pages within seconds at the default 5s tick. Fixed, not a knob: it
+ * is a tripwire against silent looping.
+ */
+export const REPEATED_DENIED_THRESHOLD = 5;
+
 export interface FleetSchedulerDeps {
   state: AutopilotState;
   tasks: ShipTaskRepo;
@@ -102,17 +113,80 @@ export class FleetScheduler {
   private readonly dispatchLock: DispatchLock;
   // So standing by logs once per spell, not once per tick.
   private standbyLogged = false;
+  // Run of identical `denied` failures, so a stuck fleet pages once instead of
+  // looping silently. Cleared by any other failure and by a clean live tick,
+  // which re-arms it. In memory on purpose: a restart restarts the count.
+  private deniedStreak: { key: string; count: number } | null = null;
+  private failedThisTick = false;
+  // Stale rows already reported, so the replan logs each once, not every run.
+  private readonly reportedStale = new Set<string>();
+  private readonly anomalies: AnomalyRepo;
 
   constructor(private readonly deps: FleetSchedulerDeps) {
+    this.anomalies = new AnomalyRepo(deps.pool, deps.clock);
     this.dispatchLock = new DispatchLock(deps.pool, `dispatch:${deps.shipSymbol}`);
     // Pre-FSM failures (getShip, the planner, a replan) land here rather than
     // in handleTickFailure, and during an outage they are most of them. They
     // carry the same verdict so nothing filtering on `failureKind` sees a
     // partial picture — they just never touch a target's retry budget,
     // because no target has been acted on yet.
-    this.loop = new IntervalLoop(deps.intervalMs, () => this.tick(), (err) =>
-      deps.events.append("mining_tick_error", { shipSymbol: deps.shipSymbol, message: String(err), failureKind: verdictOf(err) })
-    );
+    this.loop = new IntervalLoop(deps.intervalMs, () => this.runTick(), async (err) => {
+      this.failedThisTick = true;
+      await deps.events.append("mining_tick_error", {
+        shipSymbol: this.requestedShipOf(err),
+        message: String(err),
+        failureKind: verdictOf(err),
+      });
+      await this.noteFailure(err);
+    });
+  }
+
+  /** The ship the failure was about when the call said so, else the configured one. */
+  private requestedShipOf(err: unknown): string {
+    return (err instanceof UpstreamCallError ? err.requestedShip : undefined) ?? this.deps.shipSymbol;
+  }
+
+  private async runTick(): Promise<void> {
+    this.failedThisTick = false;
+    await this.tick();
+    if (!this.tickFailed() && this.isArmedLive()) this.deniedStreak = null;
+  }
+
+  /** A call, not a field read: the flag is set during awaits, which narrowing cannot see. */
+  private tickFailed(): boolean {
+    return this.failedThisTick;
+  }
+
+  /**
+   * Counts a run of identical `denied` failures and, at the threshold, records
+   * exactly one anomaly for it (the anomaly scheduler delivers it like any
+   * other). Later repeats of the same run add nothing; any other failure
+   * breaking the run, or a clean tick, re-arms it.
+   */
+  private async noteFailure(err: unknown): Promise<void> {
+    if (verdictOf(err) !== "denied") {
+      this.deniedStreak = null;
+      return;
+    }
+    const symbol = this.requestedShipOf(err);
+    const key = `${symbol}|${String(err)}`;
+    const count = this.deniedStreak?.key === key ? this.deniedStreak.count + 1 : 1;
+    this.deniedStreak = { key, count };
+    if (count !== REPEATED_DENIED_THRESHOLD) return;
+    try {
+      await this.anomalies.record({
+        type: "repeated_denied",
+        dedupeKey: `repeated_denied:${symbol}`,
+        detail: {
+          shipSymbol: symbol,
+          configuredShipSymbol: this.deps.shipSymbol,
+          message: String(err),
+          consecutiveFailures: count,
+        },
+      });
+    } catch (recordErr) {
+      console.error("automation-service: could not record repeated_denied anomaly", recordErr);
+    }
   }
 
   start(): void {
@@ -332,7 +406,15 @@ export class FleetScheduler {
 
     // Re-scores every ship with no assigned target. A ship mid-task never
     // matches that predicate, so running work is never preempted.
-    const idle = await this.deps.tasks.listIdle();
+    // Only ships this service dispatches. Rows for any other ship (left over
+    // from a universe reset) are ignored, with a log line, never deleted.
+    const dispatched = [this.deps.shipSymbol];
+    const stale = (await this.deps.tasks.listOtherShipSymbols(dispatched)).filter((s) => !this.reportedStale.has(s));
+    for (const symbol of stale) {
+      this.reportedStale.add(symbol);
+      console.warn(`automation-service: replan ignoring ship_task row for ${symbol}: not a ship this service dispatches`);
+    }
+    const idle = await this.deps.tasks.listIdle(dispatched);
     if (idle.length > 0) {
       // One discovery pass for the whole replan, not one per ship.
       const ship = await this.deps.clients.getShip(idle[0].shipSymbol);
@@ -459,13 +541,16 @@ export class FleetScheduler {
       failureCount: task.failureCount + (blamesTarget ? 1 : 0),
       unrelatedFailureCount: task.unrelatedFailureCount + (blamesTarget ? 0 : 1),
     };
+    this.failedThisTick = true;
     await events.append("mining_tick_error", {
-      shipSymbol,
+      shipSymbol: this.requestedShipOf(err),
       message: String(err),
       failureKind: kind,
       failureCount: counted.failureCount,
       unrelatedFailureCount: counted.unrelatedFailureCount,
     });
+
+    await this.noteFailure(err);
 
     // Same discard invariant as the success path: an abort or a switch to
     // shadow mode mid-flight must stop this failure from mutating ship_task.
