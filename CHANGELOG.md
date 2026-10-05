@@ -34,8 +34,11 @@ trail diverged in the unsafe direction.
 The same change adds graceful shutdown on SIGTERM/SIGINT: refuse lifecycle
 changes (503) and let accepted ones persist, stop the three schedulers after
 their in-flight ticks, close the HTTP server, close the pool, exit 0 — or 1 on
-a failed step or after 25 s. Before, ECS's SIGTERM killed the process
-mid-tick. `makeFlakyPool` moved from `contract.test.ts` to `testSupport/`.
+a failed step or after 8 s. Before, Node ran as PID 1 in the container with
+no handler, so `docker stop`'s SIGTERM was ignored and the process was
+SIGKILLed mid-tick after the timeout. Production is Docker on EC2, so this
+covers `docker stop` and a host reboot only; the deploy script's
+`docker rm -f` is SIGKILL and needs a `docker stop -t 9` before it (infra PR). `makeFlakyPool` moved from `contract.test.ts` to `testSupport/`.
 
 ## Stale ship_task rows, repeated denied (#40)
 

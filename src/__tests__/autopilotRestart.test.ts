@@ -13,6 +13,7 @@ import type { Pool } from "pg";
 import { AnomalyRepo } from "../anomaly";
 import {
   AutopilotLifecycle,
+  type PersistedAutopilot,
   AutopilotStateRepo,
   RESTART_ACTOR,
   RESUMED_IN_SHADOW,
@@ -23,7 +24,7 @@ import { AutopilotState, type AutopilotSnapshot } from "../autopilotState";
 import { createPool, migrate } from "../db";
 import { autopilotRestored } from "../server";
 import { forceAnomalyTick, stopBackgroundSchedulers } from "../testSupport/appHooks";
-import { bearer } from "../testSupport/authTokens";
+import { bearer, TEST_ACTOR as OPERATOR } from "../testSupport/authTokens";
 import { createTestApp } from "../testSupport/createTestApp";
 import { databaseUrl } from "../testSupport/databaseUrl";
 import { FakeClock } from "../testSupport/fakeClock";
@@ -77,7 +78,8 @@ describe("autopilot state across a restart (Q29)", () => {
   const status = async (app: Express) => (await request(app).get(`${BASE}/status`)).body as AutopilotSnapshot;
   const lifecycleEvents = async (app: Express) =>
     ((await request(app).get(`${BASE}/events`)).body as EventsBody).events.filter((e) => ["armed", "paused", "aborted"].includes(e.type));
-  const persisted = () => new AutopilotStateRepo(pool, clock).load();
+  const snapshotOf = (row: PersistedAutopilot | null) => (row === null ? null : { status: row.status, mode: row.mode });
+  const persisted = async () => snapshotOf(await new AutopilotStateRepo(pool, clock).load());
   const anomalies = () => new AnomalyRepo(pool, clock).listSince(new Date(0), 50);
 
   describe("persistence", () => {
@@ -93,7 +95,7 @@ describe("autopilot state across a restart (Q29)", () => {
       ];
       for (const snapshot of cases) {
         await repo.save(snapshot, "user_test");
-        expect(await repo.load()).toEqual(snapshot);
+        expect(snapshotOf(await repo.load())).toEqual(snapshot);
       }
       const { rows } = await pool.query<{ n: string }>("SELECT count(*) AS n FROM autopilot_state");
       expect(Number(rows[0].n)).toBe(1);
@@ -142,9 +144,11 @@ describe("autopilot state across a restart (Q29)", () => {
       expect(raised).toHaveLength(1);
       expect(raised[0].type).toBe(RESUMED_IN_SHADOW);
       expect(raised[0].detail).toMatchObject({
-        message: "autopilot resumed in shadow after restart; was live; re-arm live to continue trading",
+        message: `autopilot resumed in shadow after restart; was live; re-arm live to continue trading (state last set by ${OPERATOR} at ${START.toISOString()})`,
         was: { status: "armed", mode: "live" },
         now: { status: "armed", mode: "shadow" },
+        lastWrittenBy: OPERATOR,
+        lastWrittenAt: START.toISOString(),
       });
 
       const [latest] = await lifecycleEvents(second);
@@ -204,8 +208,8 @@ describe("autopilot state across a restart (Q29)", () => {
       expect(await status(second)).toEqual({ status: "paused", mode: "shadow" });
       const raised = await anomalies();
       expect(raised).toHaveLength(1);
-      expect(raised[0].detail.message).toBe(
-        "autopilot resumed in shadow after restart; was paused (live); re-arm live to continue trading"
+      expect(raised[0].detail.message).toMatch(
+        /^autopilot resumed in shadow after restart; was paused \(live\); re-arm live to continue trading \(state last set by /
       );
       const [latest] = await lifecycleEvents(second);
       expect(latest).toMatchObject({ type: "paused", detail: { from: "disarmed", mode: "shadow", actor: RESTART_ACTOR } });
@@ -380,7 +384,7 @@ describe("autopilot state across a restart (Q29)", () => {
   });
 
   describe("restoredAfterRestart", () => {
-    it.each<[AutopilotSnapshot | null, AutopilotSnapshot, boolean]>([
+    it.each<[PersistedAutopilot | null, AutopilotSnapshot, boolean]>([
       [null, { status: "disarmed", mode: null }, false],
       [{ status: "disarmed", mode: null }, { status: "disarmed", mode: null }, false],
       [{ status: "aborted", mode: null }, { status: "aborted", mode: null }, false],
@@ -388,15 +392,45 @@ describe("autopilot state across a restart (Q29)", () => {
       [{ status: "armed", mode: "shadow" }, { status: "armed", mode: "shadow" }, false],
       [{ status: "paused", mode: "live" }, { status: "paused", mode: "shadow" }, true],
       [{ status: "paused", mode: "shadow" }, { status: "paused", mode: "shadow" }, false],
+      // Fail closed by shape: values the CHECKs should make impossible.
+      [{ status: "armed", mode: null }, { status: "armed", mode: "shadow" }, true],
+      [{ status: "armed", mode: "LIVE" }, { status: "armed", mode: "shadow" }, true],
+      [{ status: "paused", mode: "turbo" }, { status: "paused", mode: "shadow" }, true],
+      [{ status: "aborted", mode: "live" }, { status: "aborted", mode: null }, false],
+      [{ status: "disarmed", mode: "live" }, { status: "disarmed", mode: null }, false],
+      [{ status: "ARMED", mode: "live" }, { status: "disarmed", mode: null }, false],
+      [{ status: "running", mode: "live" }, { status: "disarmed", mode: null }, false],
+      [{ status: "", mode: null }, { status: "disarmed", mode: null }, false],
     ])("%j restores as %j (downgraded: %s)", (saved, expected, downgraded) => {
       const plan = restoredAfterRestart(saved);
       expect(plan.snapshot).toEqual(expected);
       expect(plan.downgradedFrom).toEqual(downgraded ? saved : null);
     });
 
-    it("never restores live", () => {
-      for (const status of ["armed", "paused"] as const) {
-        expect(restoredAfterRestart({ status, mode: "live" }).snapshot.mode).toBe("shadow");
+    it("never restores live, whatever the row holds", () => {
+      const statuses = ["armed", "paused", "aborted", "disarmed", "live", "ARMED", "", "armed "];
+      const modes = ["live", "shadow", "LIVE", "", "null", null];
+      for (const status of statuses) {
+        for (const mode of modes) {
+          expect(restoredAfterRestart({ status, mode }).snapshot.mode).not.toBe("live");
+        }
+      }
+    });
+
+    it("restores a garbled row in the table as shadow, with the anomaly", async () => {
+      // Bypasses the CHECK the way a manual edit or a future migration could.
+      await pool.query("ALTER TABLE autopilot_state DROP CONSTRAINT IF EXISTS autopilot_state_mode_check");
+      try {
+        await pool.query(
+          "INSERT INTO autopilot_state (singleton, status, mode, updated_at, updated_by) VALUES (TRUE, 'armed', 'LIVE', $1, 'user_x')",
+          [START]
+        );
+        const app = await boot();
+        expect(await status(app)).toEqual({ status: "armed", mode: "shadow" });
+        expect(await anomalies()).toHaveLength(1);
+      } finally {
+        await pool.query("TRUNCATE autopilot_state");
+        await pool.query("ALTER TABLE autopilot_state ADD CONSTRAINT autopilot_state_mode_check CHECK (mode IN ('live', 'shadow'))");
       }
     });
 
@@ -404,6 +438,9 @@ describe("autopilot state across a restart (Q29)", () => {
       expect(resumedInShadowAnomaly({ status: "armed", mode: "live" }).detail.message).toBe(
         "autopilot resumed in shadow after restart; was live; re-arm live to continue trading"
       );
+      const withAuthor = resumedInShadowAnomaly({ status: "armed", mode: "live", updatedBy: "user_a", updatedAt: "2026-10-05T09:00:00.000Z" });
+      expect(withAuthor.detail).toMatchObject({ lastWrittenBy: "user_a", lastWrittenAt: "2026-10-05T09:00:00.000Z" });
+      expect(withAuthor.detail.message).toContain("(state last set by user_a at 2026-10-05T09:00:00.000Z)");
       expect(resumedInShadowAnomaly({ status: "armed", mode: "live" }).type).toBe(RESUMED_IN_SHADOW);
     });
   });

@@ -39,12 +39,15 @@ import { installShutdownHandlers, shutdownGracefully, type ShutdownSteps } from 
 import { WebhookDelivery } from "./webhookDelivery";
 
 /**
- * How long a SIGTERM may take before the process gives up and exits 1. Under
- * ECS's default 30s stop timeout, so the service exits on its own terms rather
- * than being SIGKILLed: a fleet tick is bounded by the 15s upstream timeout,
- * which this outlasts.
+ * How long a SIGTERM may take before the process gives up and exits 1.
+ * Production is Docker on EC2: `docker stop` sends SIGTERM and SIGKILLs after
+ * 10 s by default (the deploy passes `-t 9`), so this stays under both and
+ * the service exits on its own terms. It does not outlast every tick — the
+ * 15 s upstream timeout is per call, and a tick makes several — so a tick
+ * caught mid-call is cut off; the lifecycle row is safe regardless, because
+ * closing the lifecycle is the first step and finishes in milliseconds.
  */
-const SHUTDOWN_TIMEOUT_MS = 25_000;
+const SHUTDOWN_TIMEOUT_MS = 8_000;
 
 const MAX_EVENTS_LIMIT = 1000;
 const MAX_ROLLUPS_LIMIT = 200;

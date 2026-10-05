@@ -238,6 +238,12 @@ for callers who look there first.
   aborted and never-armed come back unchanged and raise nothing (shadow still
   logs its `armed`/`paused` restart event). Resuming live without the owner is
   the one thing a restart must never do; `autopilotRestart.test.ts` pins it.
+  **It fails closed by shape:** armed/paused restore as shadow *whatever* the
+  stored mode is (anything but exactly `shadow` counts as a downgrade and
+  raises the anomaly), and an unknown status restores as disarmed. Never
+  rewrite it as "if live then shadow". The anomaly carries `lastWrittenBy`
+  and `lastWrittenAt` from the row, because a pause or abort that failed to
+  persist leaves an older live row behind.
   The anomaly is delivered by the anomaly loop's `redeliverMissed`, not
   inline, and does not request a replan.
 - **Every lifecycle change goes through `AutopilotLifecycle`**, never
@@ -256,8 +262,11 @@ for callers who look there first.
   `start()` a loop after it has been stopped, and the pool closes last because
   `DispatchLock` holds a pooled connection (see above). A step that throws
   doesn't stop the rest; the whole thing is bounded by `SHUTDOWN_TIMEOUT_MS`
-  (25 s, under ECS's 30 s), and the exit code is 0 only if every step finished
-  cleanly.
+  (8 s, under `docker stop`'s 10 s default and the deploy's `-t 9`), and the
+  exit code is 0 only if every step finished cleanly. Production is Docker on
+  EC2, not ECS: only `docker stop` and a host reboot send SIGTERM; `docker rm
+  -f` is SIGKILL. The deadline does not outlast a tick (15 s is per upstream
+  call), so do not move anything that must survive shutdown after step 1.
 
 ## Scheduler tick order
 

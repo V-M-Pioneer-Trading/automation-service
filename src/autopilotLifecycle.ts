@@ -1,7 +1,7 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type { AnomalyCandidate } from "./anomaly";
 import { AnomalyRepo } from "./anomaly";
-import type { AutopilotMode, AutopilotSnapshot, AutopilotState, AutopilotStatus } from "./autopilotState";
+import type { AutopilotMode, AutopilotSnapshot, AutopilotState } from "./autopilotState";
 import type { Clock } from "./clock";
 import { EventLog } from "./eventLog";
 import { withTransaction } from "./transaction";
@@ -23,12 +23,14 @@ export class AutopilotStateRepo {
   // Pool | PoolClient so a transition's row and its event commit together.
   constructor(private pool: Pool | PoolClient, private clock: Clock) {}
 
-  /** The persisted lifecycle, or null when nothing has ever been persisted. */
-  async load(): Promise<AutopilotSnapshot | null> {
+  /** The persisted row, or null when nothing has ever been persisted. */
+  async load(): Promise<PersistedAutopilot | null> {
     // FOR UPDATE: inside a restore's transaction this holds the row until the
     // downgrade commits, so two booting processes cannot both read "live".
-    const { rows } = await this.pool.query<StateRow>("SELECT status, mode FROM autopilot_state FOR UPDATE");
-    return rows.length === 0 ? null : { status: rows[0].status, mode: rows[0].mode };
+    const { rows } = await this.pool.query<StateRow>("SELECT status, mode, updated_at, updated_by FROM autopilot_state FOR UPDATE");
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    return { status: row.status, mode: row.mode, updatedAt: row.updated_at.toISOString(), updatedBy: row.updated_by };
   }
 
   async save(snapshot: AutopilotSnapshot, actor: string | null): Promise<void> {
@@ -42,15 +44,30 @@ export class AutopilotStateRepo {
 }
 
 interface StateRow extends QueryResultRow {
-  status: AutopilotStatus;
-  mode: AutopilotMode | null;
+  status: string;
+  mode: string | null;
+  updated_at: Date;
+  updated_by: string | null;
+}
+
+/**
+ * The row as read. Status and mode are deliberately plain strings: the CHECKs
+ * should make anything else impossible, but the restore is the one place a
+ * misread can start a fleet, so it judges whatever is actually there.
+ */
+export interface PersistedAutopilot {
+  status: string;
+  mode: string | null;
+  /** Who last wrote the row and when — part of the alert, because a failed abort write leaves an older author here. */
+  updatedAt?: string | null;
+  updatedBy?: string | null;
 }
 
 /** What a boot runs as, and what (if anything) it refused to resume. */
 export interface RestorePlan {
   snapshot: AutopilotSnapshot;
-  /** The persisted live state that was downgraded to shadow, or null when nothing was. */
-  downgradedFrom: AutopilotSnapshot | null;
+  /** The persisted row whose mode was not shadow (live, or anything unreadable), or null when nothing was downgraded. */
+  downgradedFrom: PersistedAutopilot | null;
 }
 
 /**
@@ -63,25 +80,41 @@ export interface RestorePlan {
  * instance, a half-finished rollback) — so the restart keeps everything that
  * costs nothing (planning, scoring, the event trail) and stops short of the
  * one thing that does. Shadow, disarmed and aborted come back as they were.
+ *
+ * **Fail closed by shape**, not by enumerating live: armed or paused *always*
+ * comes back in shadow, whatever the stored mode says, so no value of the mode
+ * column can produce a live process. Anything but exactly `shadow` there is
+ * reported as a downgrade (it may have been live). A status this code does not
+ * know comes back disarmed.
  */
-export function restoredAfterRestart(persisted: AutopilotSnapshot | null): RestorePlan {
+export function restoredAfterRestart(persisted: PersistedAutopilot | null): RestorePlan {
   if (persisted === null) return { snapshot: DISARMED, downgradedFrom: null };
-  if (persisted.mode === "live") {
-    return { snapshot: { status: persisted.status, mode: "shadow" }, downgradedFrom: persisted };
+  const { status, mode } = persisted;
+  if (status === "armed" || status === "paused") {
+    return { snapshot: { status, mode: "shadow" }, downgradedFrom: mode === "shadow" ? null : persisted };
   }
-  return { snapshot: persisted, downgradedFrom: null };
+  if (status === "aborted") return { snapshot: { status: "aborted", mode: null }, downgradedFrom: null };
+  return { snapshot: DISARMED, downgradedFrom: null };
 }
 
 /** The anomaly a downgrade raises: the one place a restart asks for a human. */
-export function resumedInShadowAnomaly(was: AutopilotSnapshot): AnomalyCandidate {
+export function resumedInShadowAnomaly(was: PersistedAutopilot): AnomalyCandidate {
   const wasDescription = was.status === "armed" ? String(was.mode) : `${was.status} (${String(was.mode)})`;
+  const lastWrittenBy = was.updatedBy ?? null;
+  const lastWrittenAt = was.updatedAt ?? null;
+  // Who set it, and when: a pause or abort that failed to persist leaves an
+  // older live row behind, and this is how the owner tells that apart from a
+  // session that really was trading when the process stopped.
+  const provenance = lastWrittenAt === null ? "" : ` (state last set by ${String(lastWrittenBy)} at ${lastWrittenAt})`;
   return {
     type: RESUMED_IN_SHADOW,
     dedupeKey: RESUMED_IN_SHADOW,
     detail: {
-      message: `autopilot resumed in shadow after restart; was ${wasDescription}; re-arm live to continue trading`,
-      was,
+      message: `autopilot resumed in shadow after restart; was ${wasDescription}; re-arm live to continue trading${provenance}`,
+      was: { status: was.status, mode: was.mode },
       now: { status: was.status, mode: "shadow" },
+      lastWrittenBy,
+      lastWrittenAt,
       actor: RESTART_ACTOR,
     },
   };

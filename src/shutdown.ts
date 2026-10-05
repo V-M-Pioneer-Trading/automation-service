@@ -1,6 +1,10 @@
 /**
- * Graceful shutdown on SIGTERM/SIGINT (ECS sends SIGTERM on every deploy, then
- * SIGKILL after its stop timeout).
+ * Graceful shutdown on SIGTERM/SIGINT. Production is Docker on EC2, where this
+ * covers `docker stop` (SIGTERM, then SIGKILL after its timeout: the deploy
+ * passes `-t 9`) and a host reboot (dockerd stops containers the same way).
+ * A `docker rm -f` or `docker kill` is SIGKILL and gets none of it. Node runs
+ * as PID 1 in the container, where a signal with no handler is ignored, so
+ * before this a `docker stop` always waited out its timeout and SIGKILLed.
  *
  * Shutting down is **not** an abort: nothing here writes the autopilot state.
  * The persisted row stays as the operator left it, and the next boot restores

@@ -463,19 +463,28 @@ longer disarms the autopilot. What a restart brings back is everything except
 in **shadow** — it keeps planning and logging, and dispatches nothing — and
 raises one `autopilot_resumed_in_shadow` anomaly, delivered through the usual
 webhook: *"autopilot resumed in shadow after restart; was live; re-arm live to
-continue trading"*. Trading resumes only when someone re-arms live. Shadow,
+continue trading"*. The alert also names who last wrote the state and when, so a pause or abort
+that failed to persist is not mistaken for a session that was trading.
+Trading resumes only when someone re-arms live. Shadow,
 aborted and never-armed come back as they were, with no anomaly, since nothing
 was lost. Any restore that brings the autopilot back armed or paused logs a
 lifecycle event (`armed` or `paused`) with actor `system:restart`, so the event
 log shows the restart, not the operator, did it. Because the downgrade is
 written back, a crash-looping process raises the anomaly once, not per boot.
+The rule fails closed by shape: armed or paused always comes back in shadow
+whatever the stored mode says, and a status it does not recognise comes back
+disarmed.
 
 **Shutdown.** On `SIGTERM` or `SIGINT` the service refuses new arm, pause and
 abort requests (`503`) and waits for accepted ones to persist, stops every
 scheduler after its in-flight tick, closes the HTTP server after its in-flight
 requests, then closes the Postgres pool and exits `0` — or exits `1` if any
-step failed or the whole thing took more than 25 s. Shutting down is not an
+step failed or the whole thing took more than 8 s. Shutting down is not an
 abort: it writes nothing, so the next process restores what the operator left.
+This covers `docker stop` (the deploy runs `docker stop -t 9` before replacing
+the container) and a host reboot, and nothing else: `docker rm -f` or
+`docker kill` is SIGKILL. A tick cut off by the deadline loses at most that
+tick's write; the lifecycle row is closed first and is never at risk.
 
 ---
 

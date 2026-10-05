@@ -74,9 +74,17 @@ describe("shutdownGracefully", () => {
   it("gives up at the deadline on a step that hangs", async () => {
     const order: string[] = [];
     const steps = recordingSteps(order, { closeServer: () => new Promise<void>(() => undefined) });
-    const started = Date.now();
-    expect(await shutdownGracefully(steps, 50, quiet)).toBe("timed-out");
-    expect(Date.now() - started).toBeLessThan(1000);
+    jest.useFakeTimers();
+    try {
+      let outcome: string | null = null;
+      void shutdownGracefully(steps, 8000, quiet).then((o) => (outcome = o));
+      await jest.advanceTimersByTimeAsync(7999);
+      expect(outcome).toBeNull(); // not a moment early
+      await jest.advanceTimersByTimeAsync(1);
+      expect(outcome).toBe("timed-out");
+    } finally {
+      jest.useRealTimers();
+    }
     expect(order).toEqual(["closeLifecycle", "stopSchedulers"]);
   });
 });
@@ -219,7 +227,7 @@ describe("the entrypoint's shutdown against a running app", () => {
     expect(outcome).toBe("clean");
     expect((await inFlightResponse).status).toBe(200);
     // Shutdown is not an abort: the row is what the operator last set.
-    expect(await new AutopilotStateRepo(pool, new FakeClock(new Date())).load()).toEqual({ status: "armed", mode: "live" });
+    expect(await new AutopilotStateRepo(pool, new FakeClock(new Date())).load()).toMatchObject({ status: "armed", mode: "live" });
     // Every loop is stopped: forcing a tick on a stopped loop throws.
     await expect(forceFleetTick(app)).rejects.toThrow(/stopped loop/);
     await expect(forceAnomalyTick(app)).rejects.toThrow(/stopped loop/);
