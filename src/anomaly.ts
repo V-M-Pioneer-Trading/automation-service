@@ -328,6 +328,11 @@ export class AnomalyChecker {
    * is older than the cooldown it stops being a candidate, so one event never
    * pages twice. The window is open at its far end (+1ms) so an event and an
    * anomaly recorded at the same instant cannot both fall on the boundary.
+   *
+   * Requires `ANOMALY_INTERVAL_MS` to stay below the cooldown: an event is only
+   * seen by ticks inside its window, and a slower loop can miss it. The 60s
+   * default suits the 15 minute default cooldown; a cooldown knob set near its
+   * 1 minute floor needs a faster interval.
    */
   private async checkRepeatedDenied(now: Date, knobs: KnobValues): Promise<AnomalyCandidate[]> {
     const since = new Date(now.getTime() - knobs["anomaly.dedupeCooldownMinutes"] * 60_000 + 1);

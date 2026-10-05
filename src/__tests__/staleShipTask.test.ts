@@ -354,6 +354,64 @@ describe("stale ship_task rows and repeated denied (#40)", () => {
       expect(await anomalyCount()).toBe(1);
     });
 
+    it("writes one tripped event per run, however long the failure continues, and again every threshold repeats", async () => {
+      const { s, events } = build(fakeGameClients({ getShip: () => Promise.reject(deniedFor(SHIP)) }), 100_000);
+
+      for (let i = 0; i < REPEATED_DENIED_THRESHOLD * 2 - 1; i++) await s.forceTick();
+      expect(await trippedCount(events)).toBe(1);
+
+      await s.forceTick(); // the tenth: a continuing failure trips again for the next cooldown
+      expect(await trippedCount(events)).toBe(2);
+    });
+
+    it("abort then re-arm ends the run, through the real stop() and start()", async () => {
+      const { s, events } = build(fakeGameClients({ getShip: () => Promise.reject(deniedFor(SHIP)) }), 100_000);
+      for (let i = 0; i < REPEATED_DENIED_THRESHOLD - 1; i++) await s.forceTick();
+
+      await s.stop(); // what the abort route does
+      s.start(); // what re-arming does; the fleet reads armed throughout
+      await s.forceTick();
+
+      expect(await trippedCount(events)).toBe(0);
+    });
+
+    it("re-arming a fleet that is already running (start() with no stop()) also ends the run", async () => {
+      const { s, events } = build(fakeGameClients({ getShip: () => Promise.reject(deniedFor(SHIP)) }), 100_000);
+      for (let i = 0; i < REPEATED_DENIED_THRESHOLD - 1; i++) await s.forceTick();
+
+      s.start();
+      await s.forceTick();
+
+      expect(await trippedCount(events)).toBe(0);
+    });
+
+    it("a re-arm after a trip starts counting afresh, so a failure that was not fixed pages again", async () => {
+      const { s, events } = build(fakeGameClients({ getShip: () => Promise.reject(deniedFor(SHIP)) }), 100_000);
+      for (let i = 0; i < REPEATED_DENIED_THRESHOLD; i++) await s.forceTick();
+      expect(await trippedCount(events)).toBe(1);
+
+      await s.stop();
+      s.start();
+      for (let i = 0; i < REPEATED_DENIED_THRESHOLD; i++) await s.forceTick();
+
+      expect(await trippedCount(events)).toBe(2);
+    });
+
+    it("the checker's event window closes at the cooldown: seen just inside it, gone just past it", async () => {
+      const events = new EventLog(pool, clock);
+      await events.append("repeated_denied_tripped", { shipSymbol: SHIP });
+      const checker = new AnomalyChecker(clock, state, new MarketIntelRepo(pool, clock), events, new MetricsRepo(pool, clock));
+      const knobs = await new KnobRepo(pool).getValues();
+      const cooldownMs = knobs["anomaly.dedupeCooldownMinutes"] * 60_000;
+      const types = async () => (await checker.runChecks(SHIP, null, knobs)).filter((c) => c.type === "repeated_denied");
+
+      clock.advance(cooldownMs - 60_000);
+      expect(await types()).toHaveLength(1);
+
+      clock.advance(120_000); // cooldown + 1 minute
+      expect(await types()).toHaveLength(0);
+    });
+
     it("a flapping ship (5 denied, 1 clean, repeatedly) pages at most once per cooldown", async () => {
       let healthy = false;
       const clients = fakeGameClients({

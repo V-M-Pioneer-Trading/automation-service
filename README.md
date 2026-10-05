@@ -479,7 +479,9 @@ Five identical `denied` failures in a row from one source (replan or tick) log
 `repeated_denied_tripped`, which the anomaly checker turns into one
 `repeated_denied` anomaly (so it follows the usual dedupe cooldown and
 delivery). Only a clean outcome of the same source re-arms its run, as does a
-pause, abort or re-arm. That pages in about 25s for a failing tick (5s
+pause, abort or re-arm. A failure that never clears trips again at every fifth
+repeat, and the cooldown dedupes those. The tick and replan sources count
+separately, so one incident that fails both can page once from each, by design. That pages in about 25s for a failing tick (5s
 interval) and about 20 minutes for a failing replan (one per
 `REPLAN_INTERVAL_MS`, 5 min). Tasks are kept short and bounded, one mining round trip or one
 delivery leg, so a stale assignment costs minutes at most. Abort is the only
@@ -644,7 +646,7 @@ Invalid lifecycle transitions return `409` naming the current status.
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
 | `REPLAN_INTERVAL_MS` | Periodic replan fallback (default `300000`) |
 | `ANOMALY_WEBHOOK_URL` | Where to page when an anomaly fires. **Optional** — unset means anomalies are still detected, recorded and served from `/anomalies/digest`, and only the outbound POST is skipped |
-| `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
+| `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`). Keep it below `anomaly.dedupeCooldownMinutes`: `repeated_denied` is read from events inside that window, so a slower loop can miss one |
 | `METRICS_ROLLUP_INTERVAL_MS` | Rollup cadence (default `60000`) |
 | `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |
 | `AUTH_INTROSPECTION_URL` | auth-service's **full** introspection endpoint, `/auth/v1/introspect` included, used verbatim; e.g. `http://localhost:3005/auth/v1/introspect` (**required**) |

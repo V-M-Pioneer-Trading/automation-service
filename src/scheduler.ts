@@ -203,10 +203,13 @@ export class FleetScheduler {
 
   /**
    * Counts a run of identical `denied` failures from one source and, at the
-   * threshold, logs `repeated_denied_tripped` once for that run. The anomaly
-   * checker turns that event into an anomaly, so dedupe cooldown, delivery and
-   * the stop guards are the anomaly scheduler's own. Later repeats of the run
-   * add nothing; any other failure from the source breaks it.
+   * threshold (and at each further multiple of it, for a failure that never
+   * clears), logs `repeated_denied_tripped`. The anomaly checker turns that
+   * event into an anomaly, so dedupe cooldown, delivery and the stop guards are
+   * the anomaly scheduler's own. Any other failure from the source breaks the
+   * run. The tick source and the replan source count separately, so one
+   * incident that fails both can page once from each: by design, they are two
+   * different broken paths.
    */
   private async noteFailure(err: unknown, source: FailureSource): Promise<void> {
     // Nothing is recorded for a loop that was stopped or an aborted fleet.
@@ -220,7 +223,9 @@ export class FleetScheduler {
     const streak = this.deniedStreaks[source];
     const count = streak?.key === key ? streak.count + 1 : 1;
     this.deniedStreaks[source] = { key, count };
-    if (count !== REPEATED_DENIED_THRESHOLD) return;
+    // Every multiple, not just the first: a failure that outlasts the anomaly
+    // cooldown must page again, and the cooldown dedupes the ones inside it.
+    if (count % REPEATED_DENIED_THRESHOLD !== 0) return;
     await this.deps.events.append(REPEATED_DENIED_EVENT, {
       shipSymbol: symbol,
       configuredShipSymbol: this.deps.shipSymbol,
@@ -231,6 +236,10 @@ export class FleetScheduler {
   }
 
   start(): void {
+    // A fresh arm is a fresh run: abort calls stop(), so no tick ever sees the
+    // fleet as aborted, and re-arming an armed fleet changes no lifecycle.
+    this.clearStreaks();
+    this.lifecycle = null;
     this.startedAt = this.deps.clock.now();
     this.loop.start();
   }
@@ -243,6 +252,8 @@ export class FleetScheduler {
     await this.loop.stop();
     await this.dispatchLock.release();
     this.standbyLogged = false;
+    this.clearStreaks();
+    this.lifecycle = null;
   }
 
   /**

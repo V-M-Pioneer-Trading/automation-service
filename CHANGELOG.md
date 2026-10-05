@@ -16,7 +16,8 @@ requested. Five identical `denied` failures in a row from one source (replan or
 tick) raise one `repeated_denied` anomaly through the anomaly checker (dedupe
 cooldown, immediate delivery, stop guards). A clean outcome of the same source,
 or a pause, abort or re-arm, re-arms it. Webhook detail carries only the request
-path, status and a short message prefix.
+path, status and a short message prefix. Abort and re-arm (stop/start) clear the
+runs; the tick and replan sources can each page once for one incident.
 
 ## Shared ESLint config (meta#105)
 
