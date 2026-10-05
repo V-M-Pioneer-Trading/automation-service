@@ -12,8 +12,11 @@ Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/is
 A replan now considers only the configured ship. A leftover `ship_task` row for
 another ship (a universe reset) is ignored with a log line, never deleted, and
 no longer fails every replan. `mining_tick_error` carries the ship actually
-requested. Five identical `denied` failures in a row raise one `repeated_denied`
-anomaly; a clean tick re-arms it.
+requested. Five identical `denied` failures in a row from one source (replan or
+tick) raise one `repeated_denied` anomaly through the anomaly checker (dedupe
+cooldown, immediate delivery, stop guards). A clean outcome of the same source,
+or a pause, abort or re-arm, re-arms it. Webhook detail carries only the request
+path, status and a short message prefix.
 
 ## Shared ESLint config (meta#105)
 
