@@ -7,6 +7,39 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## A restart no longer disarms the autopilot; it resumes in shadow (Q29)
+
+Every deploy used to disarm the autopilot, because status and mode lived only
+in memory (auth-service#28 found it during the meta#103 cutover). That was a
+consequence of autopilot-design decision 4 — the pasted game token could not
+outlive the process — and decision 4 is superseded (auth-design.md): there is
+no token here any more, so nothing forced the disarm except the code.
+
+The owner chose option C. The lifecycle is now one row, `autopilot_state`,
+written on every arm, pause and abort in the same transaction as its event.
+A boot restores it, **except live**: armed or paused live comes back armed or
+paused in shadow, logs the restore with actor `system:restart`, and raises one
+`autopilot_resumed_in_shadow` anomaly asking the owner to re-arm live. A
+deploy is not the owner saying "keep trading", so the restart keeps everything
+that costs nothing and stops short of dispatch. Shadow comes back as shadow
+with no anomaly: nothing was lost, and an anomaly is the one way this service
+asks a human for something. The downgrade is written back, so a crash loop
+pages once.
+
+All lifecycle changes now run on one queue behind the restore. An arm persists
+before it takes effect; a pause or abort takes effect before it persists. That
+closes the known limitation where a failed event write left status and audit
+trail diverged in the unsafe direction.
+
+The same change adds graceful shutdown on SIGTERM/SIGINT: refuse lifecycle
+changes (503) and let accepted ones persist, stop the three schedulers after
+their in-flight ticks, close the HTTP server, close the pool, exit 0 — or 1 on
+a failed step or after 8 s. Before, Node ran as PID 1 in the container with
+no handler, so `docker stop`'s SIGTERM was ignored and the process was
+SIGKILLed mid-tick after the timeout. Production is Docker on EC2, so this
+covers `docker stop` and a host reboot only; the deploy script's
+`docker rm -f` is SIGKILL and needs a `docker stop -t 9` before it (infra PR). `makeFlakyPool` moved from `contract.test.ts` to `testSupport/`.
+
 ## Stale ship_task rows, repeated denied (#40)
 
 A replan now considers only the configured ship. A leftover `ship_task` row for

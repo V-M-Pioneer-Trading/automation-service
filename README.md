@@ -257,8 +257,8 @@ never left in a state the write path would reject.
 ## The work loops
 
 Each ship runs one task at a time as a resumable state machine. Per-ship
-progress persists to Postgres after every phase change, so a restart plus
-re-arm resumes from the last completed phase.
+progress persists to Postgres after every phase change, so a restart plus a
+live re-arm resumes from the last completed phase.
 
 Every tick performs **at most one atomic action**: dispatch one command,
 resolve one elapsed wait, or get one planner assignment. Never two. That
@@ -434,7 +434,10 @@ one check whose job is to notice one.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> disarmed: process start
+    [*] --> disarmed: first start (nothing persisted)
+    [*] --> armed: restart while armed (shadow; live comes back as shadow)
+    [*] --> paused: restart while paused (shadow; live comes back as shadow)
+    [*] --> aborted: restart while aborted
     disarmed --> armed: arm
     armed --> paused: pause
     armed --> aborted: abort
@@ -446,14 +449,42 @@ stateDiagram-v2
 
 | Status | What the scheduler does |
 |---|---|
-| **disarmed** | Nothing. The service has just started and nobody has armed it. |
+| **disarmed** | Nothing. Nobody has ever armed it. |
 | **armed** | Full progression: assigns targets, dispatches actions, replans. |
 | **paused** | Lets an already-dispatched wait finish and be recorded, then stops dispatching. Never starts a new action or assignment. |
 | **aborted** | Stops immediately. An action already in flight can't be un-sent, so its result is discarded and logged as such, not applied. |
 
-The token only ever lives in memory, so a restart always disarms. Arming is
-valid from any status, including after an abort, and is the only way to switch
-between live and shadow mode.
+Arming is valid from any status, including after an abort, and is the only way
+to switch between live and shadow mode.
+
+**Restarts.** Status and mode are persisted on every transition, so a deploy no
+longer disarms the autopilot. What a restart brings back is everything except
+**live**: an autopilot that was armed or paused live comes back armed or paused
+in **shadow** — it keeps planning and logging, and dispatches nothing — and
+raises one `autopilot_resumed_in_shadow` anomaly, delivered through the usual
+webhook: *"autopilot resumed in shadow after restart; was live; re-arm live to
+continue trading"*. The alert also names who last wrote the state and when, so a pause or abort
+that failed to persist is not mistaken for a session that was trading.
+Trading resumes only when someone re-arms live. Shadow,
+aborted and never-armed come back as they were, with no anomaly, since nothing
+was lost. Any restore that brings the autopilot back armed or paused logs a
+lifecycle event (`armed` or `paused`) with actor `system:restart`, so the event
+log shows the restart, not the operator, did it. Because the downgrade is
+written back, a crash-looping process raises the anomaly once, not per boot.
+The rule fails closed by shape: armed or paused always comes back in shadow
+whatever the stored mode says, and a status it does not recognise comes back
+disarmed.
+
+**Shutdown.** On `SIGTERM` or `SIGINT` the service refuses new arm, pause and
+abort requests (`503`) and waits for accepted ones to persist, stops every
+scheduler after its in-flight tick, closes the HTTP server after its in-flight
+requests, then closes the Postgres pool and exits `0` — or exits `1` if any
+step failed or the whole thing took more than 8 s. Shutting down is not an
+abort: it writes nothing, so the next process restores what the operator left.
+This covers `docker stop` (the deploy runs `docker stop -t 9` before replacing
+the container) and a host reboot, and nothing else: `docker rm -f` or
+`docker kill` is SIGKILL. A tick cut off by the deadline loses at most that
+tick's write; the lifecycle row is closed first and is never at risk.
 
 ---
 
@@ -548,6 +579,12 @@ never loses the record. Repeat firings of the same condition are suppressed for
 `anomaly.dedupeCooldownMinutes` rather than paging every tick a problem stays
 open.
 
+One anomaly is not raised by a check: `autopilot_resumed_in_shadow`, written by
+a restart that refused to resume live (see [Autopilot
+lifecycle](#autopilot-lifecycle)). It is recorded at boot and paged by the
+first anomaly tick through the same redelivery path a missed page takes, so it
+triggers no replan.
+
 ### Metrics rollups
 
 A background scheduler persists one rollup per tick, each covering the window
@@ -608,7 +645,7 @@ All routes are under `/api/automation/v1`. `/health` is unversioned.
 | `POST /autopilot/arm` | `{ mode? }`. `mode` is `"live"` (default) or `"shadow"`. A stray `token` field from an older client is ignored. Valid from any status, including after an abort. |
 | `POST /autopilot/pause` | Lets an already-dispatched wait finish and be recorded, then stops dispatching. Armed only. |
 | `POST /autopilot/abort` | Stops immediately. An action already in flight can't be un-sent, so its result is discarded and marked, not silently applied. |
-| `GET /autopilot/status` | Current status and mode (`mode` is `null` when disarmed or aborted). |
+| `GET /autopilot/status` | Current status and mode (`mode` is `null` when disarmed or aborted). Never answers before the process has restored the persisted state. |
 | `GET /autopilot/ships/:shipSymbol` | One ship's phase, wait state, and cycle progress. |
 | `GET /autopilot/events?limit=` | The event log, newest first. |
 
@@ -852,10 +889,14 @@ Everything the implementation deliberately doesn't do yet, in one place.
   knob's tuned value survives a redeploy by design, and an existing row sitting
   at the old default of `0` is indistinguishable from one an operator set to
   `0` deliberately. Existing deployments need the floor set once, by hand.
-- **Arm/pause/abort mutate in-memory status before persisting the event**, so a
-  failed event write can briefly leave status and audit trail diverged.
-- **The token lives in memory only** and is never persisted, so a restart always
-  disarms. A dedicated auth-service is a known future step.
+- **A pause or abort that cannot be persisted still takes effect**, answering
+  `500` with the fleet already stopped; the row then says more than the process
+  is doing, until the next transition or restart. The reverse (an arm that
+  failed to persist) cannot happen: an arm takes effect only once committed.
+- **The persisted lifecycle is one row, not one per replica.** A second replica
+  restores whatever the last writer left; it does not hear about later arms,
+  pauses or aborts made against the first. Dispatch is still safe (the advisory
+  lock), but `GET /autopilot/status` answers per process.
 
 See [CHANGELOG.md](CHANGELOG.md) for how this service got here, and which
 `meta` issue introduced each piece.

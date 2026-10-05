@@ -47,7 +47,9 @@ declared on the `docker` job, never at workflow level.
 | `eventLog.ts` | Appends events, and **answers the questions asked of the log** — what the balance read, what the operator last asked for, what was earned, how much failed, which markets are priced against | clock, fleetEvents |
 | `plannerDecision.ts` | The decision record: the scoring block's type, the two `event_log.detail` layouts, and the writer/reader pair for them. Imports nothing local | nothing |
 | `shipTaskRepo.ts`, `contractRepo.ts`, `marketIntelRepo.ts` | Row ↔ object repos. Repos taking `Pool \| PoolClient` can join a transaction | clock |
-| `autopilotState.ts` | In-memory status/mode/token. Never persisted by design | nothing |
+| `autopilotState.ts` | In-memory status/mode, read synchronously by every tick. Changed only through `AutopilotLifecycle` | nothing |
+| `autopilotLifecycle.ts` | `AutopilotLifecycle`: every arm/pause/abort and the boot restore, serialized and persisted; `AutopilotStateRepo` (owns `autopilot_state`); the pure restart rule `restoredAfterRestart` | autopilotState, eventLog, anomaly (repo), transaction |
+| `shutdown.ts` | `shutdownGracefully` (the four steps, in order, under a deadline) and `installShutdownHandlers` (SIGTERM/SIGINT → exit code) | nothing |
 | `auth.ts` | `SCOPE_FLEET_CONTROL`, `SCOPE_EVENTS_WRITE`, `SCOPE_PLANNER_ADVISE`: the three scopes this service declares, one literal per route (decisions 20, 22). No verification: auth-service does that (decision 21) | nothing |
 | `config.ts` | `configFromEnv()`; every numeric env var validated positive; `loadIntrospectionConfig()` for the center | fs, clerk-client |
 | `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | fetch |
@@ -225,6 +227,46 @@ for callers who look there first.
 - **Errors from `getShip` and other pre-FSM calls are infra errors**, caught by
   the loop's `onError` → `mining_tick_error` without a failure count. Only
   throws inside `advance()` count against the target.
+
+## Autopilot lifecycle and restarts (Q29)
+
+- **Status and mode are persisted; live never survives a restart.** One row in
+  `autopilot_state`. A boot restores it through `restoredAfterRestart`: armed
+  or paused *live* comes back armed or paused *shadow*, writes the downgrade
+  back, logs the lifecycle event with actor `system:restart`, and records one
+  `autopilot_resumed_in_shadow` anomaly — all in one transaction. Shadow,
+  aborted and never-armed come back unchanged and raise nothing (shadow still
+  logs its `armed`/`paused` restart event). Resuming live without the owner is
+  the one thing a restart must never do; `autopilotRestart.test.ts` pins it.
+  **It fails closed by shape:** armed/paused restore as shadow *whatever* the
+  stored mode is (anything but exactly `shadow` counts as a downgrade and
+  raises the anomaly), and an unknown status restores as disarmed. Never
+  rewrite it as "if live then shadow". The anomaly carries `lastWrittenBy`
+  and `lastWrittenAt` from the row, because a pause or abort that failed to
+  persist leaves an older live row behind.
+  The anomaly is delivered by the anomaly loop's `redeliverMissed`, not
+  inline, and does not request a replan.
+- **Every lifecycle change goes through `AutopilotLifecycle`**, never
+  `state.arm()` from a route. It is one queue, restore first, so an arm during
+  startup lands after the restore, and two requests cannot interleave memory
+  and row. Direction decides the order: **arm persists then takes effect;
+  pause and abort take effect then persist** (abort also drains the fleet loop
+  before persisting). A Postgres failure therefore never leaves the process
+  *more* active than its row, and the row is one a restart downgrades anyway.
+- **`GET /autopilot/status` awaits the restore**; the entrypoint awaits it
+  before `listen`, and exits 1 if it failed (the orchestrator retries).
+- **Shutdown is not an abort.** `shutdownStepsFor` runs: close the lifecycle
+  (later changes answer 503; accepted ones finish persisting) → stop all three
+  schedulers (each drains its tick; the fleet loop releases its dispatch lock)
+  → `server.close()` → `pool.end()`. The lifecycle closes first so nothing can
+  `start()` a loop after it has been stopped, and the pool closes last because
+  `DispatchLock` holds a pooled connection (see above). A step that throws
+  doesn't stop the rest; the whole thing is bounded by `SHUTDOWN_TIMEOUT_MS`
+  (8 s, under `docker stop`'s 10 s default and the deploy's `-t 9`), and the
+  exit code is 0 only if every step finished cleanly. Production is Docker on
+  EC2, not ECS: only `docker stop` and a host reboot send SIGTERM; `docker rm
+  -f` is SIGKILL. The deadline does not outlast a tick (15 s is per upstream
+  call), so do not move anything that must survive shutdown after step 1.
 
 ## Scheduler tick order
 
@@ -560,7 +602,7 @@ any `detail.actor` in the body.
   inactive. `introspectionWiring.test.ts` does the same over real HTTP against
   `stubServers.ts`'s center; add a route and it belongs in that file's route
   list.
-- `contract.test.ts`'s `makeFlakyPool` proxies a `Pool` to fail exactly one
+- `testSupport/flakyPool.ts`'s `makeFlakyPool` proxies a `Pool` to fail exactly one
   matching query, including inside a transaction; reuse it for
   "crash between two writes" cases.
 - **A stub that fails a ship action must pick a status that means what the test

@@ -65,15 +65,17 @@ describe("automation-service autopilot lifecycle", () => {
   // sending `token` is served normally; the only thing validated is `mode`.
   it("ignores a stray token field and rejects only an unknown mode", async () => {
     const gateway = app();
+    // Rejected first, on the same app: an arm persists, so a later app
+    // instance would restore it rather than start disarmed (Q29).
+    const res = await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ mode: "turbo" });
+    expect(res.status).toBe(400);
+    const statusRes = await request(gateway).get("/api/automation/v1/autopilot/status");
+    expect((statusRes.body as StatusBody).status).toBe("disarmed");
+
     const stale = await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ token: "stale-client-still-sends-this" });
     expect(stale.status).toBe(200);
     const raw = JSON.stringify((await request(gateway).get("/api/automation/v1/autopilot/events")).body);
     expect(raw).not.toContain("stale-client-still-sends-this");
-
-    const res = await request(app()).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ mode: "turbo" });
-    expect(res.status).toBe(400);
-    const statusRes = await request(app()).get("/api/automation/v1/autopilot/status");
-    expect((statusRes.body as StatusBody).status).toBe("disarmed");
   });
 
   it("pauses from armed and logs it", async () => {
@@ -129,18 +131,6 @@ describe("automation-service autopilot lifecycle", () => {
     const res = await request(gateway).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "armed", mode: "live" });
-  });
-
-  it("a fresh app instance (simulated restart) always starts disarmed even though prior events persisted", async () => {
-    const firstRun = app();
-    await request(firstRun).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({});
-
-    const restarted = app();
-    const statusRes = await request(restarted).get("/api/automation/v1/autopilot/status");
-    expect((statusRes.body as StatusBody).status).toBe("disarmed");
-
-    const eventsRes = await request(restarted).get("/api/automation/v1/autopilot/events");
-    expect((eventsRes.body as EventsBody).events).toHaveLength(1); // event log survived the "restart"
   });
 
   it("orders events most-recent-first and respects limit", async () => {
