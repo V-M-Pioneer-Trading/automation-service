@@ -8,6 +8,7 @@ import { advanceContractTask, contractCargoAtStake, startContractTask } from "./
 import type { EventLog } from "./eventLog";
 import type { GameClients, ShipSnapshot, UpstreamFailureKind } from "./gameClients";
 import { UNRELATED_FAILURE_KINDS, UpstreamCallError } from "./gameClients";
+import { REPEATED_DENIED_EVENT } from "./fleetEvents";
 import { IntervalLoop } from "./intervalLoop";
 import type { KnobRepo } from "./knobs";
 import type { MarketIntelRepo } from "./marketIntelRepo";
@@ -54,6 +55,40 @@ export const verdictOf = (err: unknown): FailureVerdict =>
  * has to do.
  */
 export const UNRELATED_FAILURE_RETRY_MULTIPLIER = 100;
+
+/**
+ * How many identical `denied` failures from one source in a row trip a
+ * `repeated_denied` anomaly. `denied` never clears itself (the game says the
+ * agent does not own that ship), so a repeat is a stuck fleet, not a blip. A
+ * hiccup (token rotation, a deploy mid-flight) can fail a couple in a row;
+ * five clears that. Time to page at the defaults: a failing tick source (5s
+ * interval) trips in about 25s; a failing replan source (one replan per
+ * REPLAN_INTERVAL_MS, 5 min) trips on the fifth replan, about 20 minutes after
+ * the first failure, plus up to one anomaly-scheduler interval. Fixed, not a
+ * knob: it is a tripwire against silent looping.
+ */
+export const REPEATED_DENIED_THRESHOLD = 5;
+
+/** Where a failure came from: the fleet replan, or everything else a tick does. */
+type FailureSource = "tick" | "replan";
+
+/**
+ * The failure as it may leave the process in a webhook: request method and
+ * path, status and the start of the text. Never the upstream host, which is
+ * internal, and never more than a short prefix of the upstream's body.
+ */
+export function describeDenied(err: unknown): string {
+  const text = String(err);
+  const m = /^(?:Error: )?([A-Z]+) (\S+?): (.*)$/s.exec(text);
+  if (m === null) return text.slice(0, 200);
+  let path = m[2];
+  try {
+    path = new URL(m[2]).pathname;
+  } catch {
+    // not an absolute URL; keep as is
+  }
+  return `${m[1]} ${path}: ${m[3].slice(0, 200)}`;
+}
 
 export interface FleetSchedulerDeps {
   state: AutopilotState;
@@ -102,6 +137,19 @@ export class FleetScheduler {
   private readonly dispatchLock: DispatchLock;
   // So standing by logs once per spell, not once per tick.
   private standbyLogged = false;
+  // Runs of identical `denied` failures, one per source, so a stuck fleet is
+  // reported instead of looping silently. Sources are kept apart because they
+  // run at different rates: a replan fails once per replan interval with many
+  // clean ticks between, and those clean ticks say nothing about the replan.
+  // Only a clean outcome of the SAME source resets its run (a replan that
+  // completes, a tick that completes), and so does any change of lifecycle
+  // (pause, abort, re-arm, mode). In memory on purpose: a restart restarts it.
+  private readonly deniedStreaks: Record<FailureSource, { key: string; count: number } | null> = { tick: null, replan: null };
+  private failedThisTick = false;
+  private replanError: unknown = null;
+  private lifecycle: string | null = null;
+  // Stale rows already reported, so the replan logs each once, not every run.
+  private readonly reportedStale = new Set<string>();
 
   constructor(private readonly deps: FleetSchedulerDeps) {
     this.dispatchLock = new DispatchLock(deps.pool, `dispatch:${deps.shipSymbol}`);
@@ -110,12 +158,88 @@ export class FleetScheduler {
     // carry the same verdict so nothing filtering on `failureKind` sees a
     // partial picture — they just never touch a target's retry budget,
     // because no target has been acted on yet.
-    this.loop = new IntervalLoop(deps.intervalMs, () => this.tick(), (err) =>
-      deps.events.append("mining_tick_error", { shipSymbol: deps.shipSymbol, message: String(err), failureKind: verdictOf(err) })
-    );
+    this.loop = new IntervalLoop(deps.intervalMs, () => this.runTick(), async (err) => {
+      const source: FailureSource = err === this.replanError ? "replan" : "tick";
+      if (source === "tick") this.failedThisTick = true;
+      await deps.events.append("mining_tick_error", {
+        shipSymbol: this.requestedShipOf(err),
+        message: String(err),
+        failureKind: verdictOf(err),
+      });
+      await this.noteFailure(err, source);
+    });
+  }
+
+  /** The ship the failure was about when the call said so, else the configured one. */
+  private requestedShipOf(err: unknown): string {
+    return (err instanceof UpstreamCallError ? err.requestedShip : undefined) ?? this.deps.shipSymbol;
+  }
+
+  private async runTick(): Promise<void> {
+    const { state } = this.deps;
+    // A change of lifecycle ends every run: a paused or aborted fleet is not
+    // failing "in a row" with the armed one that follows it.
+    const lifecycle = `${state.getStatus()}/${state.getMode() ?? "none"}`;
+    if (lifecycle !== this.lifecycle) {
+      this.lifecycle = lifecycle;
+      this.clearStreaks();
+    }
+    this.failedThisTick = false;
+    await this.tick();
+    // Reached only when the tick completed (a replan or getShip failure
+    // throws past here). Shadow counts: its failures are real ones.
+    if (!this.tickFailed() && state.getStatus() === "armed") this.deniedStreaks.tick = null;
+  }
+
+  private clearStreaks(): void {
+    this.deniedStreaks.tick = null;
+    this.deniedStreaks.replan = null;
+  }
+
+  /** A call, not a field read: the flag is set during awaits, which narrowing cannot see. */
+  private tickFailed(): boolean {
+    return this.failedThisTick;
+  }
+
+  /**
+   * Counts a run of identical `denied` failures from one source and, at the
+   * threshold (and at each further multiple of it, for a failure that never
+   * clears), logs `repeated_denied_tripped`. The anomaly checker turns that
+   * event into an anomaly, so dedupe cooldown, delivery and the stop guards are
+   * the anomaly scheduler's own. Any other failure from the source breaks the
+   * run. The tick source and the replan source count separately, so one
+   * incident that fails both can page once from each: by design, they are two
+   * different broken paths.
+   */
+  private async noteFailure(err: unknown, source: FailureSource): Promise<void> {
+    // Nothing is recorded for a loop that was stopped or an aborted fleet.
+    if (this.loop.stopped || this.deps.state.getStatus() === "aborted") return;
+    if (verdictOf(err) !== "denied") {
+      this.deniedStreaks[source] = null;
+      return;
+    }
+    const symbol = this.requestedShipOf(err);
+    const key = `${symbol}|${String(err)}`;
+    const streak = this.deniedStreaks[source];
+    const count = streak?.key === key ? streak.count + 1 : 1;
+    this.deniedStreaks[source] = { key, count };
+    // Every multiple, not just the first: a failure that outlasts the anomaly
+    // cooldown must page again, and the cooldown dedupes the ones inside it.
+    if (count % REPEATED_DENIED_THRESHOLD !== 0) return;
+    await this.deps.events.append(REPEATED_DENIED_EVENT, {
+      shipSymbol: symbol,
+      configuredShipSymbol: this.deps.shipSymbol,
+      source,
+      request: describeDenied(err),
+      consecutiveFailures: count,
+    });
   }
 
   start(): void {
+    // A fresh arm is a fresh run: abort calls stop(), so no tick ever sees the
+    // fleet as aborted, and re-arming an armed fleet changes no lifecycle.
+    this.clearStreaks();
+    this.lifecycle = null;
     this.startedAt = this.deps.clock.now();
     this.loop.start();
   }
@@ -128,6 +252,8 @@ export class FleetScheduler {
     await this.loop.stop();
     await this.dispatchLock.release();
     this.standbyLogged = false;
+    this.clearStreaks();
+    this.lifecycle = null;
   }
 
   /**
@@ -199,7 +325,14 @@ export class FleetScheduler {
     // dispatch as well would double-fire contract discovery's upstream calls.
     // A replan that didn't touch this ship must not block it, hence the set.
     if (status === "armed") {
-      const replanned = await this.maybeReplan();
+      let replanned: Set<string> | null;
+      try {
+        replanned = await this.maybeReplan();
+      } catch (err) {
+        this.replanError = err; // so the loop's error handler files it under the replan source
+        throw err;
+      }
+      if (replanned !== null) this.deniedStreaks.replan = null; // a replan ran to completion
       if (replanned?.has(shipSymbol)) return;
     }
 
@@ -332,7 +465,15 @@ export class FleetScheduler {
 
     // Re-scores every ship with no assigned target. A ship mid-task never
     // matches that predicate, so running work is never preempted.
-    const idle = await this.deps.tasks.listIdle();
+    // Only ships this service dispatches. Rows for any other ship (left over
+    // from a universe reset) are ignored, with a log line, never deleted.
+    const dispatched = [this.deps.shipSymbol];
+    const stale = (await this.deps.tasks.listOtherShipSymbols(dispatched)).filter((s) => !this.reportedStale.has(s));
+    for (const symbol of stale) {
+      this.reportedStale.add(symbol);
+      console.warn(`automation-service: replan ignoring ship_task row for ${symbol}: not a ship this service dispatches`);
+    }
+    const idle = await this.deps.tasks.listIdle(dispatched);
     if (idle.length > 0) {
       // One discovery pass for the whole replan, not one per ship.
       const ship = await this.deps.clients.getShip(idle[0].shipSymbol);
@@ -459,13 +600,16 @@ export class FleetScheduler {
       failureCount: task.failureCount + (blamesTarget ? 1 : 0),
       unrelatedFailureCount: task.unrelatedFailureCount + (blamesTarget ? 0 : 1),
     };
+    this.failedThisTick = true;
     await events.append("mining_tick_error", {
-      shipSymbol,
+      shipSymbol: this.requestedShipOf(err),
       message: String(err),
       failureKind: kind,
       failureCount: counted.failureCount,
       unrelatedFailureCount: counted.unrelatedFailureCount,
     });
+
+    await this.noteFailure(err, "tick");
 
     // Same discard invariant as the success path: an abort or a switch to
     // shadow mode mid-flight must stop this failure from mutating ship_task.

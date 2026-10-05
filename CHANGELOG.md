@@ -7,6 +7,18 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Stale ship_task rows, repeated denied (#40)
+
+A replan now considers only the configured ship. A leftover `ship_task` row for
+another ship (a universe reset) is ignored with a log line, never deleted, and
+no longer fails every replan. `mining_tick_error` carries the ship actually
+requested. Five identical `denied` failures in a row from one source (replan or
+tick) raise one `repeated_denied` anomaly through the anomaly checker (dedupe
+cooldown, immediate delivery, stop guards). A clean outcome of the same source,
+or a pause, abort or re-arm, re-arms it. Webhook detail carries only the request
+path, status and a short message prefix. Abort and re-arm (stop/start) clear the
+runs; the tick and replan sources can each page once for one incident.
+
 ## Shared ESLint config (meta#105)
 
 `@v-m-pioneer-trading/eslint-config` 1.0.0 (strict, type-checked typescript-eslint)

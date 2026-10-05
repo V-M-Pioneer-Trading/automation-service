@@ -89,3 +89,11 @@ export const EVENT_REVENUE_SQL = `CASE
       THEN COALESCE((detail->>'payment')::double precision, 0)
     ELSE 0
   END`;
+
+/**
+ * What the fleet scheduler logs when a run of identical `denied` failures
+ * reaches its threshold; `AnomalyChecker` turns it into a `repeated_denied`
+ * anomaly. Deliberately not a `mining_` name: it is not a task outcome, so it
+ * must not count in the error rate.
+ */
+export const REPEATED_DENIED_EVENT = "repeated_denied_tripped";

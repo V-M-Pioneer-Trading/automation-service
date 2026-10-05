@@ -5,6 +5,7 @@ import type { KnobValues } from "./knobs";
 import type { MarketIntelRepo } from "./marketIntelRepo";
 import type { ShipTask } from "./shipTaskRepo";
 import type { EventLog } from "./eventLog";
+import { REPEATED_DENIED_EVENT } from "./fleetEvents";
 import type { MetricsRepo } from "./metrics";
 
 export interface Anomaly {
@@ -112,7 +113,7 @@ function rowToAnomaly(row: AnomalyRow): Anomaly {
 interface Reason { reason: string; detail: Record<string, unknown> }
 
 /**
- * Five health checks, each answering a different question about the fleet:
+ * Six health checks, each answering a different question about the fleet:
  *
  * | Check | Question |
  * |---|---|
@@ -121,6 +122,7 @@ interface Reason { reason: string; detail: Record<string, unknown> }
  * | `consecutive_failures` | Is one ship failing repeatedly? |
  * | `error_rate` | Is the fleet as a whole erroring? |
  * | `market_stale` | Are we deciding on prices that are too old? |
+ * | `repeated_denied` | Is the game refusing the same call over and over? |
  *
  * `earnings_stalled` covers two conditions that were previously separate checks
  * (`profit_drop` and `credits_flat`). They are two ways of measuring one thing —
@@ -167,7 +169,7 @@ export class AnomalyChecker {
     const miningActive = this.state.getStatus() === "armed" && this.state.getMode() === "live";
 
     // Independent reads (different tables), so run them concurrently.
-    const [idle, earnings, failures, errorRate, marketStale] = await Promise.all([
+    const [idle, earnings, failures, errorRate, marketStale, repeatedDenied] = await Promise.all([
       miningActive && task !== null ? this.checkShipIdle(shipSymbol, task, now, knobs) : Promise.resolve(null),
       this.checkEarningsStalled(now, knobs),
       // The sum, not either counter: this check's question is "has this ship
@@ -175,8 +177,9 @@ export class AnomalyChecker {
       this.checkConsecutiveFailures(shipSymbol, (task?.failureCount ?? 0) + (task?.unrelatedFailureCount ?? 0), knobs),
       this.checkErrorRate(now, knobs),
       this.checkMarketStaleness(now, knobs),
+      this.checkRepeatedDenied(now, knobs),
     ]);
-    return [idle, earnings, failures, errorRate, ...marketStale].filter((c): c is AnomalyCandidate => c !== null);
+    return [idle, earnings, failures, errorRate, ...marketStale, ...repeatedDenied].filter((c): c is AnomalyCandidate => c !== null);
   }
 
   /**
@@ -315,6 +318,31 @@ export class AnomalyChecker {
         enteredStateAt: enteredStateAt.toISOString(),
       },
     };
+  }
+
+  /**
+   * The fleet scheduler logs `repeated_denied_tripped` when a run of identical
+   * `denied` failures reaches its threshold. One candidate per ship, from its
+   * newest such event inside the dedupe cooldown: the scheduler suppresses a
+   * repeat while the last anomaly for the key is that fresh, and once the event
+   * is older than the cooldown it stops being a candidate, so one event never
+   * pages twice. The window is open at its far end (+1ms) so an event and an
+   * anomaly recorded at the same instant cannot both fall on the boundary.
+   *
+   * Requires `ANOMALY_INTERVAL_MS` to stay below the cooldown: an event is only
+   * seen by ticks inside its window, and a slower loop can miss it. The 60s
+   * default suits the 15 minute default cooldown; a cooldown knob set near its
+   * 1 minute floor needs a faster interval.
+   */
+  private async checkRepeatedDenied(now: Date, knobs: KnobValues): Promise<AnomalyCandidate[]> {
+    const since = new Date(now.getTime() - knobs["anomaly.dedupeCooldownMinutes"] * 60_000 + 1);
+    const tripped = await this.events.listSince(since, 100, [REPEATED_DENIED_EVENT]);
+    const newestPerShip = new Map<string, Record<string, unknown>>();
+    for (const e of tripped) {
+      const symbol = String(e.detail.shipSymbol);
+      if (!newestPerShip.has(symbol)) newestPerShip.set(symbol, e.detail); // newest first
+    }
+    return [...newestPerShip].map(([symbol, detail]) => ({ type: "repeated_denied", dedupeKey: `repeated_denied:${symbol}`, detail }));
   }
 
   private checkConsecutiveFailures(shipSymbol: string, failureCount: number, knobs: KnobValues): Promise<AnomalyCandidate | null> {

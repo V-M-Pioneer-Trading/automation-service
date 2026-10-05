@@ -473,7 +473,17 @@ All triggers share one debounce clock, so a storm of knob changes coalesces into
 a single replan.
 
 **Running work is never preempted.** A replan only touches ships with no
-assigned target. Tasks are kept short and bounded, one mining round trip or one
+assigned target, and only for the ship(s) this service dispatches: a leftover
+`ship_task` row for another ship is ignored with a log line, never deleted.
+Five identical `denied` failures in a row from one source (replan or tick) log
+`repeated_denied_tripped`, which the anomaly checker turns into one
+`repeated_denied` anomaly (so it follows the usual dedupe cooldown and
+delivery). Only a clean outcome of the same source re-arms its run, as does a
+pause, abort or re-arm. A failure that never clears trips again at every fifth
+repeat, and the cooldown dedupes those. The tick and replan sources count
+separately, so one incident that fails both can page once from each, by design. That pages in about 25s for a failing tick (5s
+interval) and about 20 minutes for a failing replan (one per
+`REPLAN_INTERVAL_MS`, 5 min). Tasks are kept short and bounded, one mining round trip or one
 delivery leg, so a stale assignment costs minutes at most. Abort is the only
 interrupt.
 
@@ -494,7 +504,7 @@ drifts from dry run into live dispatch by accident.
 
 ## Watching for trouble
 
-Five checks run on a fixed interval, independent of whether the autopilot is
+Six checks run on a fixed interval, independent of whether the autopilot is
 armed. A broken ship stays worth reporting while an operator investigates.
 
 | Check | Fires when |
@@ -504,6 +514,7 @@ armed. A broken ship stays worth reporting while an operator investigates.
 | `consecutive_failures` | One ship accumulates N consecutive failures. |
 | `error_rate` | The error fraction of recent mining events exceeds a threshold. |
 | `market_stale` | A market the sell leg priced in the last 24h hasn't been read in person by a ship within N minutes (or ever). |
+| `repeated_denied` | The fleet scheduler saw the same `denied` failure five times in a row from one source (replan or tick). One anomaly per ship per dedupe cooldown. |
 
 `earnings_stalled` covers three readings of one problem, reported in
 `detail.reasons` and separately tunable. `profit_drop` and `credits_flat` were
@@ -522,7 +533,7 @@ paused as "meant to be working", so neither case can switch it off.
 ```mermaid
 flowchart LR
     I([every ANOMALY_INTERVAL_MS]) --> S[snapshot credits<br/>if armed & live]
-    S --> C[run the five checks]
+    S --> C[run the six checks]
     C --> D{fired within<br/>dedupe cooldown?}
     D -->|yes| Q[suppress]
     D -->|no| P[(persist anomaly)]
@@ -635,7 +646,7 @@ Invalid lifecycle transitions return `409` naming the current status.
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
 | `REPLAN_INTERVAL_MS` | Periodic replan fallback (default `300000`) |
 | `ANOMALY_WEBHOOK_URL` | Where to page when an anomaly fires. **Optional** — unset means anomalies are still detected, recorded and served from `/anomalies/digest`, and only the outbound POST is skipped |
-| `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`) |
+| `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`). Keep it below `anomaly.dedupeCooldownMinutes`: `repeated_denied` is read from events inside that window, so a slower loop can miss one |
 | `METRICS_ROLLUP_INTERVAL_MS` | Rollup cadence (default `60000`) |
 | `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |
 | `AUTH_INTROSPECTION_URL` | auth-service's **full** introspection endpoint, `/auth/v1/introspect` included, used verbatim; e.g. `http://localhost:3005/auth/v1/introspect` (**required**) |

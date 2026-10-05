@@ -40,7 +40,7 @@ declared on the `docker` job, never at workflow level.
 | `intervalLoop.ts` | `IntervalLoop`: the one guarded timer every scheduler runs on | nothing |
 | `dispatchLock.ts` | `DispatchLock`: Postgres advisory lock making "one process drives this ship" true across processes | pg, crypto |
 | `fleetEvents.ts` | The event vocabulary: task progress, failed actions, credits arriving. SQL predicates only, no I/O | nothing |
-| `anomaly.ts` | `AnomalyRepo` (owns the `anomaly` table), and `AnomalyChecker` — five read-only checks that take **no `Pool` and no `KnobRepo`**: they judge, they don't retrieve | knobs (types only), marketIntel, eventLog, metrics |
+| `anomaly.ts` | `AnomalyRepo` (owns the `anomaly` table), and `AnomalyChecker` — six read-only checks that take **no `Pool` and no `KnobRepo`**: they judge, they don't retrieve | knobs (types only), marketIntel, eventLog, metrics |
 | `anomalyScheduler.ts` | Runs checks, dedupes, persists, delivers, requests replans | anomaly, webhookDelivery |
 | `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table, fleetEvents |
 | `testSupport/fakeClock.ts`, `testSupport/fakeGameClients.ts` | The adapters for the `Clock` and `GameClients` seams. One each, shared — not one per test file | test-only |
@@ -91,7 +91,9 @@ for callers who look there first.
   `mining_discarded_after_abort` and *not* saved. `paused` still lets the
   in-flight result land (that is what pause means). See `isStillLive()`.
 - **Idle predicate** is `asteroid_waypoint IS NULL AND contract_id IS NULL`
-  (`isIdle`, `ShipTaskRepo.listIdle`). Only idle ships are ever (re)assigned;
+  (`isIdle`, `ShipTaskRepo.listIdle(shipSymbols)`). Only idle ships *this service
+  dispatches* are ever (re)assigned (rows for other ships are ignored, logged
+  once, never deleted, #40);
   running work is never preempted.
 - **`idleTask(task)` is the base for every assignment and every completion.**
   It resets task kind, phase, all targets, `failureCount`, and the cycle
