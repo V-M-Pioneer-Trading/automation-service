@@ -136,8 +136,8 @@ export class AnomalyScheduler {
       if (this.isStopped()) return; // latestForKey's await is itself a gap stop() could land in
 
       const anomaly = await repo.record(candidate);
+      if (this.isStopped()) return; // don't attempt delivery, or request a replan, for a stop that landed mid-persist
       onAnomalyRecorded?.();
-      if (this.isStopped()) return; // don't attempt delivery for a stop that landed mid-persist
       await this.attemptDelivery(anomaly);
     }
 
