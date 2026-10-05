@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { AnomalyRepo } from "../anomaly";
-import type { Anomaly, AnomalyCandidate , AnomalyChecker} from "../anomaly";
+import type { Anomaly, AnomalyCandidate, AnomalyChecker } from "../anomaly";
 import { AnomalyScheduler } from "../anomalyScheduler";
 import { AutopilotState } from "../autopilotState";
 import { createPool, migrate } from "../db";
@@ -69,6 +69,7 @@ describe("anomaly scheduler stop guards", () => {
   let getAgent: jest.Mock<Promise<{ credits: number }>, []>;
   let deliver: jest.Mock<Promise<boolean>, [Anomaly]>;
   let schedulers: AnomalyScheduler[];
+  let onAnomalyRecorded: jest.Mock;
 
   beforeAll(async () => {
     pool = createPool(databaseUrl());
@@ -90,6 +91,7 @@ describe("anomaly scheduler stop guards", () => {
     getAgent = jest.fn(() => Promise.resolve({ credits: 1234 }));
     deliver = jest.fn<Promise<boolean>, [Anomaly]>(() => Promise.resolve(true));
     schedulers = [];
+    onAnomalyRecorded = jest.fn();
   });
 
   afterEach(async () => {
@@ -109,6 +111,7 @@ describe("anomaly scheduler stop guards", () => {
       tasks: new ShipTaskRepo(pool, clock),
       gameClients: fakeGameClients({ getAgent }),
       shipSymbol: "SHIP-1",
+      onAnomalyRecorded,
       // Long enough never to fire unless a test asks: ticks are driven by forceTick.
       intervalMs: opts.intervalMs ?? 3_600_000,
     });
@@ -221,7 +224,7 @@ describe("anomaly scheduler stop guards", () => {
       expect(deliver).not.toHaveBeenCalled();
     });
 
-    it("stop() during record(): the row stays, but no webhook is attempted", async () => {
+    it("stop() during record(): the row stays, but no webhook and no replan request", async () => {
       candidates = [candidate(1)];
       const g = gate();
       const original = repo.record.bind(repo);
@@ -234,6 +237,14 @@ describe("anomaly scheduler stop guards", () => {
 
       expect(await anomalyCount()).toBe(1);
       expect(deliver).not.toHaveBeenCalled();
+      // A stopped scheduler must not ask the fleet scheduler to replan.
+      expect(onAnomalyRecorded).not.toHaveBeenCalled();
+    });
+
+    it("sanity: an unstopped tick that records an anomaly requests a replan", async () => {
+      candidates = [candidate(1)];
+      await build().forceTick();
+      expect(onAnomalyRecorded).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -294,6 +305,8 @@ describe("anomaly scheduler stop guards", () => {
       jest.advanceTimersByTime(10);
       await scheduler.stop();
       expect(getAgent).toHaveBeenCalledTimes(1);
+      // The interval is the only fake timer in play, so none may be left pending.
+      expect(jest.getTimerCount()).toBe(0);
 
       jest.advanceTimersByTime(1000);
       expect(getAgent).toHaveBeenCalledTimes(1);
