@@ -247,4 +247,25 @@ describe("the entrypoint's shutdown against a running app", () => {
     await steps.closePool();
     expect(await new AutopilotStateRepo(pool, new FakeClock(new Date())).load()).toBeNull();
   });
+
+  it.each(["pause", "abort"] as const)("answers 503 to %s once shutdown has begun, leaving state and row as they were", async (action) => {
+    const { app, base } = await start();
+    await request(base).post("/api/automation/v1/autopilot/arm").set("Authorization", bearer()).send({ mode: "live" });
+    const rowBefore = await new AutopilotStateRepo(pool, new FakeClock(new Date())).load();
+    const eventsBefore = (await pool.query<{ n: string }>("SELECT count(*) AS n FROM event_log")).rows[0].n;
+
+    const steps = shutdownStepsFor(app, server, appPool);
+    await steps.closeLifecycle();
+    const res = await request(base).post(`/api/automation/v1/autopilot/${action}`).set("Authorization", bearer());
+    expect(res.status).toBe(503);
+    expect((res.body as { error: { message: string } }).error.message).toMatch(/shutting down/);
+    expect((await request(base).get("/api/automation/v1/autopilot/status")).body).toEqual({ status: "armed", mode: "live" });
+
+    await steps.stopSchedulers();
+    await steps.closeServer();
+    await steps.closePool();
+    expect(rowBefore).toMatchObject({ status: "armed", mode: "live" });
+    expect(await new AutopilotStateRepo(pool, new FakeClock(new Date())).load()).toEqual(rowBefore);
+    expect((await pool.query<{ n: string }>("SELECT count(*) AS n FROM event_log")).rows[0].n).toBe(eventsBefore);
+  });
 });
