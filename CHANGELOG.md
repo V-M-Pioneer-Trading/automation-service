@@ -28,8 +28,21 @@ percent-encoded and JSON-escaped URLs, and prose like "st-gateway did not
 answer" all got through. Second, the prefix could split an emoji, and Postgres
 then refused the event insert, so the failure count was never saved. Building
 the text from known parts fixes both. The `repeated_denied` webhook changed the
-same way. The helper is now `describeFailure` in `failureDetail.ts`. Rows
-written before this keep their `message`.
+same way. The helper is now `describeFailure` in `failureDetail.ts`.
+
+Rows already written are scrubbed too. Nothing expires `event_log`, and the
+public route serves the newest rows, so production's thousands of old
+`mining_tick_error`s would have stayed public. `migrate()` now does two things
+on every boot:
+- In the three error types, it removes `message`.
+- In `repeated_denied_tripped` events and `repeated_denied` anomalies, it
+  removes any `request` that is not the new shape (`PUBLIC_REQUEST_PATTERN`).
+  #43's version was a 200-character text prefix, and none of those match.
+
+A partial index on exactly the rows still to scrub keeps every later boot's
+UPDATE at an empty index scan. Reading is guarded as well: `EventLog` and
+`AnomalyRepo` drop the same fields when they map rows, so a row restored from
+an old backup is still never served.
 
 ## A restart no longer disarms the autopilot; it resumes in shadow (Q29)
 

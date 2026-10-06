@@ -35,7 +35,7 @@ declared on the `docker` job, never at workflow level.
 | `miningTask.ts`, `contractTask.ts`, `scoutTask.ts` | Per kind: `start*Task` (how one begins), `advance*Task(ctx)` (one action per call), `*CargoAtStake(task)` (what it means by the shared columns). All three answer for the kind; none of them lives in the scheduler | taskFsm |
 | `observations.ts` | `ObservationRepo` + `calibrate()`: measured model with priors as fallback | knobs (types only) |
 | `knobs.ts` | `KNOB_DEFINITIONS` (source of `KnobName`), `KnobRepo`, `syncKnobDefinitions` | transaction |
-| `db.ts` | `createPool`, `migrate` (idempotent DDL) | knobs (for the sync) |
+| `db.ts` | `createPool`, `migrate` (idempotent DDL, plus the #45 scrub of pre-#45 error text) | knobs (for the sync), fleetEvents (the scrub predicate) |
 | `transaction.ts` | `withTransaction(pool, fn)` | pg |
 | `intervalLoop.ts` | `IntervalLoop`: the one guarded timer every scheduler runs on | nothing |
 | `dispatchLock.ts` | `DispatchLock`: Postgres advisory lock making "one process drives this ship" true across processes | pg, crypto |
@@ -487,6 +487,18 @@ surrogate pair either (Postgres jsonb refuses a lone one, and the failed insert
 used to skip the failure count). `publicEventDetail.test.ts` drives all five
 write sites against upstreams and errors naming internal addresses in every
 form, and asserts the public route serves none.
+
+Rows written before #45 are handled in two places. `migrate()` scrubs them on
+every boot. It removes `message` from `LEGACY_ERROR_TEXT_TYPES`, and removes
+any `request` not matching `PUBLIC_REQUEST_PATTERN` from `repeated_denied`
+events and anomalies. A partial index on `LEGACY_ERROR_TEXT_PREDICATE` makes
+that free once they are gone. On read, `legacyErrorTextRemoved` drops the same
+fields in `EventLog` and `AnomalyRepo`'s row mappers.
+
+If `requestLine` ever grows a new shape, widen `PUBLIC_REQUEST_PATTERN` in the
+same change, or the new values are dropped on read. Also rename the partial
+index: `CREATE INDEX IF NOT EXISTS` would keep the old predicate.
+`legacyErrorText.test.ts` covers both the scrub and the read side.
 
 Event `detail` must never contain a token or anything token-shaped; `actor`
 is the `sub` auth-service reported (`actorOf(res)`) and nothing else — never a

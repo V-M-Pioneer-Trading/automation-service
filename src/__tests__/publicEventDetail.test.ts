@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import request from "supertest";
 import { createPool, migrate } from "../db";
 import { describeFailure } from "../failureDetail";
+import { PUBLIC_REQUEST_PATTERN } from "../fleetEvents";
 import { createGameClients } from "../gameClients";
 import { ShipTaskRepo } from "../shipTaskRepo";
 import { forceAnomalyTick, forceFleetTick, stopBackgroundSchedulers } from "../testSupport/appHooks";
@@ -301,6 +302,7 @@ describe("describeFailure", () => {
       if (body === leak) expect(String(err)).toContain(leak); // the full text is still there, for the log
       const out = describeFailure(err);
       expect(out).toMatch(new RegExp(`^GET /ships/${SHIP}: 504( \\(code 4214\\))?$`));
+      expect(out).toMatch(new RegExp(PUBLIC_REQUEST_PATTERN)); // so the read-side guard keeps it
       expectClean(out);
     }
   });
@@ -327,6 +329,7 @@ describe("describeFailure", () => {
       );
     })();
     expect(describeFailure(err)).toBe(`GET /ships/${SHIP}: no response (ECONNREFUSED)`);
+    expect(describeFailure(err)).toMatch(new RegExp(PUBLIC_REQUEST_PATTERN));
   });
 
   it("never splits a surrogate pair, whatever sits at the old 200-character cut", () => {

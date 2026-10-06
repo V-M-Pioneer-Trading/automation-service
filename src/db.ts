@@ -1,5 +1,6 @@
 import { Pool } from "pg";
 import type { KnobClamp } from "./knobs";
+import { LEGACY_ERROR_TEXT_PREDICATE, PUBLIC_REQUEST_PATTERN, REPEATED_DENIED_ANOMALY, REPEATED_DENIED_EVENT } from "./fleetEvents";
 import { syncKnobDefinitions } from "./knobs";
 
 export function createPool(databaseUrl: string): Pool {
@@ -25,6 +26,21 @@ export async function migrate(pool: Pool): Promise<KnobClamp[]> {
   // indefinitely — agent_credits_snapshot, mining_market_selected, etc.
   await pool.query(`
     CREATE INDEX IF NOT EXISTS event_log_type_occurred_at_idx ON event_log (type, occurred_at)
+  `);
+  // #45: error text written before the public detail stopped carrying any —
+  // internal URLs and upstream bodies, served by the public events route. The
+  // partial index covers exactly the rows still to scrub, so once they are
+  // gone every later boot's UPDATE finds nothing through an empty index, and
+  // a new row (which never matches) costs one predicate check on insert. If
+  // the predicate ever changes, rename the index: IF NOT EXISTS would keep the
+  // old one and the UPDATE would fall back to scanning by type.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS event_log_legacy_error_text_idx ON event_log (id) WHERE ${LEGACY_ERROR_TEXT_PREDICATE}
+  `);
+  await pool.query(`
+    UPDATE event_log
+       SET detail = CASE WHEN type = '${REPEATED_DENIED_EVENT}' THEN detail - 'request' ELSE detail - 'message' END
+     WHERE ${LEGACY_ERROR_TEXT_PREDICATE}
   `);
 
   // One row per ship under autopilot control. Survives restarts (per story 14),
@@ -147,6 +163,15 @@ export async function migrate(pool: Pool): Promise<KnobClamp[]> {
   `);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS anomaly_detected_at_idx ON anomaly (detected_at DESC)
+  `);
+  // #45: #43's repeated_denied anomalies copied the tripped event's `request`,
+  // a 200-character prefix of upstream text, and /anomalies/digest is public.
+  // Drop any `request` that is not the new shape. The table is small (one row
+  // per firing, deduped), so no index.
+  await pool.query(`
+    UPDATE anomaly SET detail = detail - 'request'
+     WHERE type = '${REPEATED_DENIED_ANOMALY}' AND detail ? 'request'
+       AND NOT ((detail->>'request') ~ '${PUBLIC_REQUEST_PATTERN}')
   `);
 
   // Market freshness: one row per marketplace, the last time a ship of ours
