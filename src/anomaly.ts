@@ -5,7 +5,7 @@ import type { KnobValues } from "./knobs";
 import type { MarketIntelRepo } from "./marketIntelRepo";
 import type { ShipTask } from "./shipTaskRepo";
 import type { EventLog } from "./eventLog";
-import { REPEATED_DENIED_EVENT } from "./fleetEvents";
+import { legacyErrorTextRemoved, REPEATED_DENIED_ANOMALY, REPEATED_DENIED_EVENT } from "./fleetEvents";
 import type { MetricsRepo } from "./metrics";
 
 export interface Anomaly {
@@ -106,7 +106,7 @@ function rowToAnomaly(row: AnomalyRow): Anomaly {
     type: row.type,
     dedupeKey: row.dedupe_key,
     detectedAt: row.detected_at.toISOString(),
-    detail: row.detail,
+    detail: legacyErrorTextRemoved(row.type, row.detail),
     deliveredAt: row.delivered_at?.toISOString() ?? null,
     deliveryAttempts: row.delivery_attempts,
   };
@@ -344,7 +344,7 @@ export class AnomalyChecker {
       const symbol = String(e.detail.shipSymbol);
       if (!newestPerShip.has(symbol)) newestPerShip.set(symbol, e.detail); // newest first
     }
-    return [...newestPerShip].map(([symbol, detail]) => ({ type: "repeated_denied", dedupeKey: `repeated_denied:${symbol}`, detail }));
+    return [...newestPerShip].map(([symbol, detail]) => ({ type: REPEATED_DENIED_ANOMALY, dedupeKey: `${REPEATED_DENIED_ANOMALY}:${symbol}`, detail }));
   }
 
   private checkConsecutiveFailures(shipSymbol: string, failureCount: number, knobs: KnobValues): Promise<AnomalyCandidate | null> {

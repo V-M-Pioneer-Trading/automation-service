@@ -27,6 +27,7 @@ import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients } from "./gameClients";
 import type { KnobClass } from "./knobs";
+import { LegacyErrorTextScrubber } from "./legacyScrub";
 import { isKnobClass, KnobClassForbiddenError, KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
 import { MetricsRepo } from "./metrics";
@@ -145,6 +146,8 @@ interface AppLifecycleHandles {
   /** Shutdown steps 1 and 2: refuse lifecycle changes, then drain and stop every scheduler. */
   closeLifecycle: () => Promise<void>;
   stopSchedulers: () => Promise<void>;
+  /** Starts the #45 background scrub of old rows. The entrypoint calls it once listening; tests drive `LegacyErrorTextScrubber` directly. */
+  startLegacyScrub: () => void;
 }
 // Keyed by the app rather than hung on app.locals, which is untyped and is
 // where the test-only hooks live; these are for the entrypoint.
@@ -161,6 +164,10 @@ export const autopilotRestored = (app: object): Promise<void> => handlesOf(app).
 export const closeLifecycle = (app: object): Promise<void> => handlesOf(app).closeLifecycle();
 /** Stops the fleet, anomaly and metrics loops, each awaiting its in-flight tick. Not an abort: nothing is persisted. */
 export const stopSchedulers = (app: object): Promise<void> => handlesOf(app).stopSchedulers();
+/** Starts the background scrub of pre-#45 error text (legacyScrub.ts). Returns at once; the scrub logs its own start and end. */
+export const startLegacyScrub = (app: object): void => {
+  handlesOf(app).startLegacyScrub();
+};
 
 /** The entrypoint's shutdown, step by step (see `ShutdownSteps` for why this order). Exported so a test runs the same wiring. */
 export const shutdownStepsFor = (app: object, server: Server, pool: Pool): ShutdownSteps => ({
@@ -688,11 +695,17 @@ export function createApp(options: AppOptions) {
     };
   }
 
+  const legacyScrub = new LegacyErrorTextScrubber(pool);
   appHandles.set(app, {
     autopilotRestored: lifecycle.restored,
     closeLifecycle: () => lifecycle.close(),
+    startLegacyScrub: () => {
+      void legacyScrub.start();
+    },
+    // The scrub's stop() returns at once rather than waiting out a batch, so
+    // it never spends the shutdown deadline.
     stopSchedulers: async () => {
-      await Promise.all([scheduler?.stop(), metricsScheduler?.stop(), anomalyScheduler?.stop()]);
+      await Promise.all([scheduler?.stop(), metricsScheduler?.stop(), anomalyScheduler?.stop(), legacyScrub.stop()]);
     },
   });
 
@@ -739,6 +752,10 @@ if (require.main === module) {
         await autopilotRestored(app);
         const server = app.listen(config.port, () => {
           console.log(`automation-service listening on http://localhost:${String(config.port)}`);
+          // After listening, never before: on production this walks ~460k
+          // rows, which must not stand between docker run and a healthy
+          // /health (#45). It never throws; failures are logged and retried.
+          startLegacyScrub(app);
         });
         installShutdownHandlers(
           process,

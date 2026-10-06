@@ -2,6 +2,7 @@ import type { Anomaly, AnomalyChecker, AnomalyRepo } from "./anomaly";
 import type { AutopilotState } from "./autopilotState";
 import type { Clock } from "./clock";
 import type { EventLog } from "./eventLog";
+import { logFailure } from "./failureDetail";
 import type { GameClients } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
 import type { KnobRepo } from "./knobs";
@@ -84,7 +85,11 @@ export class AnomalyScheduler {
     // depends on the whole knob table through one `getValues()`, which is one
     // more way to throw, so the silence had to go.
     this.loop = new IntervalLoop(deps.intervalMs, () => this.tick(), (err) =>
-      deps.events.append("mining_tick_error", { message: String(err), failureKind: "internal", source: "anomaly" })
+      deps.events.append("mining_tick_error", {
+        request: logFailure("mining_tick_error", err),
+        failureKind: "internal",
+        source: "anomaly",
+      })
     );
   }
 

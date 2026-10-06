@@ -4,6 +4,7 @@ import type { Clock } from "./clock";
 import { discoverAndEvaluateContracts } from "./contractDiscovery";
 import { ContractRepo } from "./contractRepo";
 import { DispatchLock } from "./dispatchLock";
+import { describeFailure, logFailure } from "./failureDetail";
 import { advanceContractTask, contractCargoAtStake, startContractTask } from "./contractTask";
 import type { EventLog } from "./eventLog";
 import type { GameClients, ShipSnapshot, UpstreamFailureKind } from "./gameClients";
@@ -71,24 +72,6 @@ export const REPEATED_DENIED_THRESHOLD = 5;
 
 /** Where a failure came from: the fleet replan, or everything else a tick does. */
 type FailureSource = "tick" | "replan";
-
-/**
- * The failure as it may leave the process in a webhook: request method and
- * path, status and the start of the text. Never the upstream host, which is
- * internal, and never more than a short prefix of the upstream's body.
- */
-export function describeDenied(err: unknown): string {
-  const text = String(err);
-  const m = /^(?:Error: )?([A-Z]+) (\S+?): (.*)$/s.exec(text);
-  if (m === null) return text.slice(0, 200);
-  let path = m[2];
-  try {
-    path = new URL(m[2]).pathname;
-  } catch {
-    // not an absolute URL; keep as is
-  }
-  return `${m[1]} ${path}: ${m[3].slice(0, 200)}`;
-}
 
 export interface FleetSchedulerDeps {
   state: AutopilotState;
@@ -163,7 +146,7 @@ export class FleetScheduler {
       if (source === "tick") this.failedThisTick = true;
       await deps.events.append("mining_tick_error", {
         shipSymbol: this.requestedShipOf(err),
-        message: String(err),
+        request: logFailure("mining_tick_error", err),
         failureKind: verdictOf(err),
       });
       await this.noteFailure(err, source);
@@ -230,7 +213,7 @@ export class FleetScheduler {
       shipSymbol: symbol,
       configuredShipSymbol: this.deps.shipSymbol,
       source,
-      request: describeDenied(err),
+      request: describeFailure(err), // already logged in full by the mining_tick_error before it
       consecutiveFailures: count,
     });
   }
@@ -430,7 +413,7 @@ export class FleetScheduler {
       if (observations.miningCycle !== undefined) await repo.recordMiningCycle({ shipSymbol, ...observations.miningCycle });
       if (observations.marketsRefreshed !== undefined) await marketIntel.record(observations.marketsRefreshed);
     } catch (err) {
-      await events.append("observation_write_error", { message: String(err) });
+      await events.append("observation_write_error", { request: logFailure("observation_write_error", err) });
     }
   }
 
@@ -515,7 +498,10 @@ export class FleetScheduler {
     try {
       await discoverAndEvaluateContracts({ contracts, events, clients, planner, ship});
     } catch (err) {
-      await events.append("contract_discovery_error", { message: String(err), failureKind: verdictOf(err) });
+      await events.append("contract_discovery_error", {
+        request: logFailure("contract_discovery_error", err),
+        failureKind: verdictOf(err),
+      });
     }
   }
 
@@ -603,7 +589,7 @@ export class FleetScheduler {
     this.failedThisTick = true;
     await events.append("mining_tick_error", {
       shipSymbol: this.requestedShipOf(err),
-      message: String(err),
+      request: logFailure("mining_tick_error", err),
       failureKind: kind,
       failureCount: counted.failureCount,
       unrelatedFailureCount: counted.unrelatedFailureCount,

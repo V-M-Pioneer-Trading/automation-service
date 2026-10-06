@@ -229,6 +229,19 @@ export async function migrate(pool: Pool): Promise<KnobClamp[]> {
   // comparing a figure frozen at discovery against live mining scores.
   await pool.query(`ALTER TABLE contract ADD COLUMN IF NOT EXISTS travel_distance DOUBLE PRECISION`);
 
+  // Progress of one-off background maintenance (legacyScrub.ts): where a walk
+  // over a large table got to, and when it finished. Lets a restart resume
+  // instead of starting over, and a finished job never run again. Deliberately
+  // not part of this function's work: migrate() runs before the service
+  // listens and must stay fast whatever the table sizes (#45).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS maintenance_progress (
+      name TEXT PRIMARY KEY,
+      cursor BIGINT NOT NULL DEFAULT 0,
+      finished_at TIMESTAMPTZ
+    )
+  `);
+
   // Returned rather than logged here: db.ts has no event log and the caller
   // does. See `KnobClamp` for why a silent clamp is worth an audit entry.
   return knobClamps;

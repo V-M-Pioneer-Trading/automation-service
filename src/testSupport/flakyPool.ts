@@ -9,14 +9,18 @@ import type { Pool, PoolClient } from "pg";
  */
 type LooseFn = (...args: unknown[]) => unknown;
 
-export function makeFlakyPool(pool: Pool, shouldFail: (sql: string) => boolean): Pool {
+export function makeFlakyPool(
+  pool: Pool,
+  shouldFail: (sql: string) => boolean,
+  error: () => Error = () => new Error("simulated transient DB failure")
+): Pool {
   let failed = false;
   const flakyQuery = (originalQuery: LooseFn) => {
     return (...args: unknown[]) => {
       const sql = args[0];
       if (!failed && typeof sql === "string" && shouldFail(sql)) {
         failed = true;
-        return Promise.reject(new Error("simulated transient DB failure"));
+        return Promise.reject(error());
       }
       return originalQuery(...args);
     };

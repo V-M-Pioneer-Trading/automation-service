@@ -97,3 +97,59 @@ export const EVENT_REVENUE_SQL = `CASE
  * must not count in the error rate.
  */
 export const REPEATED_DENIED_EVENT = "repeated_denied_tripped";
+
+/** The anomaly `AnomalyChecker` raises from `REPEATED_DENIED_EVENT`. */
+export const REPEATED_DENIED_ANOMALY = "repeated_denied";
+
+/**
+ * Event types that stored raw error text as `detail.message` before #45: the
+ * internal URL of the service called and the upstream's whole response body.
+ * Nothing writes `message` on them any more; see `legacyErrorTextRemoved`.
+ */
+export const LEGACY_ERROR_TEXT_TYPES: readonly string[] = ["mining_tick_error", "contract_discovery_error", "observation_write_error"];
+
+/**
+ * The only shape a public failure `request` may have: what
+ * `UpstreamCallError.requestLine` builds, or `describeFailure`'s fallback for
+ * an upstream error without one. Written so Postgres (ARE) and JavaScript read
+ * it the same — no backslashes (`[(]` for a literal parenthesis) and no single
+ * quote, because `db.ts` puts it in DDL.
+ *
+ * #43's `repeated_denied` `request` was the first 200 characters of the
+ * upstream's text, which can name internal hosts. None of those rows match:
+ * the old value always carried text after the status.
+ */
+export const PUBLIC_REQUEST_PATTERN =
+  "^((GET|POST|PATCH|PUT|DELETE) /([A-Za-z0-9_.~%-][A-Za-z0-9/_.~%-]*)?: ([0-9]{3}( [(]code [0-9]+[)])?|no response( [(][A-Za-z0-9_]{1,40}[)])?|machine token unavailable)|upstream call failed [(][a-z]+[)])$";
+
+const PUBLIC_REQUEST = new RegExp(PUBLIC_REQUEST_PATTERN);
+
+/**
+ * Rows still carrying pre-#45 error text, in `event_log`. Scrubbed in the
+ * background by `LegacyErrorTextScrubber` (legacyScrub.ts). Unqualified
+ * column names, so it reads the same inside that UPDATE ... FROM.
+ */
+export const LEGACY_ERROR_TEXT_PREDICATE = `((type IN (${LEGACY_ERROR_TEXT_TYPES.map((t) => `'${t}'`).join(", ")}) AND detail ? 'message')
+  OR (type = '${REPEATED_DENIED_EVENT}' AND detail ? 'request' AND NOT COALESCE((detail->>'request') ~ '${PUBLIC_REQUEST_PATTERN}', false)))`;
+
+/**
+ * `detail` without pre-#45 error text, for any reader of `event_log` or
+ * `anomaly`. The rows are scrubbed in the background after startup, which on
+ * production takes minutes; this is what keeps the public routes clean
+ * meanwhile, and afterwards for a row the scrub never saw (a restored backup). `event_log` and `anomaly` types share no names, so one function covers both.
+ */
+export function legacyErrorTextRemoved(type: string, detail: Record<string, unknown>): Record<string, unknown> {
+  if (LEGACY_ERROR_TEXT_TYPES.includes(type) && "message" in detail) {
+    const rest = { ...detail };
+    delete rest.message;
+    return rest;
+  }
+  if ((type === REPEATED_DENIED_EVENT || type === REPEATED_DENIED_ANOMALY) && "request" in detail) {
+    const request = detail.request;
+    if (typeof request === "string" && PUBLIC_REQUEST.test(request)) return detail;
+    const rest = { ...detail };
+    delete rest.request;
+    return rest;
+  }
+  return detail;
+}

@@ -6,6 +6,7 @@ import {
   EARNING_EVENT_PREDICATE,
   LIFECYCLE_EVENT_TYPES,
   MARKET_SELECTION_TYPE,
+  legacyErrorTextRemoved,
   TASK_EVENT_PREDICATE,
 } from "./fleetEvents";
 
@@ -176,6 +177,6 @@ function rowToEntry(row: EntryRow): EventLogEntry {
     id: String(row.id),
     occurredAt: row.occurred_at.toISOString(),
     type: row.type,
-    detail: row.detail,
+    detail: legacyErrorTextRemoved(row.type, row.detail),
   };
 }

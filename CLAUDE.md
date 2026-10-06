@@ -35,7 +35,8 @@ declared on the `docker` job, never at workflow level.
 | `miningTask.ts`, `contractTask.ts`, `scoutTask.ts` | Per kind: `start*Task` (how one begins), `advance*Task(ctx)` (one action per call), `*CargoAtStake(task)` (what it means by the shared columns). All three answer for the kind; none of them lives in the scheduler | taskFsm |
 | `observations.ts` | `ObservationRepo` + `calibrate()`: measured model with priors as fallback | knobs (types only) |
 | `knobs.ts` | `KNOB_DEFINITIONS` (source of `KnobName`), `KnobRepo`, `syncKnobDefinitions` | transaction |
-| `db.ts` | `createPool`, `migrate` (idempotent DDL) | knobs (for the sync) |
+| `db.ts` | `createPool`, `migrate` (idempotent DDL only — it runs before listen and must stay fast whatever the table sizes) | knobs (for the sync) |
+| `legacyScrub.ts` | `LegacyErrorTextScrubber`: the #45 background walk that removes pre-#45 error text from old rows, in small batches after listen; progress in `maintenance_progress` | fleetEvents |
 | `transaction.ts` | `withTransaction(pool, fn)` | pg |
 | `intervalLoop.ts` | `IntervalLoop`: the one guarded timer every scheduler runs on | nothing |
 | `dispatchLock.ts` | `DispatchLock`: Postgres advisory lock making "one process drives this ship" true across processes | pg, crypto |
@@ -54,6 +55,7 @@ declared on the `docker` job, never at workflow level.
 | `config.ts` | `configFromEnv()`; every numeric env var validated positive; `loadIntrospectionConfig()` for the center | fs, clerk-client |
 | `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | fetch |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs, plannerDecision |
+| `failureDetail.ts` | `describeFailure` (what a failure may say outside the process: an `UpstreamCallError`'s `requestLine`, else an identifier-shaped `code`/class name — never error text) and `logFailure` (full text to the container log, returns the public one) | gameClients (the error class) |
 
 Dependency direction is strictly downward in that table's spirit: `scoring`,
 `routeCost` and `plannerDecision` import nothing local; FSMs never import repos
@@ -170,7 +172,8 @@ for callers who look there first.
   the ship is not ours), `malformed` (our request was wrong) or `rejected`
   (the game refused the action). `handleTickFailure`
   is the only consumer that branches, and `UpstreamCallError` no longer carries
-  a status code at all. `server.ts`'s error handler used to re-serve one, which
+  a status code at all — only `requestLine`, a rendered string for public
+  event detail (#45), which nothing may parse or branch on. `server.ts`'s error handler used to re-serve one, which
   was both unreachable (no route calls an upstream service) and misleading,
   since it implied an operator's `401` might be the fleet's own expired token.
 
@@ -469,6 +472,52 @@ most of them during an outage (every `getShip` and planner call fails there,
 before any FSM runs) — though only `mining_task_failed` and
 `contract_discovery_error` are in `NOTABLE_EVENT_TYPES`, so the digest sees
 those two and the raw event feed carries the rest.
+
+**No error text ever goes into `detail`** (#45) — not raw, not trimmed, not
+scrubbed. `String(err)` of an upstream failure is the internal host plus the
+upstream's response body; any other error can carry a connection string; and
+`GET /autopilot/events` is public. Store `request: logFailure(eventType, err)`
+— the public description on the event, the full error in the container log,
+once — or `describeFailure(err)` for a second event about a failure already
+logged (`repeated_denied_tripped`). The public description is built only from
+values we chose (method, path) or that parse as a number or an identifier
+(status, SpaceTraders' numeric `error.code`, a Node or SQLSTATE `code`, a class
+name). A scrubber was tried first and a review found ten address shapes it let
+through; don't go back to one. Since nothing is sliced, nothing can split a
+surrogate pair either (Postgres jsonb refuses a lone one, and the failed insert
+used to skip the failure count). `publicEventDetail.test.ts` drives all five
+write sites against upstreams and errors naming internal addresses in every
+form, and asserts the public route serves none.
+
+Rows written before #45 are handled in two places.
+
+**Background scrub.** `LegacyErrorTextScrubber` starts once the server is
+listening. It removes `message` from `LEGACY_ERROR_TEXT_TYPES`, and removes any
+`request` not matching `PUBLIC_REQUEST_PATTERN` from `repeated_denied` events
+and anomalies.
+- Production had ~440k such rows in a 372 MB table, on a host with 3 GB of
+  disk free and 90 s to pass its health check. So this is **not** in
+  `migrate()`, and it uses no new index.
+- It walks `event_log` by primary key, 2000 rows per statement with 1 s
+  between batches (paced so autovacuum keeps up on a nearly full disk), up to
+  the newest id at start, and saves its cursor in `maintenance_progress` after
+  each (monotonic upsert).
+- A restart resumes from the cursor. A finished walk is recorded and never
+  repeated, since every row written after #45 is clean by construction.
+- It logs one line at start and one at the end. Errors are logged and retried
+  after a minute, never thrown.
+- `stop()` returns at once: shutdown never waits on a batch, and the batch in
+  flight is one statement that commits or doesn't.
+
+**Read guard.** `legacyErrorTextRemoved` drops the same fields in `EventLog`
+and `AnomalyRepo`'s row mappers. This is what makes a slow scrub safe: the
+public routes are clean from the first request. It also covers rows the scrub
+never saw, such as a restored backup.
+
+If `requestLine` ever grows a new shape, widen `PUBLIC_REQUEST_PATTERN` in the
+same change, or the new values are dropped on read. `legacyErrorText.test.ts`
+covers the scrubber (batches, resume, stop mid-batch and mid-pause, retry,
+idempotence) and the read side.
 
 Event `detail` must never contain a token or anything token-shaped; `actor`
 is the `sub` auth-service reported (`actorOf(res)`) and nothing else — never a

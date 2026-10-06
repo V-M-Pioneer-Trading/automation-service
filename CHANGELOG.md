@@ -7,6 +7,51 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Failure events no longer carry upstream URLs or bodies (#45)
+
+`mining_tick_error` (fleet and anomaly loops), `contract_discovery_error` and
+`observation_write_error` stored `String(err)` as `detail.message`: the
+internal host of the service called (`http://localhost:80/api/agent/...`), the
+upstream's whole response body, or a database connection string.
+`GET /autopilot/events` serves them to anyone. They now carry `detail.request`,
+and the full error goes to the container log once, at the event that records it.
+
+`request` contains no error text at all. An upstream failure is
+`METHOD /path: STATUS`, plus `(code N)` when the body is SpaceTraders'
+envelope with a numeric code, or `METHOD /path: no response (ECONNREFUSED)`.
+`UpstreamCallError.requestLine` builds it at the call. Any other error is its
+identifier-shaped `code` or class name (`ECONNREFUSED`, `23505`, `TypeError`),
+else `Error`. The first version kept the #40 webhook's 200-character prefix and
+stripped `http(s)://` origins. Review found two problems with that. First,
+bare IPs, `localhost:80`, `//host`, `ws://`, connection strings,
+percent-encoded and JSON-escaped URLs, and prose like "st-gateway did not
+answer" all got through. Second, the prefix could split an emoji, and Postgres
+then refused the event insert, so the failure count was never saved. Building
+the text from known parts fixes both. The `repeated_denied` webhook changed the
+same way. The helper is now `describeFailure` in `failureDetail.ts`.
+
+Rows already written are scrubbed too. Nothing expires `event_log`, and the
+public route serves the newest rows, so production's old rows would have stayed
+public. There were ~437k of them in a 372 MB table, on a t4g.small with 3 GB of
+disk free and 90 s to answer health after `docker run`.
+
+That rules out one UPDATE in `migrate()`: it would block startup, write the
+whole table's new tuples and WAL in one transaction, and hold its locks
+throughout. Instead, `LegacyErrorTextScrubber` (legacyScrub.ts) starts after
+the server is listening:
+- It walks `event_log` by primary key, 2000 rows per statement with 1 s
+  between batches, up to the newest id at start.
+- In the three error types it removes `message`. In `repeated_denied_tripped`
+  events and `repeated_denied` anomalies it removes any `request` that is not
+  the new shape (`PUBLIC_REQUEST_PATTERN`). #43's version was a 200-character
+  text prefix, and none of those match.
+- It records progress in a new `maintenance_progress` table, so a restart
+  resumes and a finished walk is never repeated.
+- It logs at start and end, retries on error, and stops at once on shutdown.
+
+Until it finishes, `EventLog` and `AnomalyRepo` drop the same fields when they
+map rows, so the public routes are clean from the first request.
+
 ## A restart no longer disarms the autopilot; it resumes in shadow (Q29)
 
 Every deploy used to disarm the autopilot, because status and mode lived only
