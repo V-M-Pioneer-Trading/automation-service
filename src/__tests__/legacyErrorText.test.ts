@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import request from "supertest";
 import { createPool, migrate } from "../db";
-import { LEGACY_ERROR_TEXT_PREDICATE, legacyErrorTextRemoved } from "../fleetEvents";
+import { LEGACY_ERROR_TEXT_PREDICATE, legacyErrorTextRemoved, PUBLIC_REQUEST_PATTERN } from "../fleetEvents";
 import { LEGACY_SCRUB_JOB, LegacyErrorTextScrubber } from "../legacyScrub";
 import { stopBackgroundSchedulers } from "../testSupport/appHooks";
 import { createTestApp } from "../testSupport/createTestApp";
@@ -23,6 +23,9 @@ const OLD_TEXT =
   'Error: GET http://localhost:80/api/agent/v1/ships/MINING-1: 500 {"error":{"message":"st-gateway: GET https://api.spacetraders.io/v2/my/ships failed via http://st-gateway.internal:8080"}}';
 const OLD_DENIED_REQUEST = "GET /api/agent/v1/ships/MINING-1: 403 upstream http://st-gateway.internal:8080 said no";
 const FLOOD = 20; // extra old rows, so a small batch size needs many batches
+/** Requests the guard keeps, and ones it drops — checked against both the JS guard and the SQL scrub. */
+const KEEP = ["GET /ships/X: 403", "GET /ships/X: 403 (code 4225)", "POST /ships/X/orbit: no response (ECONNREFUSED)", "upstream call failed (denied)"];
+const DROP_TEXT = [OLD_DENIED_REQUEST, "GET //st-gateway.internal/x: 403", "GET /ships/X: 403 ", "GET /ships/X: 403 (code 1) http://x", ""];
 
 describe("pre-#45 error text in stored rows", () => {
   let pool: Pool;
@@ -91,7 +94,7 @@ describe("pre-#45 error text in stored rows", () => {
    * optionally held at a gate or failed once — so a test can see batches and
    * stop the scrubber in the middle of one.
    */
-  const instrumented = (opts: { holdBatch?: number; failBatch?: number } = {}) => {
+  const instrumented = (opts: { holdBatch?: number; failBatch?: number; afterBatch?: () => Promise<unknown> } = {}) => {
     const cursors: number[] = [];
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -113,6 +116,7 @@ describe("pre-#45 error text in stored rows", () => {
           }
           const result = await target.query(text, values);
           if (typeof text === "string" && text.includes("INSERT INTO maintenance_progress")) saved();
+          if (typeof text === "string" && text.includes("WITH batch") && opts.afterBatch) await opts.afterBatch();
           return result;
         };
       },
@@ -256,10 +260,57 @@ describe("pre-#45 error text in stored rows", () => {
   });
 
   it("legacyErrorTextRemoved keeps a request of the new shape and drops anything else", () => {
-    const keep = ["GET /ships/X: 403", "GET /ships/X: 403 (code 4225)", "POST /ships/X/orbit: no response (ECONNREFUSED)", "upstream call failed (denied)"];
-    for (const r of keep) expect(legacyErrorTextRemoved("repeated_denied_tripped", { request: r })).toEqual({ request: r });
-    const drop = [OLD_DENIED_REQUEST, "GET //st-gateway.internal/x: 403", "GET /ships/X: 403 ", "GET /ships/X: 403 (code 1) http://x", 42];
-    for (const r of drop) expect(legacyErrorTextRemoved("repeated_denied", { request: r, shipSymbol: "X" })).toEqual({ shipSymbol: "X" });
+    for (const r of KEEP) expect(legacyErrorTextRemoved("repeated_denied_tripped", { request: r })).toEqual({ request: r });
+    for (const r of [...DROP_TEXT, 42, null]) {
+      expect(legacyErrorTextRemoved("repeated_denied", { request: r, shipSymbol: "X" })).toEqual({ shipSymbol: "X" });
+    }
     expect(legacyErrorTextRemoved("mining_tick_error", { message: OLD_TEXT, failureKind: "unavailable" })).toEqual({ failureKind: "unavailable" });
+  });
+
+  it("Postgres and JavaScript read PUBLIC_REQUEST_PATTERN the same way", async () => {
+    for (const r of [...KEEP, ...DROP_TEXT]) {
+      const { rows } = await pool.query<{ m: boolean }>("SELECT $1::text ~ $2 AS m", [r, PUBLIC_REQUEST_PATTERN]);
+      expect([r, rows[0].m]).toEqual([r, new RegExp(PUBLIC_REQUEST_PATTERN).test(r)]);
+    }
+  });
+
+  it("the scrub agrees with the guard on every request, including null", async () => {
+    for (const r of [...KEEP, ...DROP_TEXT, null]) await insertEvent("repeated_denied_tripped", { request: r, shipSymbol: "X" });
+    await new LegacyErrorTextScrubber(pool, { batchSize: 4, pauseMs: 0, log }).start();
+    const stored = (await rawEvents()).map((e) => e.detail);
+    expect(stored).toEqual([...KEEP.map((r) => ({ request: r, shipSymbol: "X" })), ...[...DROP_TEXT, null].map(() => ({ shipSymbol: "X" }))]);
+  });
+
+  it("rows written during the walk do not keep it running", async () => {
+    await seedOldRows();
+    const before = await maxId();
+    // A busy fleet: every batch is followed by more rows than a batch takes.
+    const { pool: p, cursors } = instrumented({
+      afterBatch: () => pool.query("INSERT INTO event_log (occurred_at, type, detail) SELECT $1, 'mining_extract', '{}' FROM generate_series(1, 5)", [NOW]),
+    });
+
+    await new LegacyErrorTextScrubber(p, { batchSize: 3, pauseMs: 0, log }).start();
+
+    expect(cursors.length).toBeLessThanOrEqual(Math.ceil(before / 3));
+    expect(Math.max(...cursors)).toBeLessThan(before);
+    expect(await stillToScrub()).toBe(0);
+    expect((await progress())?.finished_at).not.toBeNull();
+  });
+
+  it("progress only moves forward, and a finish is never undone", async () => {
+    const save = (s: LegacyErrorTextScrubber, cursor: number, finished: boolean) =>
+      (s as unknown as { saveProgress(c: number, f: boolean): Promise<void> }).saveProgress(cursor, finished);
+    const a = new LegacyErrorTextScrubber(pool, { log });
+    const b = new LegacyErrorTextScrubber(pool, { log });
+
+    await save(a, 10, false);
+    await save(b, 5, false); // a slower instance, behind
+    expect(Number((await progress())?.cursor)).toBe(10);
+
+    await save(a, 12, true);
+    await save(b, 11, false);
+    const after = await progress();
+    expect(Number(after?.cursor)).toBe(12);
+    expect(after?.finished_at).not.toBeNull();
   });
 });

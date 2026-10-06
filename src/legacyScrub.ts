@@ -7,7 +7,12 @@ export const LEGACY_SCRUB_JOB = "scrub_pre_45_error_text";
 export interface LegacyScrubOptions {
   /** Rows of `event_log` looked at per statement, by primary key. Each batch is one statement, so one short transaction. */
   batchSize?: number;
-  /** Between batches, so the scrub never competes with the fleet for a small host's disk and CPU. */
+  /**
+   * Between batches. Each batch writes new row versions and WAL; on a host
+   * with little free disk a fast burst outpaces autovacuum's reclaiming of the
+   * old ones, so the walk is paced (~4-5 min for production's ~460k rows at
+   * the defaults). It still shares disk and CPU with the fleet, just gently.
+   */
   pauseMs?: number;
   /** After a failed batch. The cursor is kept, so the retry picks up at the same batch. */
   retryMs?: number;
@@ -23,9 +28,11 @@ export interface LegacyScrubOptions {
  * tuples and WAL in one transaction, and holds its locks throughout. Instead it
  * walks `event_log` by primary key (`id > cursor ORDER BY id LIMIT n`, which
  * needs no new index), one short statement per batch with a pause between,
- * and saves the cursor in `maintenance_progress` after each. A restart resumes
- * where the last one stopped; a finished walk is recorded and never repeated —
- * rows written since are clean by construction.
+ * and saves the cursor in `maintenance_progress` after each. It ends at the
+ * newest id it saw at start: rows written since are clean by construction, so
+ * a busy fleet can't keep it running. A restart resumes where the last one
+ * stopped; a finished walk is recorded and never repeated. Progress only moves
+ * forward (GREATEST / COALESCE), whatever two instances write.
  *
  * Until it finishes, `legacyErrorTextRemoved` keeps the public routes clean on
  * read; that is what makes doing this slowly safe. Failures are logged and
@@ -49,7 +56,7 @@ export class LegacyErrorTextScrubber {
     options: LegacyScrubOptions = {}
   ) {
     this.batchSize = options.batchSize ?? 2000;
-    this.pauseMs = options.pauseMs ?? 200;
+    this.pauseMs = options.pauseMs ?? 1000;
     this.retryMs = options.retryMs ?? 60_000;
     this.log =
       options.log ??
@@ -90,23 +97,36 @@ export class LegacyErrorTextScrubber {
     }
     if (progress.finished) return;
 
+    // Where the walk ends: the newest row at start. Everything written after
+    // is clean by construction, and walking to an empty batch instead would
+    // chase a busy fleet's tail forever.
+    let upTo: number | null = null;
+    while (upTo === null) {
+      try {
+        upTo = await this.newestId();
+      } catch (err) {
+        this.log("automation-service: legacy error-text scrub could not start; retrying later", err);
+        if (!(await this.pause(this.retryMs))) return;
+      }
+    }
+
     let { cursor } = progress;
     let events = 0;
     this.log(`automation-service: scrubbing pre-#45 error text from event_log in the background, from id ${String(cursor)}`);
     const anomalies = await this.scrubAnomalies();
     if (anomalies === null) return;
 
-    for (;;) {
+    while (cursor < upTo) {
       if (this.stopped) return;
       let batch: { lastId: number | null; scrubbed: number };
       try {
-        batch = await this.scrubBatch(cursor);
+        batch = await this.scrubBatch(cursor, upTo);
       } catch (err) {
         this.log(`automation-service: legacy error-text scrub batch after id ${String(cursor)} failed; retrying later`, err);
         if (!(await this.pause(this.retryMs))) return;
         continue;
       }
-      if (batch.lastId === null) break; // walked past the last row
+      if (batch.lastId === null) break; // nothing left up to the bound
       cursor = batch.lastId;
       events += batch.scrubbed;
       try {
@@ -132,7 +152,7 @@ export class LegacyErrorTextScrubber {
       try {
         const { rowCount } = await this.pool.query(
           `UPDATE anomaly SET detail = detail - 'request'
-            WHERE type = $1 AND detail ? 'request' AND NOT ((detail->>'request') ~ $2)`,
+            WHERE type = $1 AND detail ? 'request' AND NOT COALESCE((detail->>'request') ~ $2, false)`,
           [REPEATED_DENIED_ANOMALY, PUBLIC_REQUEST_PATTERN]
         );
         return rowCount ?? 0;
@@ -143,11 +163,16 @@ export class LegacyErrorTextScrubber {
     }
   }
 
-  private async scrubBatch(cursor: number): Promise<{ lastId: number | null; scrubbed: number }> {
+  private async newestId(): Promise<number> {
+    const { rows } = await this.pool.query<{ m: string | null }>("SELECT max(id) AS m FROM event_log");
+    return rows[0].m === null ? 0 : Number(rows[0].m);
+  }
+
+  private async scrubBatch(cursor: number, upTo: number): Promise<{ lastId: number | null; scrubbed: number }> {
     // `batch` walks every row by primary key, not only dirty ones, so the walk
     // needs no index of its own; the UPDATE touches only the dirty ones in it.
     const { rows } = await this.pool.query<{ last_id: string | null; scrubbed: string }>(
-      `WITH batch AS (SELECT id FROM event_log WHERE id > $1 ORDER BY id LIMIT $2),
+      `WITH batch AS (SELECT id FROM event_log WHERE id > $1 AND id <= $3 ORDER BY id LIMIT $2),
             scrubbed AS (
               UPDATE event_log e
                  SET detail = CASE WHEN e.type = '${REPEATED_DENIED_EVENT}' THEN e.detail - 'request' ELSE e.detail - 'message' END
@@ -156,7 +181,7 @@ export class LegacyErrorTextScrubber {
               RETURNING e.id
             )
        SELECT (SELECT max(id) FROM batch) AS last_id, (SELECT count(*) FROM scrubbed) AS scrubbed`,
-      [cursor, this.batchSize]
+      [cursor, this.batchSize, upTo]
     );
     const row = rows[0];
     return { lastId: row.last_id === null ? null : Number(row.last_id), scrubbed: Number(row.scrubbed) };
@@ -173,7 +198,9 @@ export class LegacyErrorTextScrubber {
   private async saveProgress(cursor: number, finished: boolean): Promise<void> {
     await this.pool.query(
       `INSERT INTO maintenance_progress (name, cursor, finished_at) VALUES ($1, $2, CASE WHEN $3 THEN now() END)
-       ON CONFLICT (name) DO UPDATE SET cursor = EXCLUDED.cursor, finished_at = EXCLUDED.finished_at`,
+       ON CONFLICT (name) DO UPDATE
+         SET cursor = GREATEST(maintenance_progress.cursor, EXCLUDED.cursor),
+             finished_at = COALESCE(maintenance_progress.finished_at, EXCLUDED.finished_at)`,
       [LEGACY_SCRUB_JOB, cursor, finished]
     );
   }

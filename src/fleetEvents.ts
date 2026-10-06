@@ -130,7 +130,7 @@ const PUBLIC_REQUEST = new RegExp(PUBLIC_REQUEST_PATTERN);
  * column names, so it reads the same inside that UPDATE ... FROM.
  */
 export const LEGACY_ERROR_TEXT_PREDICATE = `((type IN (${LEGACY_ERROR_TEXT_TYPES.map((t) => `'${t}'`).join(", ")}) AND detail ? 'message')
-  OR (type = '${REPEATED_DENIED_EVENT}' AND detail ? 'request' AND NOT ((detail->>'request') ~ '${PUBLIC_REQUEST_PATTERN}')))`;
+  OR (type = '${REPEATED_DENIED_EVENT}' AND detail ? 'request' AND NOT COALESCE((detail->>'request') ~ '${PUBLIC_REQUEST_PATTERN}', false)))`;
 
 /**
  * `detail` without pre-#45 error text, for any reader of `event_log` or

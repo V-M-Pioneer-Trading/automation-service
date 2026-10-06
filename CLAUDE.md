@@ -498,8 +498,10 @@ and anomalies.
 - Production had ~440k such rows in a 372 MB table, on a host with 3 GB of
   disk free and 90 s to pass its health check. So this is **not** in
   `migrate()`, and it uses no new index.
-- It walks `event_log` by primary key, 2000 rows per statement with 200 ms
-  between batches, and saves its cursor in `maintenance_progress` after each.
+- It walks `event_log` by primary key, 2000 rows per statement with 1 s
+  between batches (paced so autovacuum keeps up on a nearly full disk), up to
+  the newest id at start, and saves its cursor in `maintenance_progress` after
+  each (monotonic upsert).
 - A restart resumes from the cursor. A finished walk is recorded and never
   repeated, since every row written after #45 is clean by construction.
 - It logs one line at start and one at the end. Errors are logged and retried

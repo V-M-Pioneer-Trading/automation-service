@@ -39,8 +39,8 @@ That rules out one UPDATE in `migrate()`: it would block startup, write the
 whole table's new tuples and WAL in one transaction, and hold its locks
 throughout. Instead, `LegacyErrorTextScrubber` (legacyScrub.ts) starts after
 the server is listening:
-- It walks `event_log` by primary key, 2000 rows per statement with 200 ms
-  between batches.
+- It walks `event_log` by primary key, 2000 rows per statement with 1 s
+  between batches, up to the newest id at start.
 - In the three error types it removes `message`. In `repeated_denied_tripped`
   events and `repeated_denied` anomalies it removes any `request` that is not
   the new shape (`PUBLIC_REQUEST_PATTERN`). #43's version was a 200-character
