@@ -76,10 +76,14 @@ describe("configFromEnv: auth-service introspection", () => {
 
 /**
  * The webhook body format (#47): unset is the original generic body, and a
- * value that is not one of the three is refused at boot rather than every
- * page being rejected by the chat service later.
+ * value that is not one of the two is refused at boot rather than every
+ * page being rejected by the chat service later. Telegram needs a chat id,
+ * and a chat id needs Telegram.
  */
-describe("configFromEnv: ANOMALY_WEBHOOK_FORMAT", () => {
+describe("configFromEnv: ANOMALY_WEBHOOK_FORMAT and ANOMALY_TELEGRAM_CHAT_ID", () => {
+  const BOT_TOKEN = "987654321:AAH-SECRETtokenPART_xyz";
+  const TELEGRAM_URL = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+
   const saved = { ...process.env };
 
   beforeEach(() => {
@@ -96,7 +100,18 @@ describe("configFromEnv: ANOMALY_WEBHOOK_FORMAT", () => {
       AUTH_M2M_CALLER_SECRET: "s3cr3t-caller-value",
     };
     delete process.env.ANOMALY_WEBHOOK_FORMAT;
+    delete process.env.ANOMALY_TELEGRAM_CHAT_ID;
+    delete process.env.ANOMALY_WEBHOOK_URL;
   });
+
+  const refusal = (): string => {
+    try {
+      configFromEnv();
+    } catch (err) {
+      return String(err);
+    }
+    throw new Error("configFromEnv() did not refuse");
+  };
 
   afterAll(() => {
     process.env = saved;
@@ -107,14 +122,61 @@ describe("configFromEnv: ANOMALY_WEBHOOK_FORMAT", () => {
     expect(configFromEnv().anomalyWebhookFormat).toBe("generic");
   });
 
-  it.each(["generic", "discord", "slack"])("accepts %s", (format) => {
-    process.env.ANOMALY_WEBHOOK_FORMAT = format;
-    expect(configFromEnv().anomalyWebhookFormat).toBe(format);
+  it("accepts generic, with no chat id", () => {
+    process.env.ANOMALY_WEBHOOK_FORMAT = "generic";
+    expect(configFromEnv()).toMatchObject({ anomalyWebhookFormat: "generic", anomalyTelegramChatId: null });
   });
 
-  it.each(["Discord", "teams", " slack"])("refuses %p at startup, naming the variable", (format) => {
+  it.each(["123456789", "-1001234567890", "@my_channel"])("accepts telegram with chat id %p and a Bot API URL", (chatId) => {
+    process.env.ANOMALY_WEBHOOK_FORMAT = "telegram";
+    process.env.ANOMALY_TELEGRAM_CHAT_ID = chatId;
+    process.env.ANOMALY_WEBHOOK_URL = TELEGRAM_URL;
+    expect(configFromEnv()).toMatchObject({ anomalyWebhookFormat: "telegram", anomalyTelegramChatId: chatId, anomalyWebhookUrl: TELEGRAM_URL });
+  });
+
+  it.each(["discord", "slack", "Telegram", "teams", " generic"])("refuses %p at startup, naming the variable", (format) => {
     process.env.ANOMALY_WEBHOOK_FORMAT = format;
-    expect(() => configFromEnv()).toThrow(/^ANOMALY_WEBHOOK_FORMAT must be one of generic, discord, slack/);
+    expect(() => configFromEnv()).toThrow(/^ANOMALY_WEBHOOK_FORMAT must be one of generic, telegram,/);
+  });
+
+  it.each([undefined, ""])("refuses telegram without a chat id (%p)", (chatId) => {
+    process.env.ANOMALY_WEBHOOK_FORMAT = "telegram";
+    if (chatId !== undefined) process.env.ANOMALY_TELEGRAM_CHAT_ID = chatId;
+    expect(refusal()).toContain("ANOMALY_TELEGRAM_CHAT_ID must be set when ANOMALY_WEBHOOK_FORMAT is telegram");
+  });
+
+  it.each(["12a", "@abc", "-", "--5", "@has-dash", "1".repeat(21), "@" + "a".repeat(33), "123 ", "+123"])("refuses chat id %p", (chatId) => {
+    process.env.ANOMALY_WEBHOOK_FORMAT = "telegram";
+    process.env.ANOMALY_TELEGRAM_CHAT_ID = chatId;
+    expect(refusal()).toContain("ANOMALY_TELEGRAM_CHAT_ID must be a numeric chat id");
+  });
+
+  it.each([undefined, "generic"])("refuses a chat id when the format is %p", (format) => {
+    if (format !== undefined) process.env.ANOMALY_WEBHOOK_FORMAT = format;
+    process.env.ANOMALY_TELEGRAM_CHAT_ID = "123456789";
+    expect(refusal()).toContain("ANOMALY_TELEGRAM_CHAT_ID is set but ANOMALY_WEBHOOK_FORMAT is not telegram");
+  });
+
+  it.each([
+    `http://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+    `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates`,
+    `https://evil.example/bot${BOT_TOKEN}/sendMessage`,
+    `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage?chat_id=1`,
+    "https://discord.com/api/webhooks/1/x",
+  ])("refuses telegram with a URL that is not a Bot API sendMessage URL, without quoting it (%#)", (url) => {
+    process.env.ANOMALY_WEBHOOK_FORMAT = "telegram";
+    process.env.ANOMALY_TELEGRAM_CHAT_ID = "123456789";
+    process.env.ANOMALY_WEBHOOK_URL = url;
+    const message = refusal();
+    expect(message).toContain("ANOMALY_WEBHOOK_URL must be https://api.telegram.org/bot<token>/sendMessage");
+    expect(message).not.toContain(BOT_TOKEN.split(":")[1]);
+    expect(message).not.toContain("discord.com");
+  });
+
+  it("allows telegram with no URL: detection runs, nothing is sent", () => {
+    process.env.ANOMALY_WEBHOOK_FORMAT = "telegram";
+    process.env.ANOMALY_TELEGRAM_CHAT_ID = "123456789";
+    expect(configFromEnv()).toMatchObject({ anomalyWebhookUrl: null, anomalyWebhookFormat: "telegram" });
   });
 });
 

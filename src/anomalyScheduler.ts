@@ -26,6 +26,8 @@ export interface AnomalyConfig {
   webhookUrl?: string | null;
   /** Body shape for `webhookUrl` (#47); `generic` when omitted. */
   webhookFormat?: WebhookFormat;
+  /** The chat for the `telegram` format; required with it, refused without it. */
+  telegramChatId?: string | null;
 }
 
 /**

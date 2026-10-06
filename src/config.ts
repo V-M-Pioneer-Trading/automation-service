@@ -5,7 +5,7 @@ import {
   type IntrospectionConfig,
   type M2MTokenSource,
 } from "@v-m-pioneer-trading/clerk-client";
-import { WEBHOOK_FORMATS, type WebhookFormat } from "./webhookDelivery";
+import { TELEGRAM_CHAT_ID, TELEGRAM_SEND_MESSAGE_URL, WEBHOOK_FORMATS, type WebhookFormat } from "./webhookDelivery";
 
 export interface ServiceConfig {
   port: number;
@@ -29,8 +29,10 @@ export interface ServiceConfig {
   // and the digest is always served; null only skips the outbound POST.
   anomalyWebhookUrl: string | null;
   // The body shape that URL expects (#47): the original generic JSON, or a
-  // Discord/Slack chat message. Only meaningful with a URL set.
+  // Telegram Bot API sendMessage call. Only meaningful with a URL set.
   anomalyWebhookFormat: WebhookFormat;
+  // The Telegram chat to send to: set exactly when the format is telegram.
+  anomalyTelegramChatId: string | null;
   anomalyIntervalMs: number;
   // Matches the sibling services' convention (fleet-service, agent-service):
   // the browser-facing UI (command-interface, default port 3000) is the only
@@ -137,24 +139,43 @@ const positiveNumberEnv = (name: string, fallback: number): number => {
 };
 
 /**
- * The webhook body format, `generic` when unset. A typo is refused at boot: a
- * wrong format means every page is rejected by the chat service, which is
- * only noticed when the page that mattered never arrives.
+ * The webhook settings. Every mistake is refused at boot, because a wrong
+ * one means every page is rejected by the chat service, which is only noticed
+ * when the page that mattered never arrives:
+ * - the format, `generic` when unset, must be one of WEBHOOK_FORMATS;
+ * - `ANOMALY_TELEGRAM_CHAT_ID` is required with `telegram` and refused
+ *   without it, and must look like a chat id;
+ * - with `telegram`, a set URL must be a Bot API sendMessage URL.
+ * The URL holds the bot token, so no message here ever quotes it.
  */
-const webhookFormatEnv = (): WebhookFormat => {
+const anomalyWebhookEnv = (): { url: string | null; format: WebhookFormat; telegramChatId: string | null } => {
+  const url = process.env.ANOMALY_WEBHOOK_URL ?? null;
   const raw = process.env.ANOMALY_WEBHOOK_FORMAT;
-  if (raw === undefined || raw === "") return "generic";
-  const format = WEBHOOK_FORMATS.find((f) => f === raw);
+  const format = raw === undefined || raw === "" ? "generic" : WEBHOOK_FORMATS.find((f) => f === raw);
   if (format === undefined) {
-    throw new Error(`ANOMALY_WEBHOOK_FORMAT must be one of ${WEBHOOK_FORMATS.join(", ")}, got "${raw}"`);
+    throw new Error(`ANOMALY_WEBHOOK_FORMAT must be one of ${WEBHOOK_FORMATS.join(", ")}, got "${String(raw)}"`);
   }
-  return format;
+  const chatRaw = process.env.ANOMALY_TELEGRAM_CHAT_ID;
+  const chatId = chatRaw === undefined || chatRaw === "" ? null : chatRaw;
+  if (format !== "telegram") {
+    if (chatId !== null) throw new Error("ANOMALY_TELEGRAM_CHAT_ID is set but ANOMALY_WEBHOOK_FORMAT is not telegram");
+    return { url, format, telegramChatId: null };
+  }
+  if (chatId === null) throw new Error("ANOMALY_TELEGRAM_CHAT_ID must be set when ANOMALY_WEBHOOK_FORMAT is telegram");
+  if (!TELEGRAM_CHAT_ID.test(chatId)) {
+    throw new Error(`ANOMALY_TELEGRAM_CHAT_ID must be a numeric chat id (optionally negative) or @channelusername, got "${chatId}"`);
+  }
+  if (url !== null && url !== "" && !TELEGRAM_SEND_MESSAGE_URL.test(url)) {
+    throw new Error("ANOMALY_WEBHOOK_URL must be https://api.telegram.org/bot<token>/sendMessage when ANOMALY_WEBHOOK_FORMAT is telegram");
+  }
+  return { url, format, telegramChatId: chatId };
 };
 
 export const configFromEnv = (): ServiceConfig => {
   // Presence only; the source itself is built later by resolveM2MTokenSource.
   // Checked here so the failure precedes migrate().
   requireM2MEnv(process.env);
+  const webhook = anomalyWebhookEnv();
   return {
     port: positiveNumberEnv("PORT", 3003),
     databaseUrl: requireEnv("DATABASE_URL"),
@@ -165,8 +186,9 @@ export const configFromEnv = (): ServiceConfig => {
     schedulerIntervalMs: positiveNumberEnv("SCHEDULER_INTERVAL_MS", 5000),
     replanIntervalMs: positiveNumberEnv("REPLAN_INTERVAL_MS", 300_000),
     metricsRollupIntervalMs: positiveNumberEnv("METRICS_ROLLUP_INTERVAL_MS", 60_000),
-    anomalyWebhookUrl: process.env.ANOMALY_WEBHOOK_URL ?? null,
-    anomalyWebhookFormat: webhookFormatEnv(),
+    anomalyWebhookUrl: webhook.url,
+    anomalyWebhookFormat: webhook.format,
+    anomalyTelegramChatId: webhook.telegramChatId,
     anomalyIntervalMs: positiveNumberEnv("ANOMALY_INTERVAL_MS", 60_000),
     corsAllowedOrigin: process.env.CORS_ALLOWED_ORIGIN ?? "http://localhost:3000",
     // AUTH_INTROSPECTION_URL (the full endpoint, POSTed to verbatim) and
