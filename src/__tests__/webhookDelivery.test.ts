@@ -4,7 +4,8 @@ import { CHAT_MESSAGE_MAX_CHARS, WebhookDelivery, anomalyLine, chatBody, type We
 /**
  * The webhook body formats (#47). Discord and Slack reject the generic body
  * with 400, and the raw `detail` must never reach a chat channel: some types
- * carry upstream error text (#45) or free text. No database needed.
+ * carry free text, and before #45 `repeated_denied` carried upstream error
+ * text. No database needed.
  */
 
 const DETECTED_AT = "2026-10-06T12:34:56.000Z";
@@ -30,7 +31,7 @@ const SAMPLES: Record<string, Record<string, unknown>> = {
     shipSymbol: "VMPT-1",
     configuredShipSymbol: "VMPT-1",
     source: "tick",
-    request: "GET /ships/VMPT-1: 403 Agent does not own ship",
+    request: "GET /api/agent/v1/ships/VMPT-1: 403 (code 4214)",
     consecutiveFailures: 5,
   },
   autopilot_resumed_in_shadow: {
@@ -147,10 +148,10 @@ describe("webhook body formats", () => {
     expect(raw).toContain(`\`${type}\``);
   });
 
-  it("drops the upstream request text from repeated_denied even when it is not a URL", async () => {
+  it("keeps repeated_denied's request line out of the chat body, even in its post-#45 shape", async () => {
     const raw = JSON.stringify(await deliver("discord", anomaly("repeated_denied", SAMPLES.repeated_denied)));
-    expect(raw).not.toContain("does not own");
     expect(raw).not.toContain("/ships/");
+    expect(raw).not.toContain("4214");
   });
 
   it("drops the free-text message and caller identity from the resume alert", async () => {

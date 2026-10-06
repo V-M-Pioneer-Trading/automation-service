@@ -60,9 +60,10 @@ const when = (label: string, ...values: (string | null)[]): string | null => (va
 /**
  * One summary per anomaly type, each naming the `detail` fields it reads.
  * The raw `detail` is never sent: some types carry free text (the resume
- * alert's `message`, `repeated_denied`'s `request`, which is upstream error
- * text — #45), so every field here is chosen on purpose and validated. A type
- * not listed gets no summary, only its name.
+ * alert's `message`), and before #45 `repeated_denied`'s `request` was a
+ * prefix of the upstream's error text. A field added to a detail later is not
+ * reviewed for a chat channel, so every field here is chosen on purpose and
+ * validated. A type not listed gets no summary, only its name.
  */
 const SUMMARIES: Record<string, (d: Record<string, unknown>) => string> = {
   ship_idle: (d) => {
@@ -106,7 +107,11 @@ const SUMMARIES: Record<string, (d: Record<string, unknown>) => string> = {
     );
   },
   repeated_denied: (d) => {
-    // Not `request`: it is the upstream's own error text.
+    // Not `request`, kept out as defense in depth. Since #45 it is a built
+    // line (`GET /api/agent/v1/ships/X: 403 (code 4214)`, PUBLIC_REQUEST_PATTERN)
+    // with no upstream text, but its path is unbounded and allows `.`, `%`
+    // and `~`, so it is not a short token, and it adds nothing the digest
+    // does not already show.
     const ship = token(d.shipSymbol);
     const source = token(d.source);
     const count = num(d.consecutiveFailures);
