@@ -89,13 +89,11 @@ describe("webhook body formats", () => {
 
   it("keeps the original generic body, raw detail included, when no format is given", async () => {
     const a = anomaly("repeated_denied", SAMPLES.repeated_denied);
-    expect(await deliver(undefined, a)).toEqual({
-      id: "42",
-      type: "repeated_denied",
-      dedupeKey: "repeated_denied:key",
-      detectedAt: DETECTED_AT,
-      detail: SAMPLES.repeated_denied,
-    });
+    await deliver(undefined, a);
+    // Byte-identical to the pre-#47 body, key order included.
+    expect(posted[0].body).toBe(
+      JSON.stringify({ id: "42", type: "repeated_denied", dedupeKey: "repeated_denied:key", detectedAt: DETECTED_AT, detail: SAMPLES.repeated_denied })
+    );
   });
 
   it("sends Discord {content} with mentions disabled, and nothing else", async () => {
@@ -122,6 +120,13 @@ describe("webhook body formats", () => {
   it("falls back to just the type for a type it does not know", () => {
     const line = anomalyLine(anomaly("brand_new_check", { message: "anything", count: 3 }));
     expect(line).toBe(`automation-service anomaly \`brand_new_check\` at ${DETECTED_AT}`);
+  });
+
+  it("leaves out a detectedAt that is not an ISO instant", () => {
+    const a = { ...anomaly("consecutive_failures", SAMPLES.consecutive_failures), detectedAt: "soon https://x.example/" };
+    const line = anomalyLine(a);
+    expect(line).toBe("automation-service anomaly `consecutive_failures`: " + EXPECTED_SUMMARIES.consecutive_failures);
+    expect(line).not.toContain("x.example");
   });
 
   it("does not treat inherited object keys as anomaly types", () => {
@@ -162,6 +167,29 @@ describe("webhook body formats", () => {
   it("cannot be made to ping a Slack channel by a field value", async () => {
     const detail = { ...SAMPLES.market_stale, market: "<!channel>" };
     expect(JSON.stringify(await deliver("slack", anomaly("market_stale", detail)))).not.toContain("<!channel>");
+  });
+
+  it.each([
+    ["2", 2000],
+    ["0.5", 500],
+    ["60", 5000],
+    ["soon", 200],
+    [null, 200],
+  ])("on 429 waits Retry-After %p (capped at 5s), else the usual backoff", async (retryAfter, expected) => {
+    (globalThis.fetch as jest.Mock).mockImplementationOnce(() =>
+      Promise.resolve(new Response(null, { status: 429, headers: retryAfter === null ? {} : { "Retry-After": retryAfter } }))
+    );
+    const delays: number[] = [];
+    const delivery = new WebhookDelivery({
+      url: "http://hook.test/x",
+      format: "discord",
+      sleep: (ms) => {
+        delays.push(ms);
+        return Promise.resolve();
+      },
+    });
+    expect(await delivery.deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toBe(true);
+    expect(delays).toEqual([expected]);
   });
 
   it("retries a chat body with backoff like the generic one", async () => {

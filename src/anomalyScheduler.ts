@@ -45,6 +45,21 @@ export interface AnomalyConfig {
 const MAX_DELIVERY_ROUNDS = 12;
 /** Oldest undelivered anomalies retried per tick, so a backlog can't stall the checks. */
 const REDELIVERY_BATCH = 5;
+/**
+ * How old an undelivered anomaly may be and still be redelivered (#47 review).
+ *
+ * Without a webhook nothing is ever delivered and the attempt counter is
+ * deliberately left at 0 (see `attemptDelivery`), so a deployment that ran
+ * for weeks without one holds its whole history as "undelivered, budget
+ * left". Configuring a webhook then paged all of it, oldest first, five a
+ * tick: a flood of stale alerts, with the page that mattered (a fresh
+ * `autopilot_resumed_in_shadow` from the restart that picked up the URL)
+ * queued behind it. A missed page is worth sending while it is news; after
+ * that the digest is where it lives. One hour comfortably covers
+ * MAX_DELIVERY_ROUNDS ticks at the default 60s interval, so this never cuts
+ * short the retries of a webhook that was merely down.
+ */
+export const REDELIVERY_WINDOW_MS = 60 * 60 * 1000;
 
 export interface AnomalySchedulerDeps {
   state: AutopilotState;
@@ -167,7 +182,8 @@ export class AnomalyScheduler {
     // Nothing to redeliver to. Skipping the query as well as the post keeps a
     // webhook-less deployment from paying for a backlog it can never drain.
     if (webhook === null) return;
-    const pending = await repo.listUndelivered(MAX_DELIVERY_ROUNDS, REDELIVERY_BATCH);
+    const since = new Date(this.deps.clock.now().getTime() - REDELIVERY_WINDOW_MS);
+    const pending = await repo.listUndelivered(MAX_DELIVERY_ROUNDS, REDELIVERY_BATCH, since);
     for (const anomaly of pending) {
       if (this.isStopped()) return;
       await this.attemptDelivery(anomaly);

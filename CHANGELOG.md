@@ -18,7 +18,11 @@ chosen per type and validated as short tokens or numbers, never the raw
 `detail` (before #45 it carried upstream error text, and a field added later
 could again); Discord also gets
 `allowed_mentions: {parse: []}`. An unknown format refuses to start. Retry
-and backoff are unchanged. Owner still picks the target and creates the hook.
+and backoff are unchanged, except that a `429` honours `Retry-After` up to
+5 s. Redelivery now only considers anomalies from the last hour: without a
+webhook nothing is ever counted as an attempt, so the first webhook would
+otherwise have paged the whole stored history, oldest first, ahead of the
+fresh `autopilot_resumed_in_shadow` from the restart that picked it up. Owner still picks the target and creates the hook.
 
 ## Failure events no longer carry upstream URLs or bodies (#45)
 

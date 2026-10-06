@@ -64,21 +64,22 @@ export class AnomalyRepo {
   }
 
   /**
-   * Anomalies that were persisted but never successfully delivered, oldest
-   * first, that still have delivery budget left.
+   * Anomalies detected at or after `detectedSince` that were persisted but
+   * never successfully delivered, oldest first, that still have delivery
+   * budget left.
    *
    * Recording before delivering means a webhook outage can't lose the record —
    * but nothing ever came back for it, so the page was lost anyway while the
    * row sat safely in Postgres looking fine. Dedupe made it worse: once the
    * condition cleared, no re-fire would ever replace the missed page.
    */
-  async listUndelivered(maxRounds: number, limit: number): Promise<Anomaly[]> {
+  async listUndelivered(maxRounds: number, limit: number, detectedSince: Date): Promise<Anomaly[]> {
     const { rows } = await this.pool.query<AnomalyRow>(
       // delivery_attempts counts *rounds* — one per deliver() call, each of
       // which retries internally — not individual HTTP requests.
-      `${ANOMALY_SELECT} WHERE delivered_at IS NULL AND delivery_attempts < $1
+      `${ANOMALY_SELECT} WHERE delivered_at IS NULL AND delivery_attempts < $1 AND detected_at >= $3
        ORDER BY detected_at ASC LIMIT $2`,
-      [maxRounds, limit]
+      [maxRounds, limit, detectedSince]
     );
     return rows.map(rowToAnomaly);
   }

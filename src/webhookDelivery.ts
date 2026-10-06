@@ -1,6 +1,21 @@
 import type { Anomaly } from "./anomaly";
 
 const DELIVERY_TIMEOUT_MS = 10_000;
+/** Longest a 429's Retry-After is honoured for; one delivery round must stay short. */
+const MAX_RETRY_AFTER_MS = 5_000;
+
+/**
+ * Discord and Slack answer a rate-limited post with 429 and `Retry-After` in
+ * seconds. Honoured up to MAX_RETRY_AFTER_MS; anything unparseable (including
+ * the HTTP-date form) falls back to the usual backoff.
+ */
+const retryAfterMs = (res: Response): number | null => {
+  if (res.status !== 429) return null;
+  const raw = res.headers.get("retry-after");
+  if (raw === null || raw.trim() === "") return null;
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(seconds * 1000, MAX_RETRY_AFTER_MS) : null;
+};
 
 /**
  * The body shape the webhook expects (issue #47). `generic` is the original
@@ -172,6 +187,7 @@ export class WebhookDelivery {
     const payload = JSON.stringify(webhookBody(anomaly, this.format));
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      let waitMs: number | null = null;
       try {
         const res = await fetch(this.url, {
           method: "POST",
@@ -180,11 +196,12 @@ export class WebhookDelivery {
           signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
         });
         if (res.ok) return true;
+        waitMs = retryAfterMs(res);
       } catch {
         // network error or timeout — fall through to retry
       }
       if (attempt < this.maxAttempts) {
-        await this.sleep(this.baseDelayMs * 2 ** (attempt - 1));
+        await this.sleep(waitMs ?? this.baseDelayMs * 2 ** (attempt - 1));
       }
     }
     return false;
