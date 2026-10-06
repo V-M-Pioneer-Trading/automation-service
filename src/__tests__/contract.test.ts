@@ -480,8 +480,8 @@ describe("automation-service contract loop (meta#11)", () => {
     await pool.query("DELETE FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
 
     const failure = await waitForEvent(gateway, "mining_tick_error");
-    expect(String(failure.detail.message)).toContain("CONTRACT-1");
-    expect(String(failure.detail.message)).toContain("not found");
+    expect(String(failure.detail.request)).toContain("CONTRACT-1");
+    expect(String(failure.detail.request)).toContain("not found");
 
     // The gateway must still be responsive — an escaped null-deref would have
     // thrown the same either way (both are caught by tick()'s outer catch), so

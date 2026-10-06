@@ -7,6 +7,20 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Failure events no longer carry upstream URLs or bodies (#45)
+
+`mining_tick_error` (fleet and anomaly loops), `contract_discovery_error` and
+`observation_write_error` stored `String(err)` as `detail.message`: the
+internal host of the service called (`http://localhost:80/api/agent/...`) and
+the upstream's whole response body. `GET /autopilot/events` serves them to
+anyone. They now carry `detail.request` instead — the same trimmed text #40's
+`repeated_denied` webhook carries (method, path, status, first 200 characters,
+no host) — and the full error goes to the container log once, at the event
+that records it. The helper moved from `scheduler.ts` to `failureDetail.ts`
+as `describeFailure`, and now drops an origin anywhere in the text, not just
+in the request line, so a body naming another internal URL is trimmed too.
+Rows written before this keep their `message`.
+
 ## A restart no longer disarms the autopilot; it resumes in shadow (Q29)
 
 Every deploy used to disarm the autopilot, because status and mode lived only

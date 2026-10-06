@@ -54,6 +54,7 @@ declared on the `docker` job, never at workflow level.
 | `config.ts` | `configFromEnv()`; every numeric env var validated positive; `loadIntrospectionConfig()` for the center | fs, clerk-client |
 | `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | fetch |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs, plannerDecision |
+| `failureDetail.ts` | `describeFailure` (what a failure may say outside the process: method, path, status, 200-char prefix, no origin anywhere) and `logFailure` (full text to the container log, returns the trimmed one) | nothing |
 
 Dependency direction is strictly downward in that table's spirit: `scoring`,
 `routeCost` and `plannerDecision` import nothing local; FSMs never import repos
@@ -469,6 +470,15 @@ most of them during an outage (every `getShip` and planner call fails there,
 before any FSM runs) — though only `mining_task_failed` and
 `contract_discovery_error` are in `NOTABLE_EVENT_TYPES`, so the digest sees
 those two and the raw event feed carries the rest.
+
+**A failure's text never goes into `detail` raw** (#45). `String(err)` of an
+upstream failure is the internal host plus the upstream's response body, and
+`GET /autopilot/events` is public. Store `request: logFailure(eventType, err)`
+— the trimmed text on the event, the full text in the container log, once —
+or `describeFailure(err)` for a second event about a failure already logged
+(`repeated_denied_tripped`). `publicEventDetail.test.ts` drives the three
+upstream-facing sites against upstreams whose bodies name internal URLs and asserts the public
+route serves none.
 
 Event `detail` must never contain a token or anything token-shaped; `actor`
 is the `sub` auth-service reported (`actorOf(res)`) and nothing else — never a

@@ -303,7 +303,7 @@ describe("the scheduler branches on the verdict, not the status code", () => {
       expect(errors).toHaveLength(5);
       for (const e of errors) {
         expect(e.failureKind).toBe("denied");
-        expect(e.message).toContain(`403 ${PRODUCTION_403}`);
+        expect(e.request).toBe(`GET /ships/${SHIP}: 403 ${PRODUCTION_403}`);
       }
       const task = await tasks.get(SHIP);
       expect(task?.asteroidWaypoint).toBe("X1-BELT");

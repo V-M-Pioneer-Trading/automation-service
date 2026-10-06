@@ -14,7 +14,8 @@ import { KnobRepo } from "../knobs";
 import { MarketIntelRepo } from "../marketIntelRepo";
 import { ObservationRepo } from "../observations";
 import { Planner } from "../planner";
-import { describeDenied, FleetScheduler, REPEATED_DENIED_THRESHOLD } from "../scheduler";
+import { describeFailure } from "../failureDetail";
+import { FleetScheduler, REPEATED_DENIED_THRESHOLD } from "../scheduler";
 import { idleTask, ShipTaskRepo } from "../shipTaskRepo";
 import { FakeClock } from "../testSupport/fakeClock";
 import { fakeGameClients } from "../testSupport/fakeGameClients";
@@ -234,13 +235,13 @@ describe("stale ship_task rows and repeated denied (#40)", () => {
     });
 
     it("only the request path, status and a short prefix of the text leave the process", async () => {
-      expect(describeDenied(new UpstreamCallError("GET http://agent.internal:80/api/agent/v1/ships/X: 403 nope", "denied"))).toBe(
+      expect(describeFailure(new UpstreamCallError("GET http://agent.internal:80/api/agent/v1/ships/X: 403 nope", "denied"))).toBe(
         "GET /api/agent/v1/ships/X: 403 nope"
       );
-      const long = describeDenied(new UpstreamCallError(`GET http://h/p: 403 ${"x".repeat(5000)}`, "denied"));
+      const long = describeFailure(new UpstreamCallError(`GET http://h/p: 403 ${"x".repeat(5000)}`, "denied"));
       expect(long).not.toContain("http://h");
       expect(long.length).toBeLessThan(230);
-      expect(describeDenied(new Error("y".repeat(1000))).length).toBe(200);
+      expect(describeFailure(new Error("y".repeat(1000))).length).toBe(200);
 
       const { s, events } = build(fakeGameClients({ getShip: () => Promise.reject(deniedFor(SHIP)) }), 100_000);
       for (let i = 0; i < REPEATED_DENIED_THRESHOLD; i++) await s.forceTick();
