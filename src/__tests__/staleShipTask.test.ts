@@ -3,7 +3,7 @@ import type { Anomaly } from "../anomaly";
 import { AnomalyChecker, AnomalyRepo } from "../anomaly";
 import { AnomalyScheduler } from "../anomalyScheduler";
 import { MetricsRepo } from "../metrics";
-import type { WebhookDelivery } from "../webhookDelivery";
+import type { DeliveryResult, WebhookDelivery } from "../webhookDelivery";
 import { AutopilotState } from "../autopilotState";
 import { ContractRepo } from "../contractRepo";
 import { createPool, migrate } from "../db";
@@ -192,7 +192,7 @@ describe("stale ship_task rows and repeated denied (#40)", () => {
 
     /** The real anomaly scheduler and checker over the same database, so dedupe, delivery and stop guards are the production ones. */
     const startAnomalyScheduler = (events: EventLog) => {
-      const deliver = jest.fn<Promise<boolean>, [Anomaly]>(() => Promise.resolve(true));
+      const deliver = jest.fn<Promise<DeliveryResult>, [Anomaly, AbortSignal?]>(() => Promise.resolve({ delivered: true, rateLimited: false }));
       const a = new AnomalyScheduler({
         state,
         repo: new AnomalyRepo(pool, clock),

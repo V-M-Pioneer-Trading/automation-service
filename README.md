@@ -576,9 +576,12 @@ flowchart LR
 
 Each anomaly is **persisted before** delivery is attempted, so a webhook outage
 never loses the record. Later ticks retry undelivered anomalies detected in the
-last hour (`REDELIVERY_WINDOW_MS`); older ones stay in the digest only, so
-configuring a webhook on a deployment that ran without one does not page its
-whole history. A `429` waits for its `Retry-After`, capped at 5 s. Repeat firings of the same condition are suppressed for
+last hour (longer when `ANOMALY_INTERVAL_MS` is slow, so every round fits);
+older ones stay in the digest only, so configuring a webhook on a deployment
+that ran without one does not page its whole history. A `429` waits for its
+`Retry-After` (capped at 5 s) and ends that tick's sending; the rest waits for
+the next tick. A shutdown cancels a round in progress. Repeat firings of the
+same condition are suppressed for
 `anomaly.dedupeCooldownMinutes` rather than paging every tick a problem stays
 open.
 

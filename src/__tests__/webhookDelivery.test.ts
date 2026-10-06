@@ -83,7 +83,7 @@ describe("webhook body formats", () => {
 
   const deliver = async (format: WebhookFormat | undefined, a: Anomaly): Promise<Record<string, unknown>> => {
     const delivery = new WebhookDelivery({ url: "http://hook.test/x", format, sleep: () => Promise.resolve() });
-    expect(await delivery.deliver(a)).toBe(true);
+    expect(await delivery.deliver(a)).toEqual({ delivered: true, rateLimited: false });
     expect(posted).toHaveLength(1);
     return JSON.parse(posted[0].body) as Record<string, unknown>;
   };
@@ -189,7 +189,7 @@ describe("webhook body formats", () => {
         return Promise.resolve();
       },
     });
-    expect(await delivery.deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toBe(true);
+    expect(await delivery.deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: true, rateLimited: true });
     expect(delays).toEqual([expected]);
   });
 
@@ -204,9 +204,48 @@ describe("webhook body formats", () => {
         return Promise.resolve();
       },
     });
-    expect(await delivery.deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toBe(false);
+    expect(await delivery.deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: false, rateLimited: false });
     expect(posted).toHaveLength(3);
     expect(delays).toEqual([200, 400]);
+  });
+});
+
+describe("stopping a delivery round", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it("wakes a Retry-After sleep and makes no further attempt once the signal aborts", async () => {
+    let posts = 0;
+    let posted!: () => void;
+    const firstPost = new Promise<void>((r) => {
+      posted = r;
+    });
+    jest.spyOn(globalThis, "fetch").mockImplementation(() => {
+      posts++;
+      posted();
+      return Promise.resolve(new Response(null, { status: 429, headers: { "Retry-After": "5" } }));
+    });
+    const controller = new AbortController();
+    // Real sleep: the point is that it wakes.
+    const round = new WebhookDelivery({ url: "http://hook.test/x", format: "slack" }).deliver(anomaly("ship_idle", SAMPLES.ship_idle), controller.signal);
+    await firstPost;
+    await new Promise((r) => setTimeout(r, 50));
+    const started = Date.now();
+    controller.abort();
+
+    expect(await round).toEqual({ delivered: false, rateLimited: true });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(posts).toBe(1);
+  });
+
+  it("makes no attempt on a signal that is already aborted", async () => {
+    const fetchSpy = jest.spyOn(globalThis, "fetch");
+    const controller = new AbortController();
+    controller.abort();
+    const result = await new WebhookDelivery({ url: "http://hook.test/x" }).deliver(anomaly("ship_idle", SAMPLES.ship_idle), controller.signal);
+    expect(result).toEqual({ delivered: false, rateLimited: false });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

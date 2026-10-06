@@ -165,11 +165,40 @@ export interface WebhookDeliveryConfig {
   format?: WebhookFormat;
   maxAttempts?: number;
   baseDelayMs?: number;
-  /** Injectable so tests don't have to burn real wall-clock time on retry backoff. */
-  sleep?: (ms: number) => Promise<void>;
+  /**
+   * Injectable so tests don't have to burn real wall-clock time on retry
+   * backoff. Must resolve early when `signal` aborts.
+   */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
-const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** What one round of `deliver()` came to. */
+export interface DeliveryResult {
+  /** The webhook answered 2xx. */
+  delivered: boolean;
+  /**
+   * Some attempt in the round was answered 429. The caller sends nothing more
+   * this tick: the chat service is rate-limiting us, and the rest of a batch
+   * would only collect more 429s and burn its delivery rounds.
+   */
+  rateLimited: boolean;
+}
+
+/** Resolves after `ms`, or at once when `signal` aborts, so a stop never waits out a backoff. */
+const realSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted === true) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 
 /** POSTs an anomaly to a configured webhook URL, retrying with exponential backoff on failure. */
 export class WebhookDelivery {
@@ -177,7 +206,7 @@ export class WebhookDelivery {
   private readonly format: WebhookFormat;
   private readonly maxAttempts: number;
   private readonly baseDelayMs: number;
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 
   constructor(config: WebhookDeliveryConfig) {
     this.url = config.url;
@@ -187,28 +216,41 @@ export class WebhookDelivery {
     this.sleep = config.sleep ?? realSleep;
   }
 
-  /** Returns true once the webhook responds 2xx, false if every attempt failed. */
-  async deliver(anomaly: Anomaly): Promise<boolean> {
+  /**
+   * One round: up to `maxAttempts` POSTs with backoff. `signal` is the
+   * caller's stop: once it aborts, the in-flight POST is cancelled, any
+   * backoff or Retry-After sleep wakes, and no further attempt is made, so a
+   * shutdown is never held up by a round (#47 review: two capped 429 waits
+   * alone are 10 s, past the 8 s shutdown deadline).
+   */
+  async deliver(anomaly: Anomaly, signal?: AbortSignal): Promise<DeliveryResult> {
     const payload = JSON.stringify(webhookBody(anomaly, this.format));
+    let rateLimited = false;
+    // A call, not a property read: TypeScript would keep the narrowing from the
+    // first check across the awaits after it.
+    const stopped = (): boolean => signal?.aborted === true;
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      if (stopped()) break;
       let waitMs: number | null = null;
       try {
+        const timeout = AbortSignal.timeout(DELIVERY_TIMEOUT_MS);
         const res = await fetch(this.url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: payload,
-          signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+          signal: signal === undefined ? timeout : AbortSignal.any([timeout, signal]),
         });
-        if (res.ok) return true;
+        if (res.ok) return { delivered: true, rateLimited };
+        if (res.status === 429) rateLimited = true;
         waitMs = retryAfterMs(res);
       } catch {
-        // network error or timeout — fall through to retry
+        // network error, timeout or stop — fall through to retry (or the stop check)
       }
-      if (attempt < this.maxAttempts) {
-        await this.sleep(waitMs ?? this.baseDelayMs * 2 ** (attempt - 1));
+      if (attempt < this.maxAttempts && !stopped()) {
+        await this.sleep(waitMs ?? this.baseDelayMs * 2 ** (attempt - 1), signal);
       }
     }
-    return false;
+    return { delivered: false, rateLimited };
   }
 }
