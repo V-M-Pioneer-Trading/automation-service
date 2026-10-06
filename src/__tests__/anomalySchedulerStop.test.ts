@@ -328,6 +328,38 @@ describe("anomaly scheduler stop guards", () => {
     });
   });
 
+  /**
+   * start() right after an un-awaited stop() clears the loop's stop flag while
+   * the old tick's cut round is still returning. That tick must keep its own,
+   * aborted signal: not count the cut round, and not hand the rest of its
+   * batch the new scheduler's live signal.
+   */
+  it("a start() racing an un-awaited stop() neither counts the cut round nor revives the old tick", async () => {
+    const first = await repo.record(candidate(1));
+    const second = await repo.record(candidate(2));
+    const g = gate();
+    deliver.mockImplementationOnce(async () => {
+      await g.hold();
+      return { delivered: false, rateLimited: false };
+    });
+    deliver.mockImplementation(() => Promise.resolve({ delivered: false, rateLimited: false }));
+    const scheduler = build();
+
+    const tick = scheduler.forceTick();
+    await g.entered;
+    const stopping = scheduler.stop();
+    scheduler.start();
+    g.release();
+    await Promise.all([tick, stopping]);
+
+    expect(deliver.mock.calls.length).toBeGreaterThan(0);
+    expect(deliver.mock.calls.every(([, signal]) => signal?.aborted === true)).toBe(true);
+    const { rows } = await pool.query<{ delivery_attempts: number }>("SELECT delivery_attempts FROM anomaly WHERE id = ANY($1) ORDER BY id", [
+      [first.id, second.id],
+    ]);
+    expect(rows.map((r) => r.delivery_attempts)).toEqual([0, 0]);
+  });
+
   describe("redelivery window", () => {
     it("is an hour at the default interval, and always fits every delivery round twice", () => {
       expect(redeliveryWindowMs(60_000)).toBe(60 * 60 * 1000);

@@ -239,6 +239,31 @@ describe("stopping a delivery round", () => {
     expect(posts).toBe(1);
   });
 
+  it("cancels an in-flight POST when the signal aborts", async () => {
+    let posted!: () => void;
+    const inFlight = new Promise<void>((r) => {
+      posted = r;
+    });
+    // A webhook that never answers: only the abort can end this POST.
+    jest.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      posted();
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      });
+    });
+    const controller = new AbortController();
+    const round = new WebhookDelivery({ url: "http://hook.test/x", format: "discord" }).deliver(anomaly("ship_idle", SAMPLES.ship_idle), controller.signal);
+    await inFlight;
+    const started = Date.now();
+    controller.abort();
+
+    expect(await round).toEqual({ delivered: false, rateLimited: false });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("makes no attempt on a signal that is already aborted", async () => {
     const fetchSpy = jest.spyOn(globalThis, "fetch");
     const controller = new AbortController();

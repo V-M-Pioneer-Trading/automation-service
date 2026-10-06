@@ -147,6 +147,9 @@ export class AnomalyScheduler {
   }
 
   private async tick(): Promise<void> {
+    // Captured once: a start() racing an un-awaited stop() replaces the field,
+    // and this tick must keep the signal it was started under, never the new one.
+    const signal = this.stopSignal.signal;
     const { repo, checker, knobs, clock, tasks, shipSymbol, onAnomalyRecorded } = this.deps;
     await this.maybeSnapshotCredits();
     // stop() may have landed during that (real, potentially slow) HTTP call —
@@ -178,10 +181,10 @@ export class AnomalyScheduler {
       onAnomalyRecorded?.();
       // Once rate-limited, later anomalies of this tick are recorded but not
       // sent; redelivery picks them up on a later tick.
-      if (!rateLimited) rateLimited = await this.attemptDelivery(anomaly);
+      if (!rateLimited) rateLimited = await this.attemptDelivery(anomaly, signal);
     }
 
-    if (!rateLimited) await this.redeliverMissed();
+    if (!rateLimited) await this.redeliverMissed(signal);
   }
 
   /**
@@ -195,7 +198,7 @@ export class AnomalyScheduler {
    * oldest, within `MAX_DELIVERY_ROUNDS`, so a recovered webhook receives what
    * it missed instead of never hearing about it.
    */
-  private async redeliverMissed(): Promise<void> {
+  private async redeliverMissed(signal: AbortSignal): Promise<void> {
     const { repo, webhook } = this.deps;
     // Nothing to redeliver to. Skipping the query as well as the post keeps a
     // webhook-less deployment from paying for a backlog it can never drain.
@@ -205,12 +208,12 @@ export class AnomalyScheduler {
     for (const anomaly of pending) {
       if (this.isStopped()) return;
       // The chat service is rate-limiting us: the rest waits for the next tick.
-      if (await this.attemptDelivery(anomaly)) return;
+      if (await this.attemptDelivery(anomaly, signal)) return;
     }
   }
 
   /** Returns true when the webhook rate-limited us, so the caller sends nothing more this tick. */
-  private async attemptDelivery(anomaly: Anomaly): Promise<boolean> {
+  private async attemptDelivery(anomaly: Anomaly, signal: AbortSignal): Promise<boolean> {
     const { repo, webhook } = this.deps;
     // No webhook configured is not a failed delivery, so the attempt counter is
     // deliberately left alone. Incrementing it would burn the anomaly's
@@ -218,10 +221,12 @@ export class AnomalyScheduler {
     // then, if one were configured later, everything recorded in the meantime
     // would already be past its ceiling and would never be sent.
     if (webhook === null) return false;
-    const { delivered, rateLimited } = await webhook.deliver(anomaly, this.stopSignal.signal);
+    const { delivered, rateLimited } = await webhook.deliver(anomaly, signal);
     if (delivered) await repo.markDelivered(anomaly.id);
     // A round cut short by stop() is not a failed round: don't spend its budget.
-    else if (!this.isStopped()) await repo.incrementDeliveryAttempts(anomaly.id);
+    // The tick's own signal, not isStopped(): a start() after an un-awaited
+    // stop() clears the loop flag while this cut round is still returning.
+    else if (!signal.aborted) await repo.incrementDeliveryAttempts(anomaly.id);
     return rateLimited;
   }
 
