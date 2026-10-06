@@ -7,6 +7,19 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Anomalies can page a Discord or Slack channel (#47)
+
+Production set no webhook, so anomalies reached only Postgres and the digest.
+Setting the URL alone would not have helped: Discord and Slack reject the
+generic `{id, type, dedupeKey, detectedAt, detail}` body with 400.
+`ANOMALY_WEBHOOK_FORMAT=generic|discord|slack` (default `generic`, unchanged)
+selects the body. The chat formats send one line per anomaly built from fields
+chosen per type and validated as short tokens or numbers, never the raw
+`detail` (before #45 it carried upstream error text, and a field added later
+could again); Discord also gets
+`allowed_mentions: {parse: []}`. An unknown format refuses to start. Retry
+and backoff are unchanged. Owner still picks the target and creates the hook.
+
 ## Failure events no longer carry upstream URLs or bodies (#45)
 
 `mining_tick_error` (fleet and anomaly loops), `contract_discovery_error` and

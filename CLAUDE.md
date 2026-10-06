@@ -43,6 +43,7 @@ declared on the `docker` job, never at workflow level.
 | `fleetEvents.ts` | The event vocabulary: task progress, failed actions, credits arriving. SQL predicates only, no I/O | nothing |
 | `anomaly.ts` | `AnomalyRepo` (owns the `anomaly` table), and `AnomalyChecker` — six read-only checks that take **no `Pool` and no `KnobRepo`**: they judge, they don't retrieve | knobs (types only), marketIntel, eventLog, metrics |
 | `anomalyScheduler.ts` | Runs checks, dedupes, persists, delivers, requests replans | anomaly, webhookDelivery |
+| `webhookDelivery.ts` | `WebhookDelivery` (POST with retry/backoff) and the body formats (`generic`, `discord`, `slack`). The chat formats build one line from fields chosen per type in `SUMMARIES`; **never the raw `detail`** (upstream error text, #45). A new anomaly type that should say more than its name adds an entry there, with only short-token or numeric fields | anomaly (types only) |
 | `metrics.ts`, `metricsScheduler.ts` | Rollups over `event_log` windows | eventLog table, fleetEvents |
 | `testSupport/fakeClock.ts`, `testSupport/fakeGameClients.ts` | The adapters for the `Clock` and `GameClients` seams. One each, shared — not one per test file | test-only |
 | `eventLog.ts` | Appends events, and **answers the questions asked of the log** — what the balance read, what the operator last asked for, what was earned, how much failed, which markets are priced against | clock, fleetEvents |
@@ -52,7 +53,7 @@ declared on the `docker` job, never at workflow level.
 | `autopilotLifecycle.ts` | `AutopilotLifecycle`: every arm/pause/abort and the boot restore, serialized and persisted; `AutopilotStateRepo` (owns `autopilot_state`); the pure restart rule `restoredAfterRestart` | autopilotState, eventLog, anomaly (repo), transaction |
 | `shutdown.ts` | `shutdownGracefully` (the four steps, in order, under a deadline) and `installShutdownHandlers` (SIGTERM/SIGINT → exit code) | nothing |
 | `auth.ts` | `SCOPE_FLEET_CONTROL`, `SCOPE_EVENTS_WRITE`, `SCOPE_PLANNER_ADVISE`: the three scopes this service declares, one literal per route (decisions 20, 22). No verification: auth-service does that (decision 21) | nothing |
-| `config.ts` | `configFromEnv()`; every numeric env var validated positive; `loadIntrospectionConfig()` for the center | fs, clerk-client |
+| `config.ts` | `configFromEnv()`; every numeric env var validated positive; `ANOMALY_WEBHOOK_FORMAT` validated against `WEBHOOK_FORMATS`; `loadIntrospectionConfig()` for the center | fs, clerk-client, webhookDelivery (format list) |
 | `gameClients.ts` | Typed fetch wrappers for the three upstream services, 15s timeout. **Owns the failure taxonomy**: every upstream error is classified here into one `UpstreamFailureKind` | fetch |
 | `replay.ts` | CLI: re-score logged decisions under knob overrides | scoring, knobs, plannerDecision |
 | `failureDetail.ts` | `describeFailure` (what a failure may say outside the process: an `UpstreamCallError`'s `requestLine`, else an identifier-shaped `code`/class name — never error text) and `logFailure` (full text to the container log, returns the public one) | gameClients (the error class) |

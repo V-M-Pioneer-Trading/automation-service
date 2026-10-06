@@ -7,7 +7,7 @@ import type { GameClients } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
 import type { KnobRepo } from "./knobs";
 import type { ShipTaskRepo } from "./shipTaskRepo";
-import type { WebhookDelivery } from "./webhookDelivery";
+import type { WebhookDelivery, WebhookFormat } from "./webhookDelivery";
 
 export interface AnomalyConfig {
   intervalMs: number;
@@ -24,6 +24,8 @@ export interface AnomalyConfig {
    * An operator reading the digest is a perfectly good audience on its own.
    */
   webhookUrl?: string | null;
+  /** Body shape for `webhookUrl` (#47); `generic` when omitted. */
+  webhookFormat?: WebhookFormat;
 }
 
 /**

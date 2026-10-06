@@ -324,7 +324,7 @@ export function createApp(options: AppOptions) {
           state,
           repo: anomalyRepo,
           checker: new AnomalyChecker(clock, state, marketIntel, events, metricsRepo),
-          webhook: anomaly.webhookUrl ? new WebhookDelivery({ url: anomaly.webhookUrl }) : null,
+          webhook: anomaly.webhookUrl ? new WebhookDelivery({ url: anomaly.webhookUrl, format: anomaly.webhookFormat }) : null,
           events,
           clock,
           knobs,
@@ -742,7 +742,11 @@ if (require.main === module) {
           // with no webhook consumer ran no checks and served no digest — the
           // state production was actually in. The URL now only decides whether
           // anomalies are *also* posted somewhere.
-          anomaly: { webhookUrl: config.anomalyWebhookUrl, intervalMs: config.anomalyIntervalMs },
+          anomaly: {
+            webhookUrl: config.anomalyWebhookUrl,
+            webhookFormat: config.anomalyWebhookFormat,
+            intervalMs: config.anomalyIntervalMs,
+          },
           corsAllowedOrigin: config.corsAllowedOrigin,
           authTokenSource,
         });
