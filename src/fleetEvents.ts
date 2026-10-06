@@ -125,18 +125,18 @@ export const PUBLIC_REQUEST_PATTERN =
 const PUBLIC_REQUEST = new RegExp(PUBLIC_REQUEST_PATTERN);
 
 /**
- * Rows still carrying pre-#45 error text, in `event_log`. Scrubbed on boot by
- * `migrate()`, which also keeps a partial index on exactly this predicate so
- * that finding none costs nothing once they are gone.
+ * Rows still carrying pre-#45 error text, in `event_log`. Scrubbed in the
+ * background by `LegacyErrorTextScrubber` (legacyScrub.ts). Unqualified
+ * column names, so it reads the same inside that UPDATE ... FROM.
  */
 export const LEGACY_ERROR_TEXT_PREDICATE = `((type IN (${LEGACY_ERROR_TEXT_TYPES.map((t) => `'${t}'`).join(", ")}) AND detail ? 'message')
   OR (type = '${REPEATED_DENIED_EVENT}' AND detail ? 'request' AND NOT ((detail->>'request') ~ '${PUBLIC_REQUEST_PATTERN}')))`;
 
 /**
  * `detail` without pre-#45 error text, for any reader of `event_log` or
- * `anomaly`. `migrate()` already scrubs the rows; this is the second line, so a
- * row the scrub missed (a restore from an old backup, a replica) is still never
- * served. `event_log` and `anomaly` types share no names, so one function covers both.
+ * `anomaly`. The rows are scrubbed in the background after startup, which on
+ * production takes minutes; this is what keeps the public routes clean
+ * meanwhile, and afterwards for a row the scrub never saw (a restored backup). `event_log` and `anomaly` types share no names, so one function covers both.
  */
 export function legacyErrorTextRemoved(type: string, detail: Record<string, unknown>): Record<string, unknown> {
   if (LEGACY_ERROR_TEXT_TYPES.includes(type) && "message" in detail) {

@@ -1,6 +1,5 @@
 import { Pool } from "pg";
 import type { KnobClamp } from "./knobs";
-import { LEGACY_ERROR_TEXT_PREDICATE, PUBLIC_REQUEST_PATTERN, REPEATED_DENIED_ANOMALY, REPEATED_DENIED_EVENT } from "./fleetEvents";
 import { syncKnobDefinitions } from "./knobs";
 
 export function createPool(databaseUrl: string): Pool {
@@ -26,21 +25,6 @@ export async function migrate(pool: Pool): Promise<KnobClamp[]> {
   // indefinitely — agent_credits_snapshot, mining_market_selected, etc.
   await pool.query(`
     CREATE INDEX IF NOT EXISTS event_log_type_occurred_at_idx ON event_log (type, occurred_at)
-  `);
-  // #45: error text written before the public detail stopped carrying any —
-  // internal URLs and upstream bodies, served by the public events route. The
-  // partial index covers exactly the rows still to scrub, so once they are
-  // gone every later boot's UPDATE finds nothing through an empty index, and
-  // a new row (which never matches) costs one predicate check on insert. If
-  // the predicate ever changes, rename the index: IF NOT EXISTS would keep the
-  // old one and the UPDATE would fall back to scanning by type.
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS event_log_legacy_error_text_idx ON event_log (id) WHERE ${LEGACY_ERROR_TEXT_PREDICATE}
-  `);
-  await pool.query(`
-    UPDATE event_log
-       SET detail = CASE WHEN type = '${REPEATED_DENIED_EVENT}' THEN detail - 'request' ELSE detail - 'message' END
-     WHERE ${LEGACY_ERROR_TEXT_PREDICATE}
   `);
 
   // One row per ship under autopilot control. Survives restarts (per story 14),
@@ -164,15 +148,6 @@ export async function migrate(pool: Pool): Promise<KnobClamp[]> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS anomaly_detected_at_idx ON anomaly (detected_at DESC)
   `);
-  // #45: #43's repeated_denied anomalies copied the tripped event's `request`,
-  // a 200-character prefix of upstream text, and /anomalies/digest is public.
-  // Drop any `request` that is not the new shape. The table is small (one row
-  // per firing, deduped), so no index.
-  await pool.query(`
-    UPDATE anomaly SET detail = detail - 'request'
-     WHERE type = '${REPEATED_DENIED_ANOMALY}' AND detail ? 'request'
-       AND NOT ((detail->>'request') ~ '${PUBLIC_REQUEST_PATTERN}')
-  `);
 
   // Market freshness: one row per marketplace, the last time a ship of ours
   // read its prices while docked there — the only read SpaceTraders answers
@@ -253,6 +228,19 @@ export async function migrate(pool: Pool): Promise<KnobClamp[]> {
   // a contract's cycle time under the *current* calibrated model instead of
   // comparing a figure frozen at discovery against live mining scores.
   await pool.query(`ALTER TABLE contract ADD COLUMN IF NOT EXISTS travel_distance DOUBLE PRECISION`);
+
+  // Progress of one-off background maintenance (legacyScrub.ts): where a walk
+  // over a large table got to, and when it finished. Lets a restart resume
+  // instead of starting over, and a finished job never run again. Deliberately
+  // not part of this function's work: migrate() runs before the service
+  // listens and must stay fast whatever the table sizes (#45).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS maintenance_progress (
+      name TEXT PRIMARY KEY,
+      cursor BIGINT NOT NULL DEFAULT 0,
+      finished_at TIMESTAMPTZ
+    )
+  `);
 
   // Returned rather than logged here: db.ts has no event log and the caller
   // does. See `KnobClamp` for why a silent clamp is worth an audit entry.

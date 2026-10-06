@@ -31,18 +31,26 @@ the text from known parts fixes both. The `repeated_denied` webhook changed the
 same way. The helper is now `describeFailure` in `failureDetail.ts`.
 
 Rows already written are scrubbed too. Nothing expires `event_log`, and the
-public route serves the newest rows, so production's thousands of old
-`mining_tick_error`s would have stayed public. `migrate()` now does two things
-on every boot:
-- In the three error types, it removes `message`.
-- In `repeated_denied_tripped` events and `repeated_denied` anomalies, it
-  removes any `request` that is not the new shape (`PUBLIC_REQUEST_PATTERN`).
-  #43's version was a 200-character text prefix, and none of those match.
+public route serves the newest rows, so production's old rows would have stayed
+public. There were ~437k of them in a 372 MB table, on a t4g.small with 3 GB of
+disk free and 90 s to answer health after `docker run`.
 
-A partial index on exactly the rows still to scrub keeps every later boot's
-UPDATE at an empty index scan. Reading is guarded as well: `EventLog` and
-`AnomalyRepo` drop the same fields when they map rows, so a row restored from
-an old backup is still never served.
+That rules out one UPDATE in `migrate()`: it would block startup, write the
+whole table's new tuples and WAL in one transaction, and hold its locks
+throughout. Instead, `LegacyErrorTextScrubber` (legacyScrub.ts) starts after
+the server is listening:
+- It walks `event_log` by primary key, 2000 rows per statement with 200 ms
+  between batches.
+- In the three error types it removes `message`. In `repeated_denied_tripped`
+  events and `repeated_denied` anomalies it removes any `request` that is not
+  the new shape (`PUBLIC_REQUEST_PATTERN`). #43's version was a 200-character
+  text prefix, and none of those match.
+- It records progress in a new `maintenance_progress` table, so a restart
+  resumes and a finished walk is never repeated.
+- It logs at start and end, retries on error, and stops at once on shutdown.
+
+Until it finishes, `EventLog` and `AnomalyRepo` drop the same fields when they
+map rows, so the public routes are clean from the first request.
 
 ## A restart no longer disarms the autopilot; it resumes in shadow (Q29)
 
