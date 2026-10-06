@@ -682,6 +682,33 @@ describe("automation-service anomaly detection (meta#15)", () => {
     expect(Number(rows[0].delivery_attempts)).toBeLessThanOrEqual(12);
   }, 15_000);
 
+  /**
+   * #47 review: a deployment that ran without a webhook holds its whole history
+   * as undelivered with budget left (no webhook never counts as an attempt).
+   * Configuring one must not page all of it; only what is still news.
+   */
+  it("redelivers a recent undelivered anomaly when a webhook appears, but not an old one", async () => {
+    const insert = async (minutesAgo: number, market: string): Promise<string> => {
+      const { rows } = await pool.query<{ id: string | number }>(
+        `INSERT INTO anomaly (type, dedupe_key, detected_at, detail) VALUES ('market_stale', $1, $2, $3) RETURNING id`,
+        [`market_stale:${market}`, new Date(clock.now().getTime() - minutesAgo * 60_000), { market }]
+      );
+      return String(rows[0].id);
+    };
+    const oldId = await insert(2 * 60, "X1-OLD");
+    const recentId = await insert(10, "X1-RECENT");
+
+    const gateway = app();
+    for (let t = 0; t < 3; t++) await forceAnomalyTick(gateway);
+
+    const sentIds = webhook.calls.map((c) => (JSON.parse(c.body) as { id: string }).id);
+    expect(sentIds).toContain(recentId);
+    expect(sentIds).not.toContain(oldId);
+    const { rows } = await pool.query<DeliveryRow>("SELECT delivery_attempts, delivered_at FROM anomaly WHERE id = $1", [oldId]);
+    expect(rows[0].delivered_at).toBeNull();
+    expect(Number(rows[0].delivery_attempts)).toBe(0);
+  }, 10_000);
+
   it("dedupes repeat firings of the same condition within the cooldown window", async () => {
     await pool.query(
       `INSERT INTO ship_task (ship_symbol, phase, failure_count, updated_at) VALUES ($1, 'EXTRACT', $2, $3)`,

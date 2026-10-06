@@ -5,6 +5,7 @@ import {
   type IntrospectionConfig,
   type M2MTokenSource,
 } from "@v-m-pioneer-trading/clerk-client";
+import { WEBHOOK_FORMATS, type WebhookFormat } from "./webhookDelivery";
 
 export interface ServiceConfig {
   port: number;
@@ -27,6 +28,9 @@ export interface ServiceConfig {
   // Where anomalies (meta#15) are also POSTed. Detection itself always runs
   // and the digest is always served; null only skips the outbound POST.
   anomalyWebhookUrl: string | null;
+  // The body shape that URL expects (#47): the original generic JSON, or a
+  // Discord/Slack chat message. Only meaningful with a URL set.
+  anomalyWebhookFormat: WebhookFormat;
   anomalyIntervalMs: number;
   // Matches the sibling services' convention (fleet-service, agent-service):
   // the browser-facing UI (command-interface, default port 3000) is the only
@@ -132,6 +136,21 @@ const positiveNumberEnv = (name: string, fallback: number): number => {
   return value;
 };
 
+/**
+ * The webhook body format, `generic` when unset. A typo is refused at boot: a
+ * wrong format means every page is rejected by the chat service, which is
+ * only noticed when the page that mattered never arrives.
+ */
+const webhookFormatEnv = (): WebhookFormat => {
+  const raw = process.env.ANOMALY_WEBHOOK_FORMAT;
+  if (raw === undefined || raw === "") return "generic";
+  const format = WEBHOOK_FORMATS.find((f) => f === raw);
+  if (format === undefined) {
+    throw new Error(`ANOMALY_WEBHOOK_FORMAT must be one of ${WEBHOOK_FORMATS.join(", ")}, got "${raw}"`);
+  }
+  return format;
+};
+
 export const configFromEnv = (): ServiceConfig => {
   // Presence only; the source itself is built later by resolveM2MTokenSource.
   // Checked here so the failure precedes migrate().
@@ -147,6 +166,7 @@ export const configFromEnv = (): ServiceConfig => {
     replanIntervalMs: positiveNumberEnv("REPLAN_INTERVAL_MS", 300_000),
     metricsRollupIntervalMs: positiveNumberEnv("METRICS_ROLLUP_INTERVAL_MS", 60_000),
     anomalyWebhookUrl: process.env.ANOMALY_WEBHOOK_URL ?? null,
+    anomalyWebhookFormat: webhookFormatEnv(),
     anomalyIntervalMs: positiveNumberEnv("ANOMALY_INTERVAL_MS", 60_000),
     corsAllowedOrigin: process.env.CORS_ALLOWED_ORIGIN ?? "http://localhost:3000",
     // AUTH_INTROSPECTION_URL (the full endpoint, POSTed to verbatim) and

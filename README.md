@@ -575,9 +575,22 @@ flowchart LR
 ```
 
 Each anomaly is **persisted before** delivery is attempted, so a webhook outage
-never loses the record. Repeat firings of the same condition are suppressed for
+never loses the record. Later ticks retry undelivered anomalies detected in the
+last hour (longer when `ANOMALY_INTERVAL_MS` is slow, so every round fits);
+older ones stay in the digest only, so configuring a webhook on a deployment
+that ran without one does not page its whole history. A `429` waits for its
+`Retry-After` (capped at 5 s) and ends that tick's sending; the rest waits for
+the next tick. A shutdown cancels a round in progress. Repeat firings of the
+same condition are suppressed for
 `anomaly.dedupeCooldownMinutes` rather than paging every tick a problem stays
 open.
+
+With `ANOMALY_WEBHOOK_FORMAT=discord` or `slack` the page is one chat line
+per anomaly. Its summary reads only fields picked per type and accepts a
+string only if it is a short plain token (ship symbol, waypoint, phase), so
+upstream error text, URLs and free-text messages never reach the channel and
+nothing in it can mention anyone. A type with no summary is sent as its name
+alone; the full record stays in `/anomalies/digest`.
 
 One anomaly is not raised by a check: `autopilot_resumed_in_shadow`, written by
 a restart that refused to resume live (see [Autopilot
@@ -682,7 +695,8 @@ Invalid lifecycle transitions return `409` naming the current status.
 | `MINING_SHIP_SYMBOL` | Ship to fly (**required**) |
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
 | `REPLAN_INTERVAL_MS` | Periodic replan fallback (default `300000`) |
-| `ANOMALY_WEBHOOK_URL` | Where to page when an anomaly fires. **Optional** — unset means anomalies are still detected, recorded and served from `/anomalies/digest`, and only the outbound POST is skipped |
+| `ANOMALY_WEBHOOK_URL` | Where to page when an anomaly fires. **Optional** — unset means anomalies are still detected, recorded and served from `/anomalies/digest`, and only the outbound POST is skipped. A secret: anyone holding it can post to the channel |
+| `ANOMALY_WEBHOOK_FORMAT` | Body shape the webhook expects: `generic` (default; `{id, type, dedupeKey, detectedAt, detail}`), `discord` (`{content, allowed_mentions: {parse: []}}`) or `slack` (`{text}`). Anything else refuses to start. The chat formats send one line (type, when, a short summary built from chosen fields per type, never the raw `detail`), capped at 2000 characters |
 | `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`). Keep it below `anomaly.dedupeCooldownMinutes`: `repeated_denied` is read from events inside that window, so a slower loop can miss one |
 | `METRICS_ROLLUP_INTERVAL_MS` | Rollup cadence (default `60000`) |
 | `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |

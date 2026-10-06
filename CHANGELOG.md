@@ -7,6 +7,32 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Anomalies can page a Discord or Slack channel (#47)
+
+Production set no webhook, so anomalies reached only Postgres and the digest.
+Setting the URL alone would not have helped: Discord and Slack reject the
+generic `{id, type, dedupeKey, detectedAt, detail}` body with 400.
+
+`ANOMALY_WEBHOOK_FORMAT=generic|discord|slack` (default `generic`, unchanged)
+selects the body. The chat formats send one line per anomaly, built from fields
+chosen per type and validated as short tokens or numbers. They never send the
+raw `detail`: before #45 it carried upstream error text, and a field added
+later could again. Discord also gets `allowed_mentions: {parse: []}`. An
+unknown format refuses to start. The owner still picks the target and creates
+the hook.
+
+Delivery changed in three ways:
+- A `429` honours `Retry-After`, capped at 5 s, and ends the tick's sending:
+  the rest of the batch waits for the next tick.
+- `stop()` aborts a delivery round: the POST is cancelled, a backoff or
+  Retry-After sleep wakes, and the round is not counted. Two capped waits
+  alone would otherwise outlast the 8 s shutdown deadline.
+- Redelivery only considers anomalies from the last hour (longer if
+  `ANOMALY_INTERVAL_MS` needs it to fit every round). Without a webhook
+  nothing is ever counted as an attempt, so the first webhook would otherwise
+  have paged the whole stored history, oldest first, ahead of the fresh
+  `autopilot_resumed_in_shadow` from the restart that picked it up.
+
 ## Failure events no longer carry upstream URLs or bodies (#45)
 
 `mining_tick_error` (fleet and anomaly loops), `contract_discovery_error` and

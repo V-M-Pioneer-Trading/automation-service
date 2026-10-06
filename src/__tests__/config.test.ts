@@ -75,6 +75,50 @@ describe("configFromEnv: auth-service introspection", () => {
 });
 
 /**
+ * The webhook body format (#47): unset is the original generic body, and a
+ * value that is not one of the three is refused at boot rather than every
+ * page being rejected by the chat service later.
+ */
+describe("configFromEnv: ANOMALY_WEBHOOK_FORMAT", () => {
+  const saved = { ...process.env };
+
+  beforeEach(() => {
+    process.env = {
+      ...saved,
+      DATABASE_URL: "postgres://x",
+      NAVIGATION_SERVICE_URL: "http://nav",
+      AGENT_SERVICE_URL: "http://agent",
+      FLEET_SERVICE_URL: "http://fleet",
+      MINING_SHIP_SYMBOL: "SHIP-1",
+      AUTH_INTROSPECTION_URL: "http://localhost:3005/auth/v1/introspect",
+      AUTH_INTROSPECTION_SECRET: "introspection-secret",
+      AUTH_M2M_TOKEN_URL: "http://localhost:3005/auth/v1/m2m-token",
+      AUTH_M2M_CALLER_SECRET: "s3cr3t-caller-value",
+    };
+    delete process.env.ANOMALY_WEBHOOK_FORMAT;
+  });
+
+  afterAll(() => {
+    process.env = saved;
+  });
+
+  it.each([undefined, ""])("defaults to generic when %p", (value) => {
+    if (value !== undefined) process.env.ANOMALY_WEBHOOK_FORMAT = value;
+    expect(configFromEnv().anomalyWebhookFormat).toBe("generic");
+  });
+
+  it.each(["generic", "discord", "slack"])("accepts %s", (format) => {
+    process.env.ANOMALY_WEBHOOK_FORMAT = format;
+    expect(configFromEnv().anomalyWebhookFormat).toBe(format);
+  });
+
+  it.each(["Discord", "teams", " slack"])("refuses %p at startup, naming the variable", (format) => {
+    process.env.ANOMALY_WEBHOOK_FORMAT = format;
+    expect(() => configFromEnv()).toThrow(/^ANOMALY_WEBHOOK_FORMAT must be one of generic, discord, slack/);
+  });
+});
+
+/**
  * The machine-token variables are checked here too, not only when the source
  * is built, because the entrypoint runs `migrate()` between the two: a
  * deployment missing them must be refused before it touches the database.

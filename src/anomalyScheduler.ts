@@ -7,7 +7,7 @@ import type { GameClients } from "./gameClients";
 import { IntervalLoop } from "./intervalLoop";
 import type { KnobRepo } from "./knobs";
 import type { ShipTaskRepo } from "./shipTaskRepo";
-import type { WebhookDelivery } from "./webhookDelivery";
+import type { WebhookDelivery, WebhookFormat } from "./webhookDelivery";
 
 export interface AnomalyConfig {
   intervalMs: number;
@@ -24,6 +24,8 @@ export interface AnomalyConfig {
    * An operator reading the digest is a perfectly good audience on its own.
    */
   webhookUrl?: string | null;
+  /** Body shape for `webhookUrl` (#47); `generic` when omitted. */
+  webhookFormat?: WebhookFormat;
 }
 
 /**
@@ -43,6 +45,28 @@ export interface AnomalyConfig {
 const MAX_DELIVERY_ROUNDS = 12;
 /** Oldest undelivered anomalies retried per tick, so a backlog can't stall the checks. */
 const REDELIVERY_BATCH = 5;
+/**
+ * How old an undelivered anomaly may be and still be redelivered (#47 review).
+ *
+ * Without a webhook nothing is ever delivered and the attempt counter is
+ * deliberately left at 0 (see `attemptDelivery`), so a deployment that ran
+ * for weeks without one holds its whole history as "undelivered, budget
+ * left". Configuring a webhook then paged all of it, oldest first, five a
+ * tick: a flood of stale alerts, with the page that mattered (a fresh
+ * `autopilot_resumed_in_shadow` from the restart that picked up the URL)
+ * queued behind it. A missed page is worth sending while it is news; after
+ * that the digest is where it lives.
+ *
+ * At least an hour, and at least twice the time MAX_DELIVERY_ROUNDS ticks take
+ * at the configured interval, so a webhook that was merely down still gets
+ * every round it is owed whatever ANOMALY_INTERVAL_MS is (a 429 that ends a
+ * tick's batch early can still stretch that, which the factor of two absorbs
+ * in the common case).
+ */
+export const MIN_REDELIVERY_WINDOW_MS = 60 * 60 * 1000;
+
+export const redeliveryWindowMs = (intervalMs: number): number =>
+  Math.max(MIN_REDELIVERY_WINDOW_MS, MAX_DELIVERY_ROUNDS * intervalMs * 2);
 
 export interface AnomalySchedulerDeps {
   state: AutopilotState;
@@ -77,6 +101,12 @@ export interface AnomalySchedulerDeps {
  */
 export class AnomalyScheduler {
   private readonly loop: IntervalLoop;
+  /**
+   * Aborted by stop(), handed to every delivery: a round in a backoff or
+   * Retry-After sleep must not hold a shutdown past its deadline. Replaced on
+   * start() so a restarted scheduler delivers again.
+   */
+  private stopSignal = new AbortController();
 
   constructor(private readonly deps: AnomalySchedulerDeps) {
     // The fleet loop has always had an error callback; this one did not, so a
@@ -94,10 +124,12 @@ export class AnomalyScheduler {
   }
 
   start(): void {
+    if (this.stopSignal.signal.aborted) this.stopSignal = new AbortController();
     this.loop.start();
   }
 
   stop(): Promise<void> {
+    this.stopSignal.abort();
     return this.loop.stop();
   }
 
@@ -115,6 +147,9 @@ export class AnomalyScheduler {
   }
 
   private async tick(): Promise<void> {
+    // Captured once: a start() racing an un-awaited stop() replaces the field,
+    // and this tick must keep the signal it was started under, never the new one.
+    const signal = this.stopSignal.signal;
     const { repo, checker, knobs, clock, tasks, shipSymbol, onAnomalyRecorded } = this.deps;
     await this.maybeSnapshotCredits();
     // stop() may have landed during that (real, potentially slow) HTTP call —
@@ -133,6 +168,7 @@ export class AnomalyScheduler {
 
     const cooldownMs = knobValues["anomaly.dedupeCooldownMinutes"] * 60_000;
     const now = clock.now();
+    let rateLimited = false;
 
     for (const candidate of candidates) {
       if (this.isStopped()) return;
@@ -143,10 +179,12 @@ export class AnomalyScheduler {
       const anomaly = await repo.record(candidate);
       if (this.isStopped()) return; // don't attempt delivery, or request a replan, for a stop that landed mid-persist
       onAnomalyRecorded?.();
-      await this.attemptDelivery(anomaly);
+      // Once rate-limited, later anomalies of this tick are recorded but not
+      // sent; redelivery picks them up on a later tick.
+      if (!rateLimited) rateLimited = await this.attemptDelivery(anomaly, signal);
     }
 
-    await this.redeliverMissed();
+    if (!rateLimited) await this.redeliverMissed(signal);
   }
 
   /**
@@ -160,28 +198,36 @@ export class AnomalyScheduler {
    * oldest, within `MAX_DELIVERY_ROUNDS`, so a recovered webhook receives what
    * it missed instead of never hearing about it.
    */
-  private async redeliverMissed(): Promise<void> {
+  private async redeliverMissed(signal: AbortSignal): Promise<void> {
     const { repo, webhook } = this.deps;
     // Nothing to redeliver to. Skipping the query as well as the post keeps a
     // webhook-less deployment from paying for a backlog it can never drain.
     if (webhook === null) return;
-    const pending = await repo.listUndelivered(MAX_DELIVERY_ROUNDS, REDELIVERY_BATCH);
+    const since = new Date(this.deps.clock.now().getTime() - redeliveryWindowMs(this.deps.intervalMs));
+    const pending = await repo.listUndelivered(MAX_DELIVERY_ROUNDS, REDELIVERY_BATCH, since);
     for (const anomaly of pending) {
       if (this.isStopped()) return;
-      await this.attemptDelivery(anomaly);
+      // The chat service is rate-limiting us: the rest waits for the next tick.
+      if (await this.attemptDelivery(anomaly, signal)) return;
     }
   }
 
-  private async attemptDelivery(anomaly: Anomaly): Promise<void> {
+  /** Returns true when the webhook rate-limited us, so the caller sends nothing more this tick. */
+  private async attemptDelivery(anomaly: Anomaly, signal: AbortSignal): Promise<boolean> {
     const { repo, webhook } = this.deps;
     // No webhook configured is not a failed delivery, so the attempt counter is
     // deliberately left alone. Incrementing it would burn the anomaly's
     // MAX_DELIVERY_ROUNDS budget against a webhook that was never asked — and
     // then, if one were configured later, everything recorded in the meantime
     // would already be past its ceiling and would never be sent.
-    if (webhook === null) return;
-    if (await webhook.deliver(anomaly)) await repo.markDelivered(anomaly.id);
-    else await repo.incrementDeliveryAttempts(anomaly.id);
+    if (webhook === null) return false;
+    const { delivered, rateLimited } = await webhook.deliver(anomaly, signal);
+    if (delivered) await repo.markDelivered(anomaly.id);
+    // A round cut short by stop() is not a failed round: don't spend its budget.
+    // The tick's own signal, not isStopped(): a start() after an un-awaited
+    // stop() clears the loop flag while this cut round is still returning.
+    else if (!signal.aborted) await repo.incrementDeliveryAttempts(anomaly.id);
+    return rateLimited;
   }
 
   /** Logs a credits snapshot while mining is actually live — the credits-flat check's only data source. */

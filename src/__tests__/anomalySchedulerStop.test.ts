@@ -7,7 +7,8 @@ import { createPool, migrate } from "../db";
 import { EventLog } from "../eventLog";
 import { KnobRepo } from "../knobs";
 import { ShipTaskRepo } from "../shipTaskRepo";
-import type { WebhookDelivery } from "../webhookDelivery";
+import { WebhookDelivery, type DeliveryResult } from "../webhookDelivery";
+import { redeliveryWindowMs } from "../anomalyScheduler";
 import { databaseUrl } from "../testSupport/databaseUrl";
 import { fakeGameClients } from "../testSupport/fakeGameClients";
 import { FakeClock } from "../testSupport/fakeClock";
@@ -56,6 +57,9 @@ function gate(): Gate {
   };
 }
 
+const DELIVERED: DeliveryResult = { delivered: true, rateLimited: false };
+const RATE_LIMITED: DeliveryResult = { delivered: false, rateLimited: true };
+
 const candidate = (n: number): AnomalyCandidate => ({ type: "test_anomaly", dedupeKey: `test:${String(n)}`, detail: { n } });
 
 describe("anomaly scheduler stop guards", () => {
@@ -67,7 +71,7 @@ describe("anomaly scheduler stop guards", () => {
   let candidates: AnomalyCandidate[];
   let runChecks: jest.Mock<Promise<AnomalyCandidate[]>, []>;
   let getAgent: jest.Mock<Promise<{ credits: number }>, []>;
-  let deliver: jest.Mock<Promise<boolean>, [Anomaly]>;
+  let deliver: jest.Mock<Promise<DeliveryResult>, [Anomaly, AbortSignal?]>;
   let schedulers: AnomalyScheduler[];
   let onAnomalyRecorded: jest.Mock;
 
@@ -89,7 +93,7 @@ describe("anomaly scheduler stop guards", () => {
     candidates = [];
     runChecks = jest.fn(() => Promise.resolve(candidates));
     getAgent = jest.fn(() => Promise.resolve({ credits: 1234 }));
-    deliver = jest.fn<Promise<boolean>, [Anomaly]>(() => Promise.resolve(true));
+    deliver = jest.fn<Promise<DeliveryResult>, [Anomaly, AbortSignal?]>(() => Promise.resolve(DELIVERED));
     schedulers = [];
     onAnomalyRecorded = jest.fn();
   });
@@ -99,12 +103,12 @@ describe("anomaly scheduler stop guards", () => {
     jest.restoreAllMocks();
   });
 
-  const build = (opts: { webhook?: boolean; intervalMs?: number } = {}): AnomalyScheduler => {
+  const build = (opts: { webhook?: boolean | WebhookDelivery; intervalMs?: number } = {}): AnomalyScheduler => {
     const scheduler = new AnomalyScheduler({
       state,
       repo,
       checker: { runChecks } as unknown as AnomalyChecker,
-      webhook: opts.webhook === false ? null : ({ deliver } as unknown as WebhookDelivery),
+      webhook: opts.webhook === false ? null : opts.webhook instanceof WebhookDelivery ? opts.webhook : ({ deliver } as unknown as WebhookDelivery),
       events,
       clock,
       knobs: new KnobRepo(pool),
@@ -197,7 +201,7 @@ describe("anomaly scheduler stop guards", () => {
       // Park inside the first candidate's delivery, i.e. after its record().
       deliver.mockImplementation(async () => {
         await g.hold();
-        return true;
+        return DELIVERED;
       });
       const latestForKey = jest.spyOn(repo, "latestForKey");
       await stopWhileHeldAt(build(), g);
@@ -255,11 +259,111 @@ describe("anomaly scheduler stop guards", () => {
       const g = gate();
       deliver.mockImplementation(async () => {
         await g.hold();
-        return true;
+        return DELIVERED;
       });
       await stopWhileHeldAt(build(), g);
 
       expect(deliver).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * #47 review: a 429 means the chat service is rate-limiting us. The rest of
+     * the batch would collect more 429s (and spend their rounds), so it waits
+     * for the next tick.
+     */
+    it("after a 429 the rest of the batch waits for the next tick", async () => {
+      await repo.record(candidate(1));
+      await repo.record(candidate(2));
+      await repo.record(candidate(3));
+      deliver.mockResolvedValueOnce(RATE_LIMITED);
+      const scheduler = build();
+
+      await scheduler.forceTick();
+      expect(deliver).toHaveBeenCalledTimes(1);
+
+      await scheduler.forceTick();
+      expect(deliver).toHaveBeenCalledTimes(4); // all three, the rate-limited one included
+    });
+
+    it("a fresh anomaly rate-limited mid-tick ends the tick's sending, redelivery included", async () => {
+      await repo.record(candidate(9)); // backlog
+      candidates = [candidate(1), candidate(2)];
+      deliver.mockResolvedValueOnce(RATE_LIMITED);
+      await build().forceTick();
+
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(await anomalyCount()).toBe(3); // the second fresh one is still recorded
+    });
+
+    /**
+     * #47 review: two capped Retry-After sleeps are 10 s, past the 8 s shutdown
+     * deadline, after which closing the server and the pool is skipped. stop()
+     * must wake the sleep and end the round. A real WebhookDelivery, real timers.
+     */
+    it("stop() during a Retry-After sleep returns promptly and spends no round", async () => {
+      let posts = 0;
+      let posted!: () => void;
+      const firstPost = new Promise<void>((r) => {
+        posted = r;
+      });
+      jest.spyOn(globalThis, "fetch").mockImplementation(() => {
+        posts++;
+        posted();
+        return Promise.resolve(new Response(null, { status: 429, headers: { "Retry-After": "5" } }));
+      });
+      const recorded = await repo.record(candidate(1));
+      const scheduler = build({ webhook: new WebhookDelivery({ url: "http://hook.test/x", format: "discord" }) });
+
+      const tick = scheduler.forceTick();
+      await firstPost;
+      await new Promise((r) => setTimeout(r, 50)); // now inside the Retry-After sleep
+      const started = Date.now();
+      await scheduler.stop();
+      await tick;
+
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(posts).toBe(1);
+      const { rows } = await pool.query<{ delivery_attempts: number }>("SELECT delivery_attempts FROM anomaly WHERE id = $1", [recorded.id]);
+      expect(rows[0].delivery_attempts).toBe(0);
+    });
+  });
+
+  /**
+   * start() right after an un-awaited stop() clears the loop's stop flag while
+   * the old tick's cut round is still returning. That tick must keep its own,
+   * aborted signal: not count the cut round, and not hand the rest of its
+   * batch the new scheduler's live signal.
+   */
+  it("a start() racing an un-awaited stop() neither counts the cut round nor revives the old tick", async () => {
+    const first = await repo.record(candidate(1));
+    const second = await repo.record(candidate(2));
+    const g = gate();
+    deliver.mockImplementationOnce(async () => {
+      await g.hold();
+      return { delivered: false, rateLimited: false };
+    });
+    deliver.mockImplementation(() => Promise.resolve({ delivered: false, rateLimited: false }));
+    const scheduler = build();
+
+    const tick = scheduler.forceTick();
+    await g.entered;
+    const stopping = scheduler.stop();
+    scheduler.start();
+    g.release();
+    await Promise.all([tick, stopping]);
+
+    expect(deliver.mock.calls.length).toBeGreaterThan(0);
+    expect(deliver.mock.calls.every(([, signal]) => signal?.aborted === true)).toBe(true);
+    const { rows } = await pool.query<{ delivery_attempts: number }>("SELECT delivery_attempts FROM anomaly WHERE id = ANY($1) ORDER BY id", [
+      [first.id, second.id],
+    ]);
+    expect(rows.map((r) => r.delivery_attempts)).toEqual([0, 0]);
+  });
+
+  describe("redelivery window", () => {
+    it("is an hour at the default interval, and always fits every delivery round twice", () => {
+      expect(redeliveryWindowMs(60_000)).toBe(60 * 60 * 1000);
+      expect(redeliveryWindowMs(600_000)).toBe(12 * 600_000 * 2);
     });
   });
 
