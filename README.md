@@ -585,12 +585,20 @@ same condition are suppressed for
 `anomaly.dedupeCooldownMinutes` rather than paging every tick a problem stays
 open.
 
-With `ANOMALY_WEBHOOK_FORMAT=discord` or `slack` the page is one chat line
-per anomaly. Its summary reads only fields picked per type and accepts a
-string only if it is a short plain token (ship symbol, waypoint, phase), so
-upstream error text, URLs and free-text messages never reach the channel and
-nothing in it can mention anyone. A type with no summary is sent as its name
-alone; the full record stays in `/anomalies/digest`.
+With `ANOMALY_WEBHOOK_FORMAT=telegram` the page is one Telegram message per
+anomaly, sent by a bot through the Bot API's `sendMessage` to
+`ANOMALY_TELEGRAM_CHAT_ID`. Its summary reads only fields picked per type and
+accepts a string only if it is a short plain token (ship symbol, waypoint,
+phase), so upstream error text, URLs and free-text messages never reach the
+chat, and nothing in it can mention anyone or read as a bot command. It is
+sent as plain text (no `parse_mode`) with link previews off. A type with no
+summary is sent as its name alone; the full record stays in
+`/anomalies/digest`. Telegram's own 429 (`parameters.retry_after`) is treated
+like `Retry-After`, and a `200` without `"ok": true` is not a delivery.
+
+A failed attempt logs one line: anomaly id, attempt, HTTP status and
+Telegram's `error_code`, or the network error's class and code. Never the URL
+(it holds the bot token), an error message, or a response body.
 
 One anomaly is not raised by a check: `autopilot_resumed_in_shadow`, written by
 a restart that refused to resume live (see [Autopilot
@@ -695,8 +703,9 @@ Invalid lifecycle transitions return `409` naming the current status.
 | `MINING_SHIP_SYMBOL` | Ship to fly (**required**) |
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
 | `REPLAN_INTERVAL_MS` | Periodic replan fallback (default `300000`) |
-| `ANOMALY_WEBHOOK_URL` | Where to page when an anomaly fires. **Optional** — unset means anomalies are still detected, recorded and served from `/anomalies/digest`, and only the outbound POST is skipped. A secret: anyone holding it can post to the channel |
-| `ANOMALY_WEBHOOK_FORMAT` | Body shape the webhook expects: `generic` (default; `{id, type, dedupeKey, detectedAt, detail}`), `discord` (`{content, allowed_mentions: {parse: []}}`) or `slack` (`{text}`). Anything else refuses to start. The chat formats send one line (type, when, a short summary built from chosen fields per type, never the raw `detail`), capped at 2000 characters |
+| `ANOMALY_WEBHOOK_URL` | Where to page when an anomaly fires. **Optional** — unset means anomalies are still detected, recorded and served from `/anomalies/digest`, and only the outbound POST is skipped. A secret, never logged: for `telegram` it is `https://api.telegram.org/bot<token>/sendMessage`, with the bot token in the path (anything else refuses to start) |
+| `ANOMALY_WEBHOOK_FORMAT` | Body shape the webhook expects: `generic` (default; `{id, type, dedupeKey, detectedAt, detail}`) or `telegram` (`{chat_id, text, disable_web_page_preview: true}`, no `parse_mode`). Anything else refuses to start. `telegram` sends one plain-text line (type, when, a short summary built from chosen fields per type, never the raw `detail`), capped at 2000 characters |
+| `ANOMALY_TELEGRAM_CHAT_ID` | The chat a `telegram` page goes to: a numeric chat id (negative for a group) or `@channelusername`. **Required** with `ANOMALY_WEBHOOK_FORMAT=telegram`, and refused with any other format |
 | `ANOMALY_INTERVAL_MS` | Anomaly check cadence (default `60000`). Keep it below `anomaly.dedupeCooldownMinutes`: `repeated_denied` is read from events inside that window, so a slower loop can miss one |
 | `METRICS_ROLLUP_INTERVAL_MS` | Rollup cadence (default `60000`) |
 | `CORS_ALLOWED_ORIGIN` | Browser origin allowed to call this API (default `http://localhost:3000`) |
