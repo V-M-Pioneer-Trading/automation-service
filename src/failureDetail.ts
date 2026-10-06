@@ -1,38 +1,50 @@
+import { UpstreamCallError } from "./gameClients";
+
 /**
  * What a failure may say outside this process.
  *
- * An upstream failure's text is `METHOD http://internal-host/path: STATUS body`
- * (see `callJson` in gameClients.ts): the internal host, and as much of the
- * upstream's response body as it sent. Event `detail` is served to anyone by
- * `GET /autopilot/events` and leaves in anomaly webhooks, so neither belongs
- * there. Every event or page that describes a failure stores
- * `describeFailure(err)` as its `request`; the full text goes to the
- * container log, once, through `logFailure`.
+ * Event `detail` is served to anyone by `GET /autopilot/events` and leaves in
+ * anomaly webhooks and the AI supervisor's digest. A failure's text does not
+ * belong there: an upstream failure's message is the internal URL plus the
+ * upstream's whole response body, and any other error's message can name a
+ * database host, a connection string or an internal service (#45).
+ *
+ * So no text from an error reaches the public detail at all — not trimmed, not
+ * scrubbed. Scrubbing was tried first and lost: hosts arrive as `ws://`,
+ * `//authority`, bare IPs, `localhost:80`, percent-encoded, JSON-escaped, or
+ * as plain prose ("st-gateway did not answer"), and a deny-list cannot know
+ * them all. What is shown is built only from values this service chose
+ * (method, path) or that parse as numbers or identifiers (status, the game's
+ * numeric `error.code`, a Node error code):
+ *
+ * - an `UpstreamCallError` → its `requestLine`, e.g. `GET /ships/X: 403 (code 4225)`
+ *   or `POST /ships/X/orbit: no response (ECONNREFUSED)`
+ * - anything else → its `code` (`ECONNREFUSED`, a Postgres SQLSTATE) or its
+ *   class name (`TypeError`), else `Error`
+ *
+ * Everything else is in the container log, once, through `logFailure`.
  */
 
-const PREFIX_CHARS = 200;
+/** An identifier, not prose: nothing with a dot, colon, slash or space can pass. */
+const SAFE_CODE = /^[A-Za-z0-9_]{1,40}$/;
 
-/** Any absolute http(s) URL's scheme and authority, wherever it appears. */
-const ORIGIN = /https?:\/\/[^\s/"'<>]*/gi;
-
-const stripOrigins = (text: string): string => text.replace(ORIGIN, "");
-
-/**
- * Request method and path, status and the start of the text. Never an upstream
- * host, which is internal — not in the request line and not inside the body —
- * and never more than a short prefix of the upstream's body.
- */
-export function describeFailure(err: unknown): string {
-  const text = String(err);
-  const m = /^(?:Error: )?([A-Z]+) (\S+?): (.*)$/s.exec(text);
-  if (m === null) return stripOrigins(text).slice(0, PREFIX_CHARS);
-  let path = m[2];
-  try {
-    path = new URL(m[2]).pathname;
-  } catch {
-    // not an absolute URL; keep as is
+/** `err.code`, else the cause's code, else the class name — whichever is identifier-shaped first; `Error` if none. */
+export function errorCode(err: unknown): string {
+  if (typeof err !== "object" || err === null) return "Error";
+  const { code, name, cause } = err as { code?: unknown; name?: unknown; cause?: unknown };
+  const causeCode = typeof cause === "object" && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  for (const candidate of [code, causeCode, name]) {
+    if (typeof candidate === "string" && SAFE_CODE.test(candidate)) return candidate;
   }
-  return `${m[1]} ${stripOrigins(path)}: ${stripOrigins(m[3]).slice(0, PREFIX_CHARS)}`;
+  return "Error";
+}
+
+export function describeFailure(err: unknown): string {
+  if (err instanceof UpstreamCallError) {
+    if (err.requestLine === undefined) return `upstream call failed (${err.kind})`;
+    return err.cause === undefined ? err.requestLine : `${err.requestLine} (${errorCode(err.cause)})`;
+  }
+  return errorCode(err);
 }
 
 /**

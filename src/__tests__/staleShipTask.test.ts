@@ -186,7 +186,7 @@ describe("stale ship_task rows and repeated denied (#40)", () => {
   });
 
   describe("repeated identical denied", () => {
-    const deniedFor = (symbol: string) => new UpstreamCallError(DENIED(symbol), "denied");
+    const deniedFor = (symbol: string) => new UpstreamCallError(DENIED(symbol), "denied", `GET /ships/${symbol}: 403`);
     const trippedCount = async (events: EventLog): Promise<number> =>
       (await events.list(500)).filter((e) => e.type === "repeated_denied_tripped").length;
 
@@ -234,19 +234,15 @@ describe("stale ship_task rows and repeated denied (#40)", () => {
       expect(rows[0].delivered_at).not.toBeNull();
     });
 
-    it("only the request path, status and a short prefix of the text leave the process", async () => {
-      expect(describeFailure(new UpstreamCallError("GET http://agent.internal:80/api/agent/v1/ships/X: 403 nope", "denied"))).toBe(
-        "GET /api/agent/v1/ships/X: 403 nope"
-      );
-      const long = describeFailure(new UpstreamCallError(`GET http://h/p: 403 ${"x".repeat(5000)}`, "denied"));
-      expect(long).not.toContain("http://h");
-      expect(long.length).toBeLessThan(230);
-      expect(describeFailure(new Error("y".repeat(1000))).length).toBe(200);
+    it("only the request line leaves the process, never the upstream's text (#45)", async () => {
+      expect(describeFailure(new UpstreamCallError(`GET http://h/p: 403 ${"x".repeat(5000)}`, "denied", "GET /p: 403"))).toBe("GET /p: 403");
+      expect(describeFailure(new UpstreamCallError("GET http://h/p: 403 nope", "denied"))).toBe("upstream call failed (denied)");
+      expect(describeFailure(new Error("y".repeat(1000)))).toBe("Error");
 
       const { s, events } = build(fakeGameClients({ getShip: () => Promise.reject(deniedFor(SHIP)) }), 100_000);
       for (let i = 0; i < REPEATED_DENIED_THRESHOLD; i++) await s.forceTick();
       const tripped = (await events.list(500)).find((e) => e.type === "repeated_denied_tripped");
-      expect(tripped?.detail.request).toBe(`GET /ships/${SHIP}: 403 Agent does not own or cannot access ship ${SHIP}.`);
+      expect(tripped?.detail.request).toBe(`GET /ships/${SHIP}: 403`);
       expect(JSON.stringify(tripped?.detail)).not.toContain("http://");
     });
 

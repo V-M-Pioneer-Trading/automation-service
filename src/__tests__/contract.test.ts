@@ -479,9 +479,19 @@ describe("automation-service contract loop (meta#11)", () => {
     // ship_task still points at it.
     await pool.query("DELETE FROM contract WHERE contract_id = $1", ["CONTRACT-1"]);
 
-    const failure = await waitForEvent(gateway, "mining_tick_error");
-    expect(String(failure.detail.request)).toContain("CONTRACT-1");
-    expect(String(failure.detail.request)).toContain("not found");
+    // The descriptive text goes to the container log; the public event says
+    // only that our own code threw (#45).
+    const consoleError = jest.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const failure = await waitForEvent(gateway, "mining_tick_error");
+      expect(failure.detail.request).toBe("Error");
+      expect(failure.detail.failureKind).toBe("internal");
+      const logged = consoleError.mock.calls.map((args: unknown[]) => args.map(String).join(" ")).join("\n");
+      expect(logged).toContain("CONTRACT-1");
+      expect(logged).toContain("not found");
+    } finally {
+      consoleError.mockRestore();
+    }
 
     // The gateway must still be responsive — an escaped null-deref would have
     // thrown the same either way (both are caught by tick()'s outer catch), so

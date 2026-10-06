@@ -246,8 +246,42 @@ export class UpstreamCallError extends Error {
   /** The ship the failing call asked about, when it asked about one (set by `getShip`). */
   requestedShip?: string;
 
-  constructor(message: string, public kind: UpstreamFailureKind) {
-    super(message);
+  /**
+   * `message` is the whole story — the internal URL and the upstream's body —
+   * and goes to the container log only. `requestLine` is what may be shown to
+   * anyone (#45): method, path, and the status with SpaceTraders' numeric
+   * `error.code` or "no response", built from values this service chose or
+   * parsed as numbers, never from upstream text. It is a rendered string, not a
+   * status field, on purpose: branch on `kind`, never on a status.
+   */
+  constructor(
+    message: string,
+    public kind: UpstreamFailureKind,
+    public requestLine?: string,
+    options?: { cause?: unknown }
+  ) {
+    super(message, options);
+  }
+}
+
+/** `GET /ships/X`: the path only, never the internal origin it was sent to. */
+function requestOf(method: string, url: string): string {
+  let path = "/";
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    // every URL here is built from configured service URLs; keep the "/" fallback
+  }
+  return `${method} ${path}`;
+}
+
+/** SpaceTraders' numeric `error.code` from an `{ error: { code } }` body, else nothing. Never any text. */
+function gameCodeOf(body: string): number | undefined {
+  try {
+    const code = (JSON.parse(body) as { error?: { code?: unknown } } | null)?.error?.code;
+    return Number.isInteger(code) ? (code as number) : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -270,7 +304,11 @@ export function createGameClients(config: {
       // error's kind goes into the message, never its text.
       const kind: UpstreamFailureKind =
         err instanceof M2MTokenError && err.kind === "unknown-caller" ? "credentials" : "unavailable";
-      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: machine token unavailable: ${err instanceof M2MTokenError ? err.kind : "unexpected error"}`, kind);
+      throw new UpstreamCallError(
+        `${init?.method ?? "GET"} ${url}: machine token unavailable: ${err instanceof M2MTokenError ? err.kind : "unexpected error"}`,
+        kind,
+        `${requestOf(init?.method ?? "GET", url)}: machine token unavailable`
+      );
     }
     let res: Response;
     try {
@@ -286,11 +324,18 @@ export function createGameClients(config: {
         signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
       });
     } catch (err) {
-      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: ${String(err)}`, "unavailable");
+      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: ${String(err)}`, "unavailable", `${requestOf(init?.method ?? "GET", url)}: no response`, {
+        cause: err,
+      });
     }
     const text = await res.text();
     if (!res.ok) {
-      throw new UpstreamCallError(`${init?.method ?? "GET"} ${url}: ${String(res.status)} ${text}`, classifyUpstreamStatus(res.status, text));
+      const gameCode = gameCodeOf(text);
+      throw new UpstreamCallError(
+        `${init?.method ?? "GET"} ${url}: ${String(res.status)} ${text}`,
+        classifyUpstreamStatus(res.status, text),
+        `${requestOf(init?.method ?? "GET", url)}: ${String(res.status)}${gameCode === undefined ? "" : ` (code ${String(gameCode)})`}`
+      );
     }
     return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
   }
