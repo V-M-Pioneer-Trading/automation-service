@@ -1,40 +1,64 @@
 import type { Anomaly } from "./anomaly";
 
 const DELIVERY_TIMEOUT_MS = 10_000;
-/** Longest a 429's Retry-After is honoured for; one delivery round must stay short. */
+/** Longest a 429's retry hint is honoured for; one delivery round must stay short. */
 const MAX_RETRY_AFTER_MS = 5_000;
+/** A Bot API answer is a few hundred bytes; anything far larger is not one and is not parsed. */
+const MAX_RESPONSE_CHARS = 64 * 1024;
+
+const capRetryAfter = (seconds: number): number | null =>
+  Number.isFinite(seconds) && seconds >= 0 ? Math.min(seconds * 1000, MAX_RETRY_AFTER_MS) : null;
 
 /**
- * Discord and Slack answer a rate-limited post with 429 and `Retry-After` in
- * seconds. Honoured up to MAX_RETRY_AFTER_MS; anything unparseable (including
- * the HTTP-date form) falls back to the usual backoff.
+ * A 429's `Retry-After` header in seconds, honoured up to MAX_RETRY_AFTER_MS.
+ * Anything unparseable (including the HTTP-date form) falls back to the usual
+ * backoff.
  */
-const retryAfterMs = (res: Response): number | null => {
+const retryAfterHeaderMs = (res: Response): number | null => {
   if (res.status !== 429) return null;
   const raw = res.headers.get("retry-after");
   if (raw === null || raw.trim() === "") return null;
-  const seconds = Number(raw);
-  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(seconds * 1000, MAX_RETRY_AFTER_MS) : null;
+  return capRetryAfter(Number(raw));
 };
 
 /**
  * The body shape the webhook expects (issue #47). `generic` is the original
- * `{id, type, dedupeKey, detectedAt, detail}` JSON; `discord` and `slack` are
- * the chat services' incoming-webhook bodies, which reject the generic one
- * with 400.
+ * `{id, type, dedupeKey, detectedAt, detail}` JSON; `telegram` is a Bot API
+ * `sendMessage` call, the bot token in the URL's path and the chat in
+ * `ANOMALY_TELEGRAM_CHAT_ID`. Discord and Slack formats existed briefly and
+ * were replaced by Telegram, the owner's choice.
  */
-export const WEBHOOK_FORMATS = ["generic", "discord", "slack"] as const;
+export const WEBHOOK_FORMATS = ["generic", "telegram"] as const;
 export type WebhookFormat = (typeof WEBHOOK_FORMATS)[number];
 
-/** Discord refuses `content` over 2000 characters; Slack's own limit is higher, so one cap serves both. */
-export const CHAT_MESSAGE_MAX_CHARS = 2000;
+/** Telegram refuses `text` over 4096 characters. */
+export const TELEGRAM_TEXT_MAX_CHARS = 4096;
+/** The summary's own cap from #47. Lower than Telegram's, and a page is one line anyway. */
+export const CHAT_MESSAGE_MAX_CHARS = Math.min(2000, TELEGRAM_TEXT_MAX_CHARS);
+
+/**
+ * A Telegram chat: a numeric id (negative for groups and channels) or a public
+ * `@channelusername`. Checked at startup, so a typo is a config error rather
+ * than every page answered "chat not found".
+ */
+export const TELEGRAM_CHAT_ID = /^(-?\d{1,20}|@[A-Za-z0-9_]{5,32})$/;
+
+/**
+ * What a Bot API `sendMessage` URL looks like. The bot token is the path
+ * segment after `bot`, which is why the URL is a secret and is never logged,
+ * not even in part.
+ */
+export const TELEGRAM_SEND_MESSAGE_URL = /^https:\/\/api\.telegram\.org\/bot\d+:[A-Za-z0-9_-]+\/sendMessage$/;
 
 /**
  * A string field is only ever put into a chat message if it is a short plain
  * token: ship symbols, waypoints, phases, statuses. Anything else — a URL, a
- * sentence, upstream error text — is dropped. No `@`, `<`, `/`, whitespace or
- * backtick can pass, so a value can neither ping (Discord `@everyone`, Slack
- * `<!channel>`), nor link, nor break out of the inline code it is shown in.
+ * sentence, upstream error text — is dropped. No `@`, `#`, `/`, `.`, `:`,
+ * whitespace or backtick can pass, so a value can neither mention anyone
+ * (`@username`), nor read as a bot command (`/start`), nor become a link
+ * Telegram detects in plain text, nor break out of the backticks it is shown
+ * in. The message is sent without `parse_mode`, so those backticks are literal
+ * characters and nothing in the text is read as Markdown or HTML.
  */
 const SAFE_TOKEN = /^[A-Za-z0-9_-]{1,64}$/;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
@@ -126,7 +150,7 @@ const SUMMARIES: Record<string, (d: Record<string, unknown>) => string> = {
   },
 };
 
-/** The one line a chat webhook shows for an anomaly: type, when, and a summary built from safe fields only. */
+/** The one line a chat shows for an anomaly: type, when, and a summary built from safe fields only. */
 export function anomalyLine(anomaly: Anomaly): string {
   const type = token(anomaly.type) ?? "`unknown`";
   const detectedAt = ISO_INSTANT.test(anomaly.detectedAt) ? ` at ${anomaly.detectedAt}` : "";
@@ -140,13 +164,16 @@ export function capLength(text: string, max: number = CHAT_MESSAGE_MAX_CHARS): s
   return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
 }
 
-/** The chat body for a line of text, capped. Discord's `allowed_mentions: {parse: []}` means nothing in it can ping. */
-export function chatBody(format: Exclude<WebhookFormat, "generic">, text: string): Record<string, unknown> {
-  const capped = capLength(text);
-  return format === "discord" ? { content: capped, allowed_mentions: { parse: [] } } : { text: capped };
+/**
+ * The Bot API `sendMessage` body for a line of text, capped. Plain text on
+ * purpose: no `parse_mode`, so nothing in it is read as Markdown or HTML, and
+ * no link preview.
+ */
+export function telegramBody(chatId: string, text: string): Record<string, unknown> {
+  return { chat_id: chatId, text: capLength(text), disable_web_page_preview: true };
 }
 
-export function webhookBody(anomaly: Anomaly, format: WebhookFormat): Record<string, unknown> {
+export function webhookBody(anomaly: Anomaly, format: WebhookFormat, telegramChatId?: string): Record<string, unknown> {
   if (format === "generic") {
     return {
       id: anomaly.id,
@@ -156,13 +183,17 @@ export function webhookBody(anomaly: Anomaly, format: WebhookFormat): Record<str
       detail: anomaly.detail,
     };
   }
-  return chatBody(format, anomalyLine(anomaly));
+  if (telegramChatId === undefined || !TELEGRAM_CHAT_ID.test(telegramChatId)) throw new Error("telegram format needs a valid chat id");
+  return telegramBody(telegramChatId, anomalyLine(anomaly));
 }
 
 export interface WebhookDeliveryConfig {
+  /** A secret for `telegram` (the bot token is in its path). Never logged. */
   url: string;
   /** Defaults to `generic`, the original body. */
   format?: WebhookFormat;
+  /** Required with `format: "telegram"`, refused with any other format. */
+  telegramChatId?: string;
   maxAttempts?: number;
   baseDelayMs?: number;
   /**
@@ -174,12 +205,13 @@ export interface WebhookDeliveryConfig {
 
 /** What one round of `deliver()` came to. */
 export interface DeliveryResult {
-  /** The webhook answered 2xx. */
+  /** The webhook accepted the post: 2xx, and for Telegram also `"ok": true`. */
   delivered: boolean;
   /**
-   * Some attempt in the round was answered 429. The caller sends nothing more
-   * this tick: the chat service is rate-limiting us, and the rest of a batch
-   * would only collect more 429s and burn its delivery rounds.
+   * Some attempt in the round was rate-limited (HTTP 429, or Telegram's
+   * `error_code` 429). The caller sends nothing more this tick: the chat
+   * service is rate-limiting us, and the rest of a batch would only collect
+   * more 429s and burn its delivery rounds.
    */
   rateLimited: boolean;
 }
@@ -200,10 +232,74 @@ const realSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     signal?.addEventListener("abort", done, { once: true });
   });
 
+/** How one answered attempt went. */
+interface Answer {
+  delivered: boolean;
+  rateLimited: boolean;
+  /** How long the service asked us to wait, already capped; null for the usual backoff. */
+  waitMs: number | null;
+  /** Telegram's numeric `error_code`, the only part of its error answer ever logged. */
+  errorCode: number | null;
+}
+
+/**
+ * Reads a Bot API answer: `{"ok": true, ...}` or
+ * `{"ok": false, "error_code": 429, "description": "...", "parameters": {"retry_after": N}}`.
+ * A 2xx without `"ok": true` is not a delivery. `description` is never read:
+ * it can echo what we sent.
+ */
+const telegramAnswer = async (res: Response): Promise<Answer> => {
+  let parsed: Record<string, unknown> = {};
+  try {
+    const text = await res.text();
+    if (text.length <= MAX_RESPONSE_CHARS) parsed = record(JSON.parse(text));
+  } catch {
+    // not JSON, or the body read failed or was aborted: judged on the status alone
+  }
+  const errorCode = Number.isSafeInteger(parsed.error_code) ? (parsed.error_code as number) : null;
+  const rateLimited = res.status === 429 || errorCode === 429;
+  const retryAfter = record(parsed.parameters).retry_after;
+  const waitMs = !rateLimited
+    ? null
+    : typeof retryAfter === "number"
+      ? capRetryAfter(retryAfter)
+      : res.headers.get("retry-after") !== null
+        ? capRetryAfter(Number(res.headers.get("retry-after")))
+        : null;
+  return { delivered: res.ok && parsed.ok === true, rateLimited, waitMs, errorCode };
+};
+
+const genericAnswer = (res: Response): Answer => ({
+  delivered: res.ok,
+  rateLimited: res.status === 429,
+  waitMs: retryAfterHeaderMs(res),
+  errorCode: null,
+});
+
+const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
+
+/**
+ * What a failed fetch may say in the log: the error's class name and a
+ * Node/undici error code, each only if identifier-shaped. Never its message
+ * and never `String(err)`: undici puts the whole URL in the message of a
+ * parse failure ("Failed to parse URL from https://api.telegram.org/bot<token>/...")
+ * and of a URL with credentials, and the URL holds the bot token.
+ */
+export const describeFetchFailure = (err: unknown): string => {
+  // Duck-typed, not `instanceof Error`: undici's errors and DOMException can
+  // come from another realm (they do under Jest), and would all read "Error".
+  const fields = record(err);
+  const name = typeof fields.name === "string" && IDENTIFIER.test(fields.name) ? fields.name : "Error";
+  const rawCode = record(fields.cause).code ?? fields.code;
+  const code = typeof rawCode === "string" && IDENTIFIER.test(rawCode) ? rawCode : null;
+  return code === null ? name : `${name} ${code}`;
+};
+
 /** POSTs an anomaly to a configured webhook URL, retrying with exponential backoff on failure. */
 export class WebhookDelivery {
   private readonly url: string;
   private readonly format: WebhookFormat;
+  private readonly telegramChatId: string | undefined;
   private readonly maxAttempts: number;
   private readonly baseDelayMs: number;
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -211,6 +307,14 @@ export class WebhookDelivery {
   constructor(config: WebhookDeliveryConfig) {
     this.url = config.url;
     this.format = config.format ?? "generic";
+    this.telegramChatId = config.telegramChatId;
+    // Messages name no value: the chat id is not secret, but the URL is.
+    if (this.format === "telegram" && (this.telegramChatId === undefined || !TELEGRAM_CHAT_ID.test(this.telegramChatId))) {
+      throw new Error("WebhookDelivery: telegram format needs a valid telegramChatId");
+    }
+    if (this.format !== "telegram" && this.telegramChatId !== undefined) {
+      throw new Error("WebhookDelivery: telegramChatId is only meaningful with the telegram format");
+    }
     this.maxAttempts = config.maxAttempts ?? 3;
     this.baseDelayMs = config.baseDelayMs ?? 200;
     this.sleep = config.sleep ?? realSleep;
@@ -222,17 +326,23 @@ export class WebhookDelivery {
    * backoff or Retry-After sleep wakes, and no further attempt is made, so a
    * shutdown is never held up by a round (#47 review: two capped 429 waits
    * alone are 10 s, past the 8 s shutdown deadline).
+   *
+   * A failed attempt logs one line: the anomaly's id, the attempt, and the
+   * status and Telegram `error_code`, or the fetch error's class and code.
+   * Never the URL, a response body, or an error's message.
    */
   async deliver(anomaly: Anomaly, signal?: AbortSignal): Promise<DeliveryResult> {
-    const payload = JSON.stringify(webhookBody(anomaly, this.format));
+    const payload = JSON.stringify(webhookBody(anomaly, this.format, this.telegramChatId));
     let rateLimited = false;
     // A call, not a property read: TypeScript would keep the narrowing from the
     // first check across the awaits after it.
     const stopped = (): boolean => signal?.aborted === true;
+    const id = /^\d{1,20}$/.test(anomaly.id) ? anomaly.id : "?";
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       if (stopped()) break;
       let waitMs: number | null = null;
+      let failure: string;
       try {
         const timeout = AbortSignal.timeout(DELIVERY_TIMEOUT_MS);
         const res = await fetch(this.url, {
@@ -241,13 +351,18 @@ export class WebhookDelivery {
           body: payload,
           signal: signal === undefined ? timeout : AbortSignal.any([timeout, signal]),
         });
-        if (res.ok) return { delivered: true, rateLimited };
-        if (res.status === 429) rateLimited = true;
-        waitMs = retryAfterMs(res);
-      } catch {
+        const answer = this.format === "telegram" ? await telegramAnswer(res) : genericAnswer(res);
+        if (answer.delivered) return { delivered: true, rateLimited };
+        if (answer.rateLimited) rateLimited = true;
+        waitMs = answer.waitMs;
+        failure = `HTTP ${String(res.status)}${answer.errorCode === null ? "" : ` error_code ${String(answer.errorCode)}`}`;
+      } catch (err) {
         // network error, timeout or stop — fall through to retry (or the stop check)
+        failure = describeFetchFailure(err);
       }
-      if (attempt < this.maxAttempts && !stopped()) {
+      if (stopped()) break; // a stop is not a failure worth a log line
+      console.warn(`anomaly webhook delivery failed: anomaly ${id}, attempt ${String(attempt)}/${String(this.maxAttempts)}, ${failure}`);
+      if (attempt < this.maxAttempts) {
         await this.sleep(waitMs ?? this.baseDelayMs * 2 ** (attempt - 1), signal);
       }
     }

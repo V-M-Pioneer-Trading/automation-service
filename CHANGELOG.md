@@ -7,7 +7,33 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
-## Anomalies can page a Discord or Slack channel (#47)
+## Anomalies page Telegram, not Discord or Slack (#47)
+
+The owner chose Telegram. `ANOMALY_WEBHOOK_FORMAT` is now `generic|telegram`;
+`discord` and `slack` are gone and refuse to start. `generic` is unchanged
+byte for byte.
+
+- `telegram` calls the Bot API's `sendMessage`: `ANOMALY_WEBHOOK_URL` is
+  `https://api.telegram.org/bot<token>/sendMessage` and the body is
+  `{chat_id, text, disable_web_page_preview: true}`, where `text` is the same
+  safe one-line summary as before. No `parse_mode`: plain text, so nothing a
+  field could hold is read as Markdown or HTML. The summary keeps its
+  2000-character cap (Telegram allows 4096).
+- `ANOMALY_TELEGRAM_CHAT_ID` (a numeric id, optionally negative, or
+  `@channelusername`) is required with `telegram` and refused without it. With
+  `telegram`, a URL that is not a Bot API `sendMessage` URL refuses to start.
+- A delivery is a 2xx **and** `"ok": true`. Telegram's rate limit is
+  `error_code` 429 with `parameters.retry_after`, honoured like
+  `Retry-After` (which is still read as a fallback): capped at 5 s, abortable,
+  and it ends the tick's sending.
+- The URL holds the bot token, so it is never logged. Failed attempts now log
+  one line each (they logged nothing before, for any format): anomaly id,
+  attempt, HTTP status and Telegram `error_code`, or the fetch error's class
+  name and code. Never `String(err)` or an error message: undici quotes the
+  whole URL in some of them ("Failed to parse URL from ..."). Never Telegram's
+  `description` either.
+
+## Anomalies can page a Discord or Slack channel (#47, since replaced by Telegram)
 
 Production set no webhook, so anomalies reached only Postgres and the digest.
 Setting the URL alone would not have helped: Discord and Slack reject the

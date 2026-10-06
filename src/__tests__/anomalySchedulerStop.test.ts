@@ -312,7 +312,7 @@ describe("anomaly scheduler stop guards", () => {
         return Promise.resolve(new Response(null, { status: 429, headers: { "Retry-After": "5" } }));
       });
       const recorded = await repo.record(candidate(1));
-      const scheduler = build({ webhook: new WebhookDelivery({ url: "http://hook.test/x", format: "discord" }) });
+      const scheduler = build({ webhook: new WebhookDelivery({ url: "http://hook.test/x", format: "telegram", telegramChatId: "123456789" }) });
 
       const tick = scheduler.forceTick();
       await firstPost;

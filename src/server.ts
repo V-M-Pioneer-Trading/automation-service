@@ -324,7 +324,9 @@ export function createApp(options: AppOptions) {
           state,
           repo: anomalyRepo,
           checker: new AnomalyChecker(clock, state, marketIntel, events, metricsRepo),
-          webhook: anomaly.webhookUrl ? new WebhookDelivery({ url: anomaly.webhookUrl, format: anomaly.webhookFormat }) : null,
+          webhook: anomaly.webhookUrl
+            ? new WebhookDelivery({ url: anomaly.webhookUrl, format: anomaly.webhookFormat, telegramChatId: anomaly.telegramChatId ?? undefined })
+            : null,
           events,
           clock,
           knobs,
@@ -745,6 +747,7 @@ if (require.main === module) {
           anomaly: {
             webhookUrl: config.anomalyWebhookUrl,
             webhookFormat: config.anomalyWebhookFormat,
+            telegramChatId: config.anomalyTelegramChatId,
             intervalMs: config.anomalyIntervalMs,
           },
           corsAllowedOrigin: config.corsAllowedOrigin,

@@ -1,14 +1,29 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { Anomaly } from "../anomaly";
-import { CHAT_MESSAGE_MAX_CHARS, WebhookDelivery, anomalyLine, chatBody, type WebhookFormat } from "../webhookDelivery";
+import {
+  CHAT_MESSAGE_MAX_CHARS,
+  TELEGRAM_TEXT_MAX_CHARS,
+  WebhookDelivery,
+  anomalyLine,
+  describeFetchFailure,
+  telegramBody,
+  type WebhookFormat,
+} from "../webhookDelivery";
 
 /**
- * The webhook body formats (#47). Discord and Slack reject the generic body
- * with 400, and the raw `detail` must never reach a chat channel: some types
- * carry free text, and before #45 `repeated_denied` carried upstream error
- * text. No database needed.
+ * The webhook body formats (#47). Telegram's Bot API rejects the generic body,
+ * the raw `detail` must never reach a chat (some types carry free text, and
+ * before #45 `repeated_denied` carried upstream error text), and the Telegram
+ * URL holds the bot token, so it must never reach a log line. No database
+ * needed, and no real Telegram: every POST goes to a mock or to localhost.
  */
 
 const DETECTED_AT = "2026-10-06T12:34:56.000Z";
+const CHAT_ID = "-1001234567890";
+/** Shaped like a real Bot API URL; the token parts are what the log assertions look for. */
+const BOT_TOKEN = "987654321:AAH-SECRETtokenPART_xyz";
+const TELEGRAM_URL = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
 
 const anomaly = (type: string, detail: Record<string, unknown>): Anomaly => ({
   id: "42",
@@ -64,16 +79,47 @@ const poison = (detail: unknown, value: string): unknown => {
   return detail;
 };
 
+const telegramOk = (): Response => new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+const telegramError = (status: number, body: Record<string, unknown>, headers: Record<string, string> = {}): Response =>
+  new Response(JSON.stringify({ ok: false, ...body }), { status, headers: { "Content-Type": "application/json", ...headers } });
+
+/** Everything written to the console during a test, one string. */
+const spyConsole = (): (() => string) => {
+  const spies = (["log", "info", "warn", "error", "debug", "trace"] as const).map((m) => jest.spyOn(console, m).mockImplementation(() => undefined));
+  return () => spies.flatMap((s) => s.mock.calls.map((args: unknown[]) => args.map((a) => (a instanceof Error ? `${String(a)} ${String(a.stack)}` : String(a))).join(" "))).join("\n");
+};
+
+const delivery = (format: WebhookFormat | undefined, extra: { sleep?: (ms: number) => Promise<void>; url?: string } = {}): WebhookDelivery =>
+  new WebhookDelivery({
+    url: extra.url ?? (format === "telegram" ? TELEGRAM_URL : "http://hook.test/x"),
+    format,
+    telegramChatId: format === "telegram" ? CHAT_ID : undefined,
+    sleep: extra.sleep ?? (() => Promise.resolve()),
+  });
+
+const recordingSleep = (): { delays: number[]; sleep: (ms: number) => Promise<void> } => {
+  const delays: number[] = [];
+  return {
+    delays,
+    sleep: (ms) => {
+      delays.push(ms);
+      return Promise.resolve();
+    },
+  };
+};
+
 describe("webhook body formats", () => {
   let posted: { url: string; body: string }[];
-  let status: number;
+  let respond: () => Response;
+  let logs: () => string;
 
   beforeEach(() => {
     posted = [];
-    status = 204;
+    respond = () => new Response(null, { status: 204 });
+    logs = spyConsole();
     jest.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       posted.push({ url: input instanceof Request ? input.url : input.toString(), body: typeof init?.body === "string" ? init.body : "" });
-      return Promise.resolve(new Response(null, { status }));
+      return Promise.resolve(respond());
     });
   });
 
@@ -82,8 +128,8 @@ describe("webhook body formats", () => {
   });
 
   const deliver = async (format: WebhookFormat | undefined, a: Anomaly): Promise<Record<string, unknown>> => {
-    const delivery = new WebhookDelivery({ url: "http://hook.test/x", format, sleep: () => Promise.resolve() });
-    expect(await delivery.deliver(a)).toEqual({ delivered: true, rateLimited: false });
+    if (format === "telegram") respond = telegramOk;
+    expect(await delivery(format).deliver(a)).toEqual({ delivered: true, rateLimited: false });
     expect(posted).toHaveLength(1);
     return JSON.parse(posted[0].body) as Record<string, unknown>;
   };
@@ -97,17 +143,15 @@ describe("webhook body formats", () => {
     );
   });
 
-  it("sends Discord {content} with mentions disabled, and nothing else", async () => {
-    const body = await deliver("discord", anomaly("ship_idle", SAMPLES.ship_idle));
+  it("posts Telegram sendMessage {chat_id, text, disable_web_page_preview} to the configured URL, with no parse_mode", async () => {
+    const body = await deliver("telegram", anomaly("ship_idle", SAMPLES.ship_idle));
+    expect(posted[0].url).toBe(TELEGRAM_URL);
     expect(body).toEqual({
-      content: `automation-service anomaly \`ship_idle\` at ${DETECTED_AT}: ${EXPECTED_SUMMARIES.ship_idle}`,
-      allowed_mentions: { parse: [] },
+      chat_id: CHAT_ID,
+      text: `automation-service anomaly \`ship_idle\` at ${DETECTED_AT}: ${EXPECTED_SUMMARIES.ship_idle}`,
+      disable_web_page_preview: true,
     });
-  });
-
-  it("sends Slack {text}, and nothing else", async () => {
-    const body = await deliver("slack", anomaly("error_rate", SAMPLES.error_rate));
-    expect(body).toEqual({ text: `automation-service anomaly \`error_rate\` at ${DETECTED_AT}: ${EXPECTED_SUMMARIES.error_rate}` });
+    expect(body).not.toHaveProperty("parse_mode");
   });
 
   it.each(Object.keys(SAMPLES))("summarizes %s from its safe fields", (type) => {
@@ -136,38 +180,96 @@ describe("webhook body formats", () => {
 
   const LEAK = "https://internal.example:8443/ships/VMPT-1?token=abc";
 
-  it.each(
-    (["discord", "slack"] as const).flatMap((format) => [...Object.keys(SAMPLES), "brand_new_check"].map((type) => [format, type] as const))
-  )("%s: a URL in any string field of %s's detail never reaches the body", async (format, type) => {
+  it.each([...Object.keys(SAMPLES), "brand_new_check"])("a URL in any string field of %s's detail never reaches the Telegram text", async (type) => {
     const detail = poison(SAMPLES[type] ?? { message: "x" }, LEAK) as Record<string, unknown>;
     const a = { ...anomaly(type, detail), dedupeKey: LEAK };
-    const raw = JSON.stringify(await deliver(format, a));
+    const body = await deliver("telegram", a);
+    const raw = JSON.stringify(body);
     expect(raw).not.toContain("internal.example");
     expect(raw).not.toContain("://");
     expect(raw).not.toContain("token=abc");
-    expect(raw).toContain(`\`${type}\``);
+    expect(String(body.text)).toContain(`\`${type}\``);
   });
 
-  it("keeps repeated_denied's request line out of the chat body, even in its post-#45 shape", async () => {
-    const raw = JSON.stringify(await deliver("discord", anomaly("repeated_denied", SAMPLES.repeated_denied)));
+  it("keeps repeated_denied's request line out of the Telegram text, even in its post-#45 shape", async () => {
+    const raw = JSON.stringify(await deliver("telegram", anomaly("repeated_denied", SAMPLES.repeated_denied)));
     expect(raw).not.toContain("/ships/");
     expect(raw).not.toContain("4214");
   });
 
   it("drops the free-text message and caller identity from the resume alert", async () => {
-    const raw = JSON.stringify(await deliver("slack", anomaly("autopilot_resumed_in_shadow", SAMPLES.autopilot_resumed_in_shadow)));
+    const raw = JSON.stringify(await deliver("telegram", anomaly("autopilot_resumed_in_shadow", SAMPLES.autopilot_resumed_in_shadow)));
     expect(raw).not.toContain("user_2abc");
     expect(raw).not.toContain("after restart");
   });
 
-  it("cannot be made to ping by a field value", async () => {
-    const detail = { ...SAMPLES.consecutive_failures, shipSymbol: "@everyone" };
-    expect(JSON.stringify(await deliver("discord", anomaly("consecutive_failures", detail)))).not.toContain("@everyone");
+  it.each([
+    ["a mention", "@everyone"],
+    ["a username mention", "@owner_account"],
+    ["a bot command", "/start"],
+    ["a hashtag", "#alert"],
+    ["HTML", "<b>x</b>"],
+    ["Markdown", "*bold*"],
+    ["a bare domain", "evil.example"],
+    ["a backtick break-out", "x` @everyone `y"],
+  ])("cannot be made to carry %s by a field value", async (_what, value) => {
+    const detail = { ...SAMPLES.consecutive_failures, shipSymbol: value };
+    const body = await deliver("telegram", anomaly("consecutive_failures", detail));
+    expect(String(body.text)).not.toContain(value);
+    expect(String(body.text)).not.toMatch(/[@#<>*/]/);
   });
 
-  it("cannot be made to ping a Slack channel by a field value", async () => {
-    const detail = { ...SAMPLES.market_stale, market: "<!channel>" };
-    expect(JSON.stringify(await deliver("slack", anomaly("market_stale", detail)))).not.toContain("<!channel>");
+  it("a 2xx answer without \"ok\": true is not a delivery", async () => {
+    respond = () => new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: chat not found" }), { status: 200 });
+    expect(await delivery("telegram").deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: false, rateLimited: false });
+    expect(posted).toHaveLength(3);
+  });
+
+  it("a 2xx answer that is not JSON is not a delivery", async () => {
+    respond = () => new Response("<html>proxy</html>", { status: 200 });
+    expect(await delivery("telegram").deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: false, rateLimited: false });
+  });
+
+  it("Telegram 400 \"chat not found\": not delivered, retried with backoff, logged as status and error_code only", async () => {
+    // A description that echoes input, as some Bot API errors do.
+    respond = () => telegramError(400, { error_code: 400, description: "Bad Request: chat not found ECHOED-INPUT" });
+    const { delays, sleep } = recordingSleep();
+    expect(await delivery("telegram", { sleep }).deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: false, rateLimited: false });
+    expect(posted).toHaveLength(3);
+    expect(delays).toEqual([200, 400]);
+    const out = logs();
+    expect(out).toContain("anomaly webhook delivery failed: anomaly 42, attempt 1/3, HTTP 400 error_code 400");
+    expect(out).toContain("attempt 3/3, HTTP 400 error_code 400");
+    expect(out).not.toContain("chat not found");
+    expect(out).not.toContain("ECHOED-INPUT");
+    expect(out).not.toContain(BOT_TOKEN.split(":")[1]);
+  });
+
+  it.each([
+    ["retry_after 2", { parameters: { retry_after: 2 } }, {}, 2000],
+    ["retry_after 60, capped", { parameters: { retry_after: 60 } }, {}, 5000],
+    ["retry_after over the header", { parameters: { retry_after: 1 } }, { "Retry-After": "4" }, 1000],
+    ["Retry-After header only", {}, { "Retry-After": "3" }, 3000],
+    ["neither", {}, {}, 200],
+    ["a non-numeric retry_after", { parameters: { retry_after: "soon" } }, {}, 200],
+  ])("Telegram 429 with %s waits accordingly and reports rate limiting", async (_what, extra, headers, expected) => {
+    let first = true;
+    respond = () => {
+      if (!first) return telegramOk();
+      first = false;
+      return telegramError(429, { error_code: 429, description: "Too Many Requests: retry after N", ...extra }, headers);
+    };
+    const { delays, sleep } = recordingSleep();
+    expect(await delivery("telegram", { sleep }).deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: true, rateLimited: true });
+    expect(delays).toEqual([expected]);
+    expect(logs()).toContain("HTTP 429 error_code 429");
+  });
+
+  it("an error_code 429 inside a 2xx is rate limiting too", async () => {
+    respond = () => telegramError(200, { error_code: 429, parameters: { retry_after: 1 } });
+    const { delays, sleep } = recordingSleep();
+    expect(await delivery("telegram", { sleep }).deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: false, rateLimited: true });
+    expect(delays).toEqual([1000, 1000]);
   });
 
   it.each([
@@ -176,37 +278,107 @@ describe("webhook body formats", () => {
     ["60", 5000],
     ["soon", 200],
     [null, 200],
-  ])("on 429 waits Retry-After %p (capped at 5s), else the usual backoff", async (retryAfter, expected) => {
-    (globalThis.fetch as jest.Mock).mockImplementationOnce(() =>
-      Promise.resolve(new Response(null, { status: 429, headers: retryAfter === null ? {} : { "Retry-After": retryAfter } }))
-    );
-    const delays: number[] = [];
-    const delivery = new WebhookDelivery({
-      url: "http://hook.test/x",
-      format: "discord",
-      sleep: (ms) => {
-        delays.push(ms);
-        return Promise.resolve();
-      },
-    });
-    expect(await delivery.deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: true, rateLimited: true });
+  ])("generic: on 429 waits Retry-After %p (capped at 5s), else the usual backoff", async (retryAfter, expected) => {
+    let first = true;
+    respond = () => {
+      if (!first) return new Response(null, { status: 204 });
+      first = false;
+      return new Response(null, { status: 429, headers: retryAfter === null ? {} : { "Retry-After": retryAfter } });
+    };
+    const { delays, sleep } = recordingSleep();
+    expect(await delivery(undefined, { sleep }).deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: true, rateLimited: true });
     expect(delays).toEqual([expected]);
   });
+});
 
-  it("retries a chat body with backoff like the generic one", async () => {
-    status = 400;
-    const delays: number[] = [];
-    const delivery = new WebhookDelivery({
-      url: "http://hook.test/x",
-      format: "discord",
-      sleep: (ms) => {
-        delays.push(ms);
-        return Promise.resolve();
-      },
-    });
-    expect(await delivery.deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: false, rateLimited: false });
-    expect(posted).toHaveLength(3);
-    expect(delays).toEqual([200, 400]);
+describe("the Telegram URL never reaches a log line", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const SECRET_PARTS = [BOT_TOKEN, BOT_TOKEN.split(":")[0], BOT_TOKEN.split(":")[1], "api.telegram.org", "/bot", "sendMessage"];
+
+  const expectNoSecret = (out: string) => {
+    for (const part of SECRET_PARTS) expect(out).not.toContain(part);
+  };
+
+  it("on connection refused (real fetch, a closed localhost port)", async () => {
+    const server = createServer();
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const { port } = server.address() as AddressInfo;
+    await new Promise<void>((r) => server.close(() => { r(); }));
+    const logs = spyConsole();
+
+    const url = `http://127.0.0.1:${String(port)}/bot${BOT_TOKEN}/sendMessage`;
+    const result = await delivery("telegram", { url }).deliver(anomaly("ship_idle", SAMPLES.ship_idle));
+
+    expect(result).toEqual({ delivered: false, rateLimited: false });
+    const out = logs();
+    expect(out).toContain("attempt 1/3, TypeError ECONNREFUSED");
+    expectNoSecret(out);
+  });
+
+  it.each([
+    // undici puts the whole URL in these errors' messages; neither reaches the network.
+    ["an unparseable URL", `https://[api.telegram.org/bot${BOT_TOKEN}/sendMessage`],
+    ["a URL with credentials", `https://user:pw@api.telegram.org/bot${BOT_TOKEN}/sendMessage`],
+  ])("on %s (real fetch, whose error message quotes the URL)", async (_what, url) => {
+    // Proof the hazard is real: the raw error does carry the token.
+    const raw = await fetch(url, { method: "POST" }).then(
+      () => "",
+      (err: unknown) => String(err)
+    );
+    expect(raw).toContain(BOT_TOKEN);
+
+    const logs = spyConsole();
+    expect(await delivery("telegram", { url }).deliver(anomaly("ship_idle", SAMPLES.ship_idle))).toEqual({ delivered: false, rateLimited: false });
+    const out = logs();
+    expect(out).toContain("attempt 3/3, TypeError");
+    expectNoSecret(out);
+  });
+
+  it.each([
+    ["a DNS failure", Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.telegram.org"), { code: "ENOTFOUND", hostname: "api.telegram.org" }) }), "TypeError ENOTFOUND"],
+    ["a timeout", new DOMException("The operation was aborted due to timeout", "TimeoutError"), "TimeoutError"],
+    ["an error naming the URL in its code", Object.assign(new Error(TELEGRAM_URL), { code: TELEGRAM_URL }), "Error"],
+    ["an error whose name is the URL", Object.assign(new Error("x"), { name: TELEGRAM_URL }), "Error"],
+    ["a thrown string", TELEGRAM_URL, "Error"],
+  ])("on %s (mocked fetch)", async (_what, error, expected) => {
+    jest.spyOn(globalThis, "fetch").mockRejectedValue(error);
+    const logs = spyConsole();
+    await delivery("telegram").deliver(anomaly("ship_idle", SAMPLES.ship_idle));
+    const out = logs();
+    expect(out).toContain(`attempt 1/3, ${expected}`);
+    expectNoSecret(out);
+  });
+
+  it("describeFetchFailure keeps only an identifier-shaped class name and code", () => {
+    const err = Object.assign(new TypeError(`Failed to parse URL from ${TELEGRAM_URL}`), { cause: { code: "ERR_INVALID_URL", input: TELEGRAM_URL } });
+    expect(describeFetchFailure(err)).toBe("TypeError ERR_INVALID_URL");
+  });
+});
+
+describe("telegram configuration", () => {
+  it.each([undefined, "", "12a", "@abc", "-", "@has-dash", "123 "])("refuses telegram with chat id %p", (telegramChatId) => {
+    expect(() => new WebhookDelivery({ url: TELEGRAM_URL, format: "telegram", telegramChatId })).toThrow(/telegram format needs a valid telegramChatId/);
+  });
+
+  it.each(["123456789", "-1001234567890", "@my_channel"])("accepts chat id %p", (telegramChatId) => {
+    expect(() => new WebhookDelivery({ url: TELEGRAM_URL, format: "telegram", telegramChatId })).not.toThrow();
+  });
+
+  it("refuses a chat id without the telegram format", () => {
+    expect(() => new WebhookDelivery({ url: "http://hook.test/x", telegramChatId: CHAT_ID })).toThrow(/only meaningful with the telegram format/);
+  });
+
+  it("names neither the URL nor the token when it refuses", () => {
+    try {
+      new WebhookDelivery({ url: TELEGRAM_URL, format: "telegram" });
+    } catch (err) {
+      expect(String(err)).not.toContain(BOT_TOKEN.split(":")[1]);
+      return;
+    }
+    throw new Error("did not refuse");
   });
 });
 
@@ -224,11 +396,15 @@ describe("stopping a delivery round", () => {
     jest.spyOn(globalThis, "fetch").mockImplementation(() => {
       posts++;
       posted();
-      return Promise.resolve(new Response(null, { status: 429, headers: { "Retry-After": "5" } }));
+      return Promise.resolve(telegramError(429, { error_code: 429, parameters: { retry_after: 5 } }));
     });
+    spyConsole();
     const controller = new AbortController();
     // Real sleep: the point is that it wakes.
-    const round = new WebhookDelivery({ url: "http://hook.test/x", format: "slack" }).deliver(anomaly("ship_idle", SAMPLES.ship_idle), controller.signal);
+    const round = new WebhookDelivery({ url: TELEGRAM_URL, format: "telegram", telegramChatId: CHAT_ID }).deliver(
+      anomaly("ship_idle", SAMPLES.ship_idle),
+      controller.signal
+    );
     await firstPost;
     await new Promise((r) => setTimeout(r, 50));
     const started = Date.now();
@@ -239,7 +415,7 @@ describe("stopping a delivery round", () => {
     expect(posts).toBe(1);
   });
 
-  it("cancels an in-flight POST when the signal aborts", async () => {
+  it("cancels an in-flight POST when the signal aborts, and logs no failure for the stop", async () => {
     let posted!: () => void;
     const inFlight = new Promise<void>((r) => {
       posted = r;
@@ -253,8 +429,12 @@ describe("stopping a delivery round", () => {
         });
       });
     });
+    const logs = spyConsole();
     const controller = new AbortController();
-    const round = new WebhookDelivery({ url: "http://hook.test/x", format: "discord" }).deliver(anomaly("ship_idle", SAMPLES.ship_idle), controller.signal);
+    const round = new WebhookDelivery({ url: TELEGRAM_URL, format: "telegram", telegramChatId: CHAT_ID }).deliver(
+      anomaly("ship_idle", SAMPLES.ship_idle),
+      controller.signal
+    );
     await inFlight;
     const started = Date.now();
     controller.abort();
@@ -262,6 +442,7 @@ describe("stopping a delivery round", () => {
     expect(await round).toEqual({ delivered: false, rateLimited: false });
     expect(Date.now() - started).toBeLessThan(1000);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(logs()).toBe("");
   });
 
   it("makes no attempt on a signal that is already aborted", async () => {
@@ -275,16 +456,16 @@ describe("stopping a delivery round", () => {
 });
 
 describe("chat message length cap", () => {
-  it.each(["discord", "slack"] as const)("%s: caps a long message at 2000 characters", (format) => {
-    const body = chatBody(format, "x".repeat(CHAT_MESSAGE_MAX_CHARS + 1000));
-    const text = String(format === "discord" ? body.content : body.text);
+  it("keeps the summary's 2000-character cap, under Telegram's 4096", () => {
     expect(CHAT_MESSAGE_MAX_CHARS).toBe(2000);
+    expect(TELEGRAM_TEXT_MAX_CHARS).toBe(4096);
+    const text = String(telegramBody(CHAT_ID, "x".repeat(TELEGRAM_TEXT_MAX_CHARS + 1000)).text);
     expect(text).toHaveLength(2000);
     expect(text.endsWith("...")).toBe(true);
   });
 
   it("leaves a message of exactly the limit untouched", () => {
     const exact = "y".repeat(CHAT_MESSAGE_MAX_CHARS);
-    expect(chatBody("discord", exact).content).toBe(exact);
+    expect(telegramBody(CHAT_ID, exact).text).toBe(exact);
   });
 });
