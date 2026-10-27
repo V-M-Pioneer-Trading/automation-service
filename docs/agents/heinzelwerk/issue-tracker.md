@@ -18,7 +18,7 @@ Always write a ticket as `V-M-Pioneer-Trading/meta#<n>`, in commits, PR bodies a
 
 GitHub shares one number space across issues and PRs, so a bare number may be either: resolve with `gh pr view <n> --repo <repo>` and fall back to `gh issue view <n> --repo <repo>`.
 
-Older issues still open in a service repo (e.g. `V-M-Pioneer-Trading/automation-service#47`) are read where they are; new tickets go to meta.
+Older issues still open in a service repo (e.g. `V-M-Pioneer-Trading/automation-service#51`) are read where they are; new tickets go to meta.
 
 ## When a skill says "publish to the issue tracker"
 
