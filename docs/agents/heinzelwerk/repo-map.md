@@ -20,5 +20,17 @@ The deterministic autopilot. Scores mining, contracts and scouting in credits pe
 - Calls: agent-service, fleet-service, navigation-service (M2M bearer, 15 s timeout), auth-service (M2M token, introspection), ai-service webhook.
 - Called by: command-interface, ai-service, spacetraders-mcp-server.
 - Port 3003. Test DB: Postgres 16 on :5433 (`jest.env.js`); tests call `forceFleetTick` / `forceAnomalyTick`, never sleep.
-- `src/__tests__/*.test.ts.bak` files are stale leftovers (gitignored `*.bak`).
 - CI `container.yml`: `test` (Postgres service, lint, test), `docker` (main: SSM redeploy).
+
+## How-to
+
+- Re-arm live after an `autopilot_resumed_in_shadow` anomaly: `POST /autopilot/arm` with `{"mode":"live"}`, needs `fleet:control`. A restart never does it.
+- Telegram anomaly pages: `ANOMALY_WEBHOOK_URL=https://api.telegram.org/bot<token>/sendMessage`, `ANOMALY_WEBHOOK_FORMAT=telegram`, `ANOMALY_TELEGRAM_CHAT_ID`. The URL holds the bot token (SSM only). Production setup: V-M-Pioneer-Trading/automation-service#51.
+
+## Reference docs
+
+- `README.md` "Configuration": read when deploying or adding an env var.
+- `README.md` "Knobs": read when changing a knob (names, classes, defaults, bounds).
+- `README.md` "API", "Authentication": read when touching routes or their scopes.
+- `README.md` "Watching for trouble", "Replan": read when touching anomaly checks or replan triggers.
+- `README.md` "Replaying decisions": read before turning a knob in production.

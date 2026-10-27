@@ -905,8 +905,8 @@ Everything the implementation deliberately doesn't do yet, in one place.
   which at least stops them being billed for a survey and an extraction they
   never perform. Nothing yet calibrates their real dock-and-transact time.
 - **The credits-flat half of `earnings_stalled`** reads credit snapshots that
-  are only logged while armed and live, so an anomaly-only deployment with no
-  `MINING_SHIP_SYMBOL` never gets them. Its `no_earnings` half is unaffected:
+  are only logged while armed and live, so a deployment that has never been armed
+  live never gets them. Its `no_earnings` half is unaffected:
   it reads sell events, which are logged whenever selling happens.
 - **A raised `credit.reserveFloor` default only reaches new deployments.** A
   knob's tuned value survives a redeploy by design, and an existing row sitting
