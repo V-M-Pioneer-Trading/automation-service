@@ -14,7 +14,7 @@ How heinzelwerk agents work in this repo. Mode rules (single repo vs workspace) 
 - **Risk areas** (validator reviews diffs touching these on Opus):
   - Money, all without a human: `src/contractTask.ts` (purchase, deliver, fulfill), `src/miningTask.ts` (sell), `src/taskFsm.ts` (refuel), `src/contractDiscovery.ts` (accept, gated by knob `contract.minProfitThreshold`), `src/gameClients.ts` (every upstream call)
   - `src/scheduler.ts`, `src/autopilotLifecycle.ts`, `src/autopilotState.ts`, `src/dispatchLock.ts`: arm/shadow/pause; a restart always comes back in shadow
-  - `src/planner.ts`, `src/scoring.ts`, `src/knobs.ts`: `credit.reserveFloor` is class `policy`, so ai-service's machine token may change it
+  - `src/planner.ts`, `src/scoring.ts`, `src/knobs.ts`: `credit.reserveFloor` is class `policy`, so ai-service's M2M token may change it
   - `src/server.ts` route declarations: 9 `publicRead` routes; `GET /autopilot/events` serves caller-supplied `POST /events` detail publicly
   - `src/db.ts`: `migrate()` runs on every boot against production Postgres
   - `.github/workflows/container.yml`: a merge to main deploys to production; this stack has no `imageTag`, so no sha rollback (`../V-M-Pioneer-Trading_infrastructure/README.md:353-356`)

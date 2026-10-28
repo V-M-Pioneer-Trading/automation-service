@@ -209,6 +209,8 @@ budget is spent either way. The loop keeps ticking and logging
 the symbol. Alerting on, or self-pausing after, a sustained `denied` from
 `getShip` is a follow-up and not part of this change.
 
+Correction (2026-10-29): `repeated_denied` now alerts on a sustained `denied` from `getShip` (tick failures reach `noteFailure`; 5 identical denied trip it); self-pause is still not built, see src/scheduler.ts:152, src/anomaly.ts:342-348.
+
 The production message is pinned in `upstreamFailure.test.ts`, at the
 classifier and end to end through a real `getShip` against a stub
 agent-service; `gameClientsAuth.test.ts` drives all three refusals through
@@ -794,6 +796,8 @@ spoof a lifecycle or planner event.
 Six deterministic health checks on a fixed interval, every threshold a bounded
 knob. Anomalies persist before webhook delivery is attempted, with retries and
 dedupe. (Now five — see the merge above.)
+
+Correction (2026-10-29): the code now runs six checks, `repeated_denied` added in #40, see src/anomaly.ts:175-183.
 
 ## Metrics rollups ([meta#14](https://github.com/V-M-Pioneer-Trading/meta/issues/14))
 

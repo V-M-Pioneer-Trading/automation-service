@@ -408,6 +408,8 @@ before the task runs, and that failure is only logged (`mining_tick_error`,
 `failureKind=denied`) every tick until an operator fixes the symbol. Nothing
 alerts on or pauses for a sustained `denied` yet.
 
+Correction (2026-10-29): alerting half is stale: a sustained `denied` trips `repeated_denied` (5 identical, `REPEATED_DENIED_THRESHOLD`) and the anomaly checker raises it; self-pause is still not built, see src/scheduler.ts:71,152, src/anomaly.ts:342-348.
+
 100× is 300 ticks at the default retry limit: at least 25 minutes, nearer 75
 against a service that hangs rather than refusing (a tick that waits out the
 15s call timeout is still one tick), and hours if the limit is raised. Any of
@@ -908,6 +910,9 @@ Everything the implementation deliberately doesn't do yet, in one place.
   are only logged while armed and live, so an anomaly-only deployment with no
   `MINING_SHIP_SYMBOL` never gets them. Its `no_earnings` half is unaffected:
   it reads sell events, which are logged whenever selling happens.
+
+Correction (2026-10-29): this case cannot occur, `MINING_SHIP_SYMBOL` is required at boot (`requireEnv` throws), see src/config.ts:185.
+
 - **A raised `credit.reserveFloor` default only reaches new deployments.** A
   knob's tuned value survives a redeploy by design, and an existing row sitting
   at the old default of `0` is indistinguishable from one an operator set to
