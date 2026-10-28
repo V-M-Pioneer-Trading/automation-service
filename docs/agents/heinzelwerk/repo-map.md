@@ -41,3 +41,8 @@ Facts verified against origin/main bf87ce2 on 2026-10-27, each with `path:line`.
 - Single configured ship MINING_SHIP_SYMBOL (src/config.ts:16-19, 185). CLERK_M2M_SECRET_KEY / DEV_M2M_SIGNING_KEY_FILE ignored, only logged (src/config.ts:49, 74-77, 85-88).
 - clerk-client v2.0.1 and eslint-config v1.1.0 are release tarballs (package.json:19, 31).
 11. Docs: README.md (925 lines), CLAUDE.md (684 lines: commands, module map, invariants), CHANGELOG.md (849 lines); no docs/ dir. README references meta's docs/design/upstream-errors.md and auth-design.md decision 21 (README.md:399, 727).
+
+## Reference docs
+
+- `README.md` "Watching for trouble": read before changing an anomaly threshold, the webhook path, or the Telegram format.
+- V-M-Pioneer-Trading/meta `docs/algorithms.md`: read before changing scoring or the planner.
