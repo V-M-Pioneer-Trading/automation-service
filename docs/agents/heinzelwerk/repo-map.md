@@ -94,3 +94,9 @@ Verified against bf87ce2 2026-10-29.
 - Webhook URL holds the bot token: never log it or `String(err)`. `src/webhookDelivery.ts:284-286`
 - Shutdown budget 8s; order lifecycle, schedulers, server, pool last. `src/server.ts:51`, `CLAUDE.md:262-269`
 - `CLAUDE.md` is long (684 lines): cite its headings, prefer code. (verified 2026-10-29 @ bf87ce2: wc -l on origin/main CLAUDE.md)
+
+## Reference docs
+- `./README.md` "Knobs": read when tuning a knob or changing a default or bound (defaults live in src/knobs.ts).
+- `./README.md` "The work loops": read when changing mining, contract or scout FSM phases.
+- `./README.md` "Watching for trouble": read when adding or changing an anomaly check.
+- `./README.md` "Replaying decisions": read when re-scoring past decisions with `npm run replay`.
