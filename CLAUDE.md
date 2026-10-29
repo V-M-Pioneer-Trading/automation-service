@@ -555,6 +555,8 @@ any `detail.actor` in the body.
   lines as no credential, 1.1.3 the first to refuse a repeated key in the center's answer (a 503, one center call). `introspectionWiring.test.ts` pins that with real
   separate lines on a raw socket; a downgrade to 1.1.1 turns three of them red.
 
+  Correction (2026-10-29): the pin is 2.0.1, not 1.1.3, see package.json:19.
+
 ## Database
 
 - `migrate()` is idempotent DDL run on every boot: `CREATE TABLE IF NOT
@@ -682,3 +684,13 @@ any `detail.actor` in the body.
 - Update README (human-facing) and this file (implementation) together with
   the code; add a CHANGELOG entry for anything a reviewer of a later PR would
   want explained.
+
+## Agent skills (heinzelwerk)
+
+- **Precedence**: for heinzelwerk team work, these pointers override any other agent-skills block in this file.
+- **Issue tracker**: GitHub issues, one tracker for the workspace in V-M-Pioneer-Trading/meta. See `docs/agents/heinzelwerk/issue-tracker.md` before creating, reading, or labelling issues.
+- **Triage labels**: the five canonical labels, defined in meta only. See `docs/agents/heinzelwerk/triage-labels.md` before applying any label.
+- **Domain docs**: multi-context workspace, one context per repo; map in `../meta/GLOSSARY-MAP.md`. Read `docs/agents/heinzelwerk/domain.md` before exploring code or naming anything.
+- **Team rules**: read `docs/agents/heinzelwerk/team.md` before any team task.
+- **Repo map**: see `docs/agents/heinzelwerk/repo-map.md` when locating code.
+- **Learnings**: read `../meta/docs/agents/heinzelwerk/learnings.md` before starting any task.

@@ -714,6 +714,8 @@ Invalid lifecycle transitions return `409` naming the current status.
 | `AUTH_M2M_TOKEN_URL` | auth-service's **full** machine-token endpoint, `/auth/v1/m2m-token` included, used verbatim; e.g. `http://localhost:3005/auth/v1/m2m-token` (**required**) |
 | `AUTH_M2M_CALLER_SECRET` | This service's own caller secret, sent to it as `X-M2M-Caller-Secret`. It alone identifies the caller, so it is never the introspection secret (**required**) |
 
+Correction (2026-10-29): the `NAVIGATION_SERVICE_URL`, `AGENT_SERVICE_URL` and `FLEET_SERVICE_URL` examples are stale; the base URLs are versioned (`/api/navigation/v1`, `/api/agent/v1`, `/api/fleet/v1`) and prod uses `http://localhost:<port>` on the host network, so the old paths 404, see V-M-Pioneer-Trading/infrastructure automation-service/main.tf:357
+
 `CLERK_M2M_SECRET_KEY` and `DEV_M2M_SIGNING_KEY_FILE` are no longer read. Setting either logs one line saying so and changes nothing else, so a deployment can keep the old variable until it is cleaned up.
 
 Which asteroid field to mine is **not** configured; the planner chooses it.
