@@ -12,8 +12,8 @@ How to consume this repo's domain documentation when exploring the codebase.
 
 Numbered decisions that live inside other docs, not in docs/adr/. Read them like ADRs; they are not moved.
 
-- `../meta/docs/design/auth-design.md` "## Decisions" 1–23 (heading :175)
-- `../meta/docs/design/autopilot-design.md` "## Decisions" 1–13 (heading :39)
+- `../meta/docs/design/auth-design.md` "## Decisions" 1–23 (heading :177)
+- `../meta/docs/design/autopilot-design.md` "## Decisions" 1–13 (heading :41)
 
 Missing files: proceed silently. They are created lazily by `/heinzelwerk:shape` and tech-lead's docs PR; in team runs, leave candidates in your done note (`term:` / `adr:` lines).
 

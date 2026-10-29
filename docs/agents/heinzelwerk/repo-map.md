@@ -38,7 +38,7 @@ Verified against bf87ce2 2026-10-29.
 - All calls via `callJson`. `src/gameClients.ts:296`
 - sell (agent-service) `src/gameClients.ts:410`, called `src/miningTask.ts:200`
 - purchase (agent-service) `src/gameClients.ts:422`, called `src/contractTask.ts:95`
-- refuel (fleet-service) `src/gameClients.ts:419`, called `src/taskFsm.ts:186` via `refuelIfNeeded` (mining, contract `src/contractTask.ts:80`, scout `src/scoutTask.ts:4`)
+- refuel (fleet-service) `src/gameClients.ts:419`, called `src/taskFsm.ts:186` via `refuelIfNeeded` (mining, contract `src/contractTask.ts:80`, scout `src/scoutTask.ts:35`)
 - acceptContract `src/gameClients.ts:373` called `src/contractDiscovery.ts:62`; deliverContract `src/gameClients.ts:428` called `src/contractTask.ts:121`; fulfillContract `src/gameClients.ts:379` called `src/contractTask.ts:140`; navigate (fuel) `src/gameClients.ts:396` called `src/taskFsm.ts:139`
 - Fleet tick runs only when armed or paused. `src/scheduler.ts:283`
 - Shadow scores and logs, never dispatches. `src/scheduler.ts:302-305`
@@ -67,7 +67,7 @@ Verified against bf87ce2 2026-10-29.
 - Local test DB: docker `postgres:16-alpine` on 5433. `CLAUDE.md:11`; `jest.env.js:1-2` defaults to 5433; CI uses 5432 `.github/workflows/container.yml:79`
 - Jest `maxWorkers: 1`. `jest.config.js:10`
 - Required env: `AUTH_M2M_TOKEN_URL`, `AUTH_M2M_CALLER_SECRET`, `AUTH_INTROSPECTION_URL`, `AUTH_INTROSPECTION_SECRET`, `DATABASE_URL`, `NAVIGATION_SERVICE_URL`, `AGENT_SERVICE_URL`, `FLEET_SERVICE_URL`, `MINING_SHIP_SYMBOL`. `src/config.ts:56-62,177-185,194-197`
-- Optional: `PORT`, `CORS_ALLOWED_ORIGIN`, `ANOMALY_WEBHOOK_URL`/`ANOMALY_WEBHOOK_FORMAT`, `ANOMALY_TELEGRAM_CHAT_ID`, intervals `SCHEDULER_INTERVAL_MS` 5000, `REPLAN_INTERVAL_MS` 300000, `ANOMALY_INTERVAL_MS` 60000. `src/config.ts:186-192`
+- Optional: `PORT`, `CORS_ALLOWED_ORIGIN`, `ANOMALY_WEBHOOK_URL`/`ANOMALY_WEBHOOK_FORMAT`, `ANOMALY_TELEGRAM_CHAT_ID`, intervals `SCHEDULER_INTERVAL_MS` 5000, `REPLAN_INTERVAL_MS` 300000, `ANOMALY_INTERVAL_MS` 60000, `METRICS_ROLLUP_INTERVAL_MS` 60000 (`src/config.ts:188`). `src/config.ts:186-192`
 - No git-ignored env file needed. `./.gitignore:1`
 
 ## CI and deploy
