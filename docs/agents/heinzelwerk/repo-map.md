@@ -32,7 +32,7 @@ Verified against bf87ce2 2026-10-29.
 - Under `/api/automation/v1`: `GET /autopilot/status` :383, `/autopilot/events` :423, `/autopilot/ships/:shipSymbol` :433, `/planner/knobs` :486, `/planner/model` :566, `/metrics/context` :589, `/anomalies/digest` :602 (all `src/server.ts`)
 - Prod boot wires mining, metrics, anomaly: all live. `src/server.ts:737-753`
 - Unknown paths: JSON 404 via `notFound()`. `src/server.ts:625-629`
-- Public through CloudFront `/api/automation/v1/*` and `/api/automation/health`. `C:/Users/max/work/infrastructure/projects/spacetraders/main.tf:147-148`
+- Public through CloudFront `/api/automation/v1/*` and `/api/automation/health`. `mradomsky/infrastructure projects/spacetraders/main.tf`, lines 147-148 (verified 2026-10-29 @ 9fae0a1: `gh api repos/mradomsky/infrastructure/contents/projects/spacetraders/main.tf` → lines 147-148 are those two paths)
 
 ## Money paths
 - All calls via `callJson`. `src/gameClients.ts:296`
@@ -43,7 +43,7 @@ Verified against bf87ce2 2026-10-29.
 - Fleet tick runs only when armed or paused. `src/scheduler.ts:283`
 - Shadow scores and logs, never dispatches. `src/scheduler.ts:302-305`
 - Paused starts nothing new. `src/scheduler.ts:324`
-- Guard: knob `credit.reserveFloor` `src/knobs.ts:166`, checked at target choice `src/planner.ts:201,276,333`, `src/scoring.ts:126`
+- Guard: knob `credit.reserveFloor` `src/knobs.ts:166`, checked at target choice `src/planner.ts:235,276,333`, `src/scoring.ts:126`
 - Guard: advisory lock, one process drives a ship `src/dispatchLock.ts:4`, `src/scheduler.ts:138`
 - Guard: restart restores live as shadow. `src/autopilotLifecycle.ts:85-94`
 - External webhook: anomaly POST (generic JSON or Telegram `sendMessage`, bot token in URL path). `src/webhookDelivery.ts:51,348`; env validated `src/config.ts:151-172`
@@ -79,21 +79,20 @@ Verified against bf87ce2 2026-10-29.
 - No audit step in CI. `.github/workflows/container.yml:45-79`
 
 ## Patterns
-- `createApp` takes an options object; scheduler deps object; background work on `IntervalLoop`. `CLAUDE.md` "## Conventions" (CLAUDE.md:664)
-- New task kind checklist. `CLAUDE.md:672-681`
+- `createApp` takes an options object; scheduler deps object; background work on `IntervalLoop`. `CLAUDE.md` "## Conventions" (CLAUDE.md:666)
+- New task kind checklist. `CLAUDE.md:674-683`
 - New table goes into `STATE_TABLES`. `src/testSupport/resetDatabase.ts:16`
 - Express 4: wrap async handlers in `asyncHandler`. `src/server.ts:131`
-- Tests force ticks via `app.locals.force*Tick`, never sleep. `src/server.ts:682-698`, `CLAUDE.md` "## Testing" (:610)
+- Tests force ticks via `app.locals.force*Tick`, never sleep. `src/server.ts:682-698`, `CLAUDE.md` "## Testing" (:612)
 
 ## Traps
 - `CLAUDE.md:554` says clerk-client pin is 1.1.3; `package.json:19` pins 2.0.1. CLAUDE.md is stale.
 - After every deploy nothing spends until the operator re-arms live. `src/autopilotLifecycle.ts:85-94`
-- Stub 500 means unavailable (long retry patience); use 400 `{error:{message}}` for refusals. `CLAUDE.md:658-662`
+- Stub 500 means unavailable (long retry patience); use 400 `{error:{message}}` for refusals. `CLAUDE.md:660-664`
 - Metrics and anomaly loops are not stopped by abort; tests call `stopBackgroundSchedulers`. `src/server.ts:664-673`
 - Operator `public_metadata`: add `events:write planner:advise`, do not replace. `CLAUDE.md:543`
 - Webhook URL holds the bot token: never log it or `String(err)`. `src/webhookDelivery.ts:284-286`
 - Shutdown budget 8s; order lifecycle, schedulers, server, pool last. `src/server.ts:51`, `CLAUDE.md:262-269`
-- `CLAUDE.md` is long (684 lines): cite its headings, prefer code. (verified 2026-10-29 @ bf87ce2: wc -l on origin/main CLAUDE.md)
 
 ## Reference docs
 - `./README.md` "Knobs": read when tuning a knob or changing a default or bound (defaults live in src/knobs.ts).

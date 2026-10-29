@@ -795,7 +795,7 @@ Six deterministic health checks on a fixed interval, every threshold a bounded
 knob. Anomalies persist before webhook delivery is attempted, with retries and
 dedupe. (Now five — see the merge above.)
 
-Correction (2026-10-29): there are six checks (`repeated_denied` was added after the merge), see src/anomaly.ts:118-128
+Correction (2026-10-29): there are six checks (`repeated_denied` was added after the merge), see src/anomaly.ts:175-185
 
 ## Metrics rollups ([meta#14](https://github.com/V-M-Pioneer-Trading/meta/issues/14))
 

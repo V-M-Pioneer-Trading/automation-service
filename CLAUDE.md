@@ -555,6 +555,8 @@ any `detail.actor` in the body.
   lines as no credential, 1.1.3 the first to refuse a repeated key in the center's answer (a 503, one center call). `introspectionWiring.test.ts` pins that with real
   separate lines on a raw socket; a downgrade to 1.1.1 turns three of them red.
 
+  Correction (2026-10-29): the pin is 2.0.1, not 1.1.3, see package.json:19.
+
 ## Database
 
 - `migrate()` is idempotent DDL run on every boot: `CREATE TABLE IF NOT
