@@ -1,8 +1,8 @@
 # Triage Labels
 
-The skills speak in terms of five canonical triage roles. This file maps those roles to the actual label strings used in this workspace's issue tracker (V-M-Pioneer-Trading/meta; labels exist only there).
+The skills speak in terms of five canonical triage roles. This file maps those roles to the label strings in the issue tracker named in `issue-tracker.md`, V-M-Pioneer-Trading/meta. The labels exist there, and only there; in a workspace that is the tickets repo, not this one.
 
-| Canonical role | Label in this repo | Meaning                                  |
+| Canonical role | Label in the tracker | Meaning                                  |
 | -------------------------- | -------------------- | ---------------------------------------- |
 | `needs-triage`             | `needs-triage`       | Maintainer needs to evaluate this issue  |
 | `needs-info`               | `needs-info`         | Waiting on reporter for more information |
@@ -12,4 +12,4 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
-Edit the "Label in this repo" column to match whatever vocabulary you actually use.
+The "Label in the tracker" column follows the tracker's vocabulary: change it only together with `gh label` in the tracker (single mode: this repo; workspace mode: the tickets repo, where every repo's copy of this table must then change too). Never edit the column to a local preference.

@@ -79,16 +79,15 @@ Verified against bf87ce2 2026-10-29.
 - No audit step in CI. `.github/workflows/container.yml:45-79`
 
 ## Patterns
-- `createApp` takes an options object; scheduler deps object; background work on `IntervalLoop`. `CLAUDE.md` "## Conventions" (CLAUDE.md:666)
-- New task kind checklist. `CLAUDE.md:674-683`
+- `createApp` takes an options object; scheduler deps object; background work on `IntervalLoop`. `CLAUDE.md` "## Conventions" (CLAUDE.md:664)
+- New task kind checklist. `CLAUDE.md:672-681`
 - New table goes into `STATE_TABLES`. `src/testSupport/resetDatabase.ts:16`
 - Express 4: wrap async handlers in `asyncHandler`. `src/server.ts:131`
 - Tests force ticks via `app.locals.force*Tick`, never sleep. `src/server.ts:682-698`, `CLAUDE.md` "## Testing" (:612)
 
 ## Traps
-- `CLAUDE.md:554` says clerk-client pin is 1.1.3; `package.json:19` pins 2.0.1. CLAUDE.md is stale.
 - After every deploy nothing spends until the operator re-arms live. `src/autopilotLifecycle.ts:85-94`
-- Stub 500 means unavailable (long retry patience); use 400 `{error:{message}}` for refusals. `CLAUDE.md:660-664`
+- Stub 500 means unavailable (long retry patience); use 400 `{error:{message}}` for refusals. `CLAUDE.md:658-662`
 - Metrics and anomaly loops are not stopped by abort; tests call `stopBackgroundSchedulers`. `src/server.ts:664-673`
 - Operator `public_metadata`: add `events:write planner:advise`, do not replace. `CLAUDE.md:543`
 - Webhook URL holds the bot token: never log it or `String(err)`. `src/webhookDelivery.ts:284-286`
