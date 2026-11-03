@@ -83,7 +83,7 @@ Verified against bf87ce2 2026-10-29.
 - New task kind checklist. `CLAUDE.md:672-681`
 - New table goes into `STATE_TABLES`. `src/testSupport/resetDatabase.ts:16`
 - Express 4: wrap async handlers in `asyncHandler`. `src/server.ts:131`
-- Tests force ticks via `app.locals.force*Tick`, never sleep. `src/server.ts:682-698`, `CLAUDE.md` "## Testing" (:612)
+- Tests force ticks via `app.locals.force*Tick`, never sleep. `src/server.ts:682-698`, `CLAUDE.md` "## Testing" (:610)
 
 ## Traps
 - After every deploy nothing spends until the operator re-arms live. `src/autopilotLifecycle.ts:85-94`

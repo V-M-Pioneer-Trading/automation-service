@@ -5,13 +5,13 @@ How heinzelwerk agents work in this repo. Mode rules (single repo vs workspace) 
 - **Autonomy**: full. Agents merge and apply on their own; breakages are learnings. Secrets are never published (name the variable, never the value); the gate never merges its own policy.
 - **Backend paths**: `src/` (Express 4 + Postgres, TypeScript; tests `src/**/*.test.ts`, jest `jest.config.js`)
 - **Worktree setup** (run once in every new task worktree): `npm ci`
-- **Checks** (validator runs every one, in order; copied from CI, quiet flags only):
+- **Checks** (validator runs every one, in order; copied from CI, quiet flags only; a status note goes after the closing backtick, never inside the span, which must run as pasted):
   - `npm run lint`
   - `DATABASE_URL=postgres://postgres:test@localhost:5432/automation_test npm test` (unverified locally: needs postgres:16-alpine on 5432 as CI does at .github/workflows/container.yml:52, docker daemon not running; without it 375 of 643 tests fail)
   - `npm audit --audit-level=high` (red on main: V-M-Pioneer-Trading/meta#136; not in CI)
   - `docker buildx build --platform linux/arm64 .` (unverified locally: docker daemon not running)
 - **Verified against**: bf87ce2 2026-10-29 (checks and every ref in this file; retro bumps it)
-- **Coding standards**: `eslint.config.mjs:1` (shared `@v-m-pioneer-trading/eslint-config` `base`), `package.json:15` lint with `--max-warnings 0`; plus `CLAUDE.md` "## Invariants the scheduler depends on" (:70) and "## Conventions" (:666)
+- **Coding standards**: `eslint.config.mjs:1` (shared `@v-m-pioneer-trading/eslint-config` `base`), `package.json:15` lint with `--max-warnings 0`; plus `CLAUDE.md` "## Invariants the scheduler depends on" (:70) and "## Conventions" (:664)
 - **Risk areas** (validator reviews diffs touching these on Opus). Each entry is a path/glob or a described kind of change, plus why it is risky:
   - Merge to `main` deploys to production (SSM redeploy of automation-service): `.github/workflows/container.yml:170-220`
   - Spend paths, live autopilot spends game credits unattended (sell, purchase, refuel, contract accept/deliver/fulfill, navigate fuel): `src/gameClients.ts:410,419,422`, `src/miningTask.ts:200`, `src/contractTask.ts:95,121,140`, `src/taskFsm.ts:186`, `src/contractDiscovery.ts:62`
