@@ -5,8 +5,9 @@ How heinzelwerk agents work in this repo. Mode rules (single repo vs workspace) 
 - **Autonomy**: full. Agents merge and apply on their own; breakages are learnings. Secrets are never published (name the variable, never the value); the gate never merges its own policy.
 - **Backend paths**: `src/` (Express 4 + Postgres, TypeScript; tests `src/**/*.test.ts`, jest `jest.config.js`)
 - **Worktree setup** (run once in every new task worktree): `npm ci`
-- **Checks** (validator runs every one, in order; copied from CI, quiet flags only; a status note goes after the closing backtick, never inside the span, which must run as pasted):
+- **Checks** (validator runs every one, in order; copied from CI except where marked `not in CI`, quiet flags only; a status note goes after the closing backtick, never inside the span, which must run as pasted):
   - `npm run lint`
+  - `npm run typecheck` (not in PR CI: the image build's `tsc`, `Dockerfile:7`, runs on `main` only, `.github/workflows/container.yml:84`)
   - `DATABASE_URL=postgres://postgres:test@localhost:5432/automation_test npm test` (unverified locally: needs postgres:16-alpine on 5432 as CI does at .github/workflows/container.yml:52, docker daemon not running; without it 375 of 643 tests fail)
   - `npm audit --audit-level=high` (red on main: V-M-Pioneer-Trading/meta#136; not in CI)
   - `docker buildx build --platform linux/arm64 .` (unverified locally: docker daemon not running)
