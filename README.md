@@ -697,9 +697,9 @@ Invalid lifecycle transitions return `409` naming the current status.
 |---|---|
 | `PORT` | Listen port (default `3003`) |
 | `DATABASE_URL` | Postgres connection string (**required**) |
-| `NAVIGATION_SERVICE_URL` | e.g. `http://navigation-service:8080/api/v1` (**required**) |
-| `AGENT_SERVICE_URL` | e.g. `http://agent-service:80/api/agent` (**required**) |
-| `FLEET_SERVICE_URL` | e.g. `http://fleet-service:3001/api/fleet` (**required**) |
+| `NAVIGATION_SERVICE_URL` | e.g. `http://navigation-service:8080/api/navigation/v1` (**required**) |
+| `AGENT_SERVICE_URL` | e.g. `http://agent-service:80/api/agent/v1` (**required**) |
+| `FLEET_SERVICE_URL` | e.g. `http://fleet-service:3001/api/fleet/v1` (**required**) |
 | `MINING_SHIP_SYMBOL` | Ship to fly (**required**) |
 | `SCHEDULER_INTERVAL_MS` | Tick cadence (default `5000`) |
 | `REPLAN_INTERVAL_MS` | Periodic replan fallback (default `300000`) |

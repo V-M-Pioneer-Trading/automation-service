@@ -1,3 +1,4 @@
 import { base } from "@v-m-pioneer-trading/eslint-config";
 
-export default base({ tsconfigRootDir: import.meta.dirname });
+// .claude/worktrees/ holds agent task worktrees: full checkouts of this repo, linted in their own run.
+export default base({ tsconfigRootDir: import.meta.dirname, ignores: [".claude/worktrees/"] });

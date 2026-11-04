@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(merge-gate *)",
+      "Bash(check-note *)",
+      "Bash(spawn-context *)"
+    ]
+  }
+}
