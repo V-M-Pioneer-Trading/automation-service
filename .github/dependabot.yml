@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # The workflows. Only Actions here so far.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
