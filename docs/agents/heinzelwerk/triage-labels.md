@@ -12,4 +12,4 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
-The "Label in the tracker" column follows the tracker's vocabulary: change it only together with `gh label --repo V-M-Pioneer-Trading/meta`, and change every repo's copy of this table in the workspace with it. Never edit the column to a local preference.
+The "Label in the tracker" column follows the tracker's vocabulary: change it only together with the label in the tracker (`gh label edit <old> --name <new> --repo V-M-Pioneer-Trading/meta`), and change every repo's copy of this table in the workspace with it. Never edit the column to a local preference.
