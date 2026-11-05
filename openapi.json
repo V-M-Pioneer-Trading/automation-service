@@ -1,0 +1,651 @@
+{
+  "openapi": "3.0.0",
+  "components": {
+    "examples": {},
+    "headers": {},
+    "parameters": {},
+    "requestBodies": {},
+    "responses": {},
+    "schemas": {
+      "HealthStatus": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ],
+            "nullable": false
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object",
+        "additionalProperties": true
+      },
+      "AutopilotStatus": {
+        "type": "string",
+        "enum": [
+          "disarmed",
+          "armed",
+          "paused",
+          "aborted"
+        ]
+      },
+      "AutopilotMode": {
+        "type": "string",
+        "enum": [
+          "live",
+          "shadow"
+        ]
+      },
+      "AutopilotSnapshot": {
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/AutopilotStatus"
+          },
+          "mode": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AutopilotMode"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "status",
+          "mode"
+        ],
+        "type": "object",
+        "additionalProperties": true
+      },
+      "ErrorBody": {
+        "description": "The error envelope every answer from this service uses.",
+        "properties": {
+          "error": {
+            "properties": {
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object",
+        "additionalProperties": true
+      },
+      "Record_string.unknown_": {
+        "properties": {},
+        "additionalProperties": {},
+        "type": "object",
+        "description": "Construct a type with a set of properties K of type T"
+      },
+      "EventLogEntry": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "occurredAt": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "detail": {
+            "$ref": "#/components/schemas/Record_string.unknown_"
+          }
+        },
+        "required": [
+          "id",
+          "occurredAt",
+          "type",
+          "detail"
+        ],
+        "type": "object",
+        "additionalProperties": true
+      },
+      "EventsAnswer": {
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/EventLogEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "events"
+        ],
+        "type": "object",
+        "additionalProperties": true
+      },
+      "TaskKind": {
+        "type": "string",
+        "enum": [
+          "mining",
+          "contract",
+          "scout"
+        ]
+      },
+      "MiningPhase": {
+        "type": "string",
+        "enum": [
+          "TRAVEL_TO_ASTEROID",
+          "SURVEY",
+          "EXTRACT",
+          "TRAVEL_TO_MARKET",
+          "SELL"
+        ]
+      },
+      "ContractPhase": {
+        "type": "string",
+        "enum": [
+          "CONTRACT_TRAVEL_TO_MARKET",
+          "CONTRACT_PURCHASE",
+          "CONTRACT_TRAVEL_TO_DESTINATION",
+          "CONTRACT_DELIVER",
+          "CONTRACT_FULFILL"
+        ]
+      },
+      "ScoutPhase": {
+        "type": "string",
+        "enum": [
+          "SCOUT_TRAVEL",
+          "SCOUT_REFRESH"
+        ]
+      },
+      "TaskPhase": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MiningPhase"
+          },
+          {
+            "$ref": "#/components/schemas/ContractPhase"
+          },
+          {
+            "$ref": "#/components/schemas/ScoutPhase"
+          }
+        ]
+      },
+      "SurveyData": {
+        "properties": {
+          "signature": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "deposits": {
+            "items": {
+              "properties": {
+                "symbol": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "symbol"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "expiration": {
+            "type": "string"
+          },
+          "size": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "signature",
+          "symbol",
+          "deposits",
+          "expiration",
+          "size"
+        ],
+        "type": "object",
+        "additionalProperties": true
+      },
+      "ShipTask": {
+        "properties": {
+          "shipSymbol": {
+            "type": "string"
+          },
+          "taskKind": {
+            "$ref": "#/components/schemas/TaskKind"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/TaskPhase"
+          },
+          "waitingUntil": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "survey": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SurveyData"
+              }
+            ],
+            "nullable": true
+          },
+          "tradeSymbol": {
+            "type": "string",
+            "nullable": true,
+            "description": "Mining: the extracted good. Contract: the deliverable good."
+          },
+          "marketWaypoint": {
+            "type": "string",
+            "nullable": true,
+            "description": "Mining: the sell market. Contract: the procurement market."
+          },
+          "asteroidWaypoint": {
+            "type": "string",
+            "nullable": true,
+            "description": "Where the planner sent the ship: an asteroid field to mine, or a market to\nscout. Null whenever the ship needs a fresh assignment — a brand new task,\nor the moment its last one completed. See `isIdle`."
+          },
+          "failureCount": {
+            "type": "number",
+            "format": "double",
+            "description": "Consecutive failures that are evidence about the current target — the game\nrefusing the action, a request it would not accept, our own code throwing.\nResets on any successful tick."
+          },
+          "unrelatedFailureCount": {
+            "type": "number",
+            "format": "double",
+            "description": "Consecutive failures that are evidence about the fleet's plumbing instead:\nan unreachable upstream, a rejected credential. Kept apart from\n`failureCount` because it is spent against a budget a hundred times longer\n(see `UNRELATED_FAILURE_RETRY_MULTIPLIER`), and one number cannot be spent\nagainst two budgets. Resets on any successful tick."
+          },
+          "contractId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Contract loop: the contract this task is working, and its delivery destination/progress."
+          },
+          "destinationWaypoint": {
+            "type": "string",
+            "nullable": true
+          },
+          "unitsDelivered": {
+            "type": "number",
+            "format": "double"
+          },
+          "cycleStartedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Running tallies for the cycle in progress. A cycle spans many ticks and can\nsurvive a restart, so what it earned and how long it took can only be known\nby accumulating here and reading it back when the cycle completes — at\nwhich point it becomes one row in `mining_observation` and the planner\nlearns something. See observations.ts."
+          },
+          "cycleRevenue": {
+            "type": "number",
+            "format": "double"
+          },
+          "cycleTravelDistance": {
+            "type": "number",
+            "format": "double"
+          },
+          "cycleUnitsExtracted": {
+            "type": "number",
+            "format": "double"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last time this task's row changed — drives the ship-idle anomaly check."
+          }
+        },
+        "required": [
+          "shipSymbol",
+          "taskKind",
+          "phase",
+          "waitingUntil",
+          "survey",
+          "tradeSymbol",
+          "marketWaypoint",
+          "asteroidWaypoint",
+          "failureCount",
+          "unrelatedFailureCount",
+          "contractId",
+          "destinationWaypoint",
+          "unitsDelivered",
+          "cycleStartedAt",
+          "cycleRevenue",
+          "cycleTravelDistance",
+          "cycleUnitsExtracted",
+          "updatedAt"
+        ],
+        "type": "object",
+        "additionalProperties": true
+      },
+      "ShipTaskAnswer": {
+        "properties": {
+          "task": {
+            "$ref": "#/components/schemas/ShipTask"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "securitySchemes": {}
+  },
+  "info": {
+    "title": "Automation Service API",
+    "version": "1.0.0",
+    "description": "The SpaceTraders fleet autopilot. Only the routes served by tsoa controllers are listed; x-auth names what each requires of a caller (public, or a scope).",
+    "contact": {}
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "Health",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          }
+        },
+        "description": "Liveness check.",
+        "tags": [
+          "operational"
+        ],
+        "security": [],
+        "parameters": [],
+        "x-auth": "public"
+      }
+    },
+    "/api/automation/health": {
+      "get": {
+        "operationId": "ApiHealth",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          }
+        },
+        "description": "Liveness check on the production path prefix.",
+        "tags": [
+          "operational"
+        ],
+        "security": [],
+        "parameters": [],
+        "x-auth": "public"
+      }
+    },
+    "/api/automation/v1/autopilot/status": {
+      "get": {
+        "operationId": "Status",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutopilotSnapshot"
+                }
+              }
+            }
+          }
+        },
+        "description": "Current status and mode. Waits for the restore of the persisted state, so a read never reports the \"disarmed\" a process starts with.",
+        "tags": [
+          "autopilot"
+        ],
+        "security": [],
+        "parameters": [],
+        "x-auth": "public"
+      }
+    },
+    "/api/automation/v1/autopilot/pause": {
+      "post": {
+        "operationId": "Pause",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/AutopilotSnapshot"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorBody"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "not armed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "description": "Pauses an armed autopilot.",
+        "tags": [
+          "autopilot"
+        ],
+        "security": [],
+        "parameters": [],
+        "x-auth": "fleet:control"
+      }
+    },
+    "/api/automation/v1/autopilot/abort": {
+      "post": {
+        "operationId": "Abort",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/AutopilotSnapshot"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorBody"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "neither armed nor paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "description": "Aborts an armed or paused autopilot.",
+        "tags": [
+          "autopilot"
+        ],
+        "security": [],
+        "parameters": [],
+        "x-auth": "fleet:control"
+      }
+    },
+    "/api/automation/v1/autopilot/events": {
+      "get": {
+        "operationId": "Events",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventsAnswer"
+                }
+              }
+            }
+          }
+        },
+        "description": "The newest events, newest first. `limit` defaults to 100 and is capped at 1000; anything unusable is the default.",
+        "tags": [
+          "autopilot"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-auth": "public"
+      }
+    },
+    "/api/automation/v1/autopilot/ships/{shipSymbol}": {
+      "get": {
+        "operationId": "Ship",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ShipTaskAnswer"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorBody"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no task for this ship yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "description": "The task a ship is on. Served only when the service has a fleet scheduler (mining configured).",
+        "tags": [
+          "autopilot"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "shipSymbol",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-auth": "public"
+      }
+    },
+    "/api/automation/v1/autopilot/arm": {
+      "post": {
+        "operationId": "Arm",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/AutopilotSnapshot"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorBody"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "mode must be \"live\" or \"shadow\"",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "description": "Arms the autopilot. The body is `{ \"mode\": \"live\" | \"shadow\" }`, live when absent.",
+        "tags": [
+          "autopilot"
+        ],
+        "security": [],
+        "parameters": [],
+        "x-auth": "fleet:control",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "live",
+                      "shadow"
+                    ],
+                    "default": "live"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

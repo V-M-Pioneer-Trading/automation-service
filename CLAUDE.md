@@ -13,19 +13,23 @@ npm test                      # full suite; needs the Postgres above (jest.env.j
 npx jest src/__tests__/x.test.ts
 npm run typecheck             # tsc --noEmit; run before every commit, strict mode is on
 npm run lint                  # shared ESLint config (meta#105), --max-warnings 0; CI runs it before the tests
+npm run openapi               # regenerates openapi.json from the controllers; CI fails when the committed file is stale
 npm run replay -- --set mine.taskWeight=2 --since 6h --verbose
 ```
 
-CI (`.github/workflows/container.yml`) runs `npm run lint` and `npm test` on PRs and on pushes against a fresh
+CI (`.github/workflows/container.yml`) runs `npm run lint`, the openapi.json freshness check and `npm test` on PRs and on pushes against a fresh
 Postgres 16. The image is built, pushed and redeployed only on a push to `main`, and
 only after that test job passes. Deploy permissions (`packages`, `id-token`) are
-declared on the `docker` job, never at workflow level.
+declared on the `docker` job, never at workflow level. A PR-only `image` job builds the same image (arm64, no push, no credentials), because
+the tsoa routes are generated at build time and a Dockerfile that misses an input would otherwise fail only after the merge deploys.
 
 ## Module map
 
 | File | Owns | Depends on |
 |---|---|---|
-| `server.ts` | `createApp(options)`: wiring, routes and each route's auth declaration, `app.locals` test hooks | everything below, clerk-client |
+| `server.ts` | `createApp(options)`: wiring, the routes not yet migrated and each one's auth declaration, `app.locals` test hooks | everything below, clerk-client |
+| `controllers/*.controller.ts` | The tsoa controllers (health, autopilot): the migrated routes. Collaborators come from `app.locals` (`controllers/support.ts`) | lifecycle, repos |
+| `auth.ts` | Scope constants, `routePolicy` (what each tsoa route requires) and `declaring()`, the registrar that puts that declaration first on every tsoa route | clerk-client |
 | `scheduler.ts` | `FleetScheduler`: the tick (replan → assign → advance one FSM step → persist) | planner, discovery, FSMs, repos |
 | `planner.ts` | `Planner`: one `DecisionContext` per decision, scores mining/contract/scout, pure `evaluateContract` | scoring, routeCost, observations, repos |
 | `scoring.ts` | The credits-per-hour arithmetic. Pure, no imports from the rest of `src` | nothing |
@@ -545,6 +549,14 @@ any `detail.actor` in the body.
   Middleware ahead of the guard (`cors`, `express.json`) is wrapped in
   `passthrough()`, `cors()` stays first so it terminates preflights, and the
   JSON 404 is `notFound()`, last before the error handler.
+- **tsoa routes are declared from a table.** The routes in `src/controllers/` (both health routes and the six autopilot
+  routes so far) are registered through `declaring()` in `auth.ts`, which gives each the declaration its `routePolicy` entry
+  names (`"ignore"` or one of the three scope constants). A tsoa route with no entry, an unknown tier or `"ignore"` on a
+  mutation refuses startup. `GET .../autopilot/ships/:shipSymbol` is registered only with a fleet scheduler (`omit`).
+  Every controller route also states its requirement in `openapi.json` (`x-auth`: `public` or the scope), and a test
+  holds the two sources equal. Generated code (`src/generated/`, gitignored) is built by `npm run codegen`, which
+  `lint`, `test`, `typecheck` and `build` run first. Controllers read query and body themselves: tsoa's typed binding
+  would 400 on input this service has always accepted. A `ValidateError` is answered `400 {error:{message}}`.
 - **Messages are the package's** (`MESSAGES`): `401` `a bearer token is
   required` / `invalid or expired session`, `403` generic without the scope
   name, `503` `the authentication service could not process this request`.

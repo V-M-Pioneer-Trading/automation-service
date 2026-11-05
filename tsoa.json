@@ -1,0 +1,33 @@
+{
+  "entryFile": "src/server.ts",
+  "noImplicitAdditionalProperties": "ignore",
+  "controllerPathGlobs": ["src/controllers/**/*.controller.ts"],
+  "spec": {
+    "outputDirectory": "src/generated",
+    "specVersion": 3,
+    "name": "Automation Service API",
+    "description": "The SpaceTraders fleet autopilot. Only the routes served by tsoa controllers are listed; x-auth names what each requires of a caller (public, or a scope).",
+    "basePath": "/",
+    "specMerging": "recursive",
+    "spec": {
+      "paths": {
+        "/api/automation/v1/autopilot/arm": {
+          "post": {
+            "requestBody": {
+              "required": false,
+              "content": {
+                "application/json": {
+                  "schema": { "type": "object", "properties": { "mode": { "type": "string", "enum": ["live", "shadow"], "default": "live" } } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "routes": {
+    "routesDir": "src/generated",
+    "basePath": "/"
+  }
+}

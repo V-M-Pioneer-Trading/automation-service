@@ -7,15 +7,20 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/codegen.cjs && tsc",
     "start": "node dist/server.js",
     "dev": "npm run build && npm start",
-    "typecheck": "tsc --noEmit",
+    "codegen": "node scripts/codegen.cjs",
+    "typecheck": "node scripts/codegen.cjs && tsc --noEmit",
+    "openapi": "node scripts/codegen.cjs && node scripts/write-openapi.cjs",
+    "prelint": "node scripts/codegen.cjs",
+    "pretest": "node scripts/codegen.cjs",
     "test": "jest",
     "lint": "eslint . --max-warnings 0",
     "replay": "npm run build && node dist/replay.js"
   },
   "dependencies": {
+    "@tsoa/runtime": "^6.6.0",
     "@v-m-pioneer-trading/clerk-client": "https://github.com/V-M-Pioneer-Trading/clerk-client/releases/download/v2.0.1/v-m-pioneer-trading-clerk-client-2.0.1.tgz",
     "cors": "^2.8.6",
     "express": "^4.21.2",
@@ -33,6 +38,7 @@
     "jest": "^29.7.0",
     "supertest": "^6.3.4",
     "ts-jest": "^29.2.5",
+    "tsoa": "^6.6.0",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.71.0"
   }

@@ -659,6 +659,9 @@ at the time and can't be honestly recomputed from the log.
 
 All routes are under `/api/automation/v1`. `/health` is unversioned.
 
+[`openapi.json`](openapi.json) describes the routes served by controllers so far (both health routes and the six autopilot
+routes), with the requirement of each in `x-auth` (`public`, or the scope). The other routes are listed below only.
+
 **Autopilot**
 
 | | |
@@ -832,6 +835,7 @@ npm run dev
 |---|---|
 | `npm test` | Full suite against the Postgres above |
 | `npm run typecheck` | `tsc --noEmit` |
+| `npm run openapi` | Regenerate [`openapi.json`](openapi.json) from the controllers; commit the result, CI fails on a stale file |
 | `npm run build` / `npm start` | Compile to `dist/` and run |
 | `npm run replay -- …` | Re-score past decisions, see [Replaying decisions](#replaying-decisions) |
 

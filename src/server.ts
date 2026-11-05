@@ -10,19 +10,21 @@ import {
   secured,
   type ExpressAuth,
 } from "@v-m-pioneer-trading/clerk-client";
+import { ValidateError } from "@tsoa/runtime";
 import type { Server } from "http";
 import type { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
 import type { AnomalyConfig } from "./anomalyScheduler";
 import { AnomalyScheduler } from "./anomalyScheduler";
-import { SCOPE_EVENTS_WRITE, SCOPE_FLEET_CONTROL, SCOPE_PLANNER_ADVISE } from "./auth";
+import { declaring, routePolicy, SCOPE_EVENTS_WRITE, SCOPE_PLANNER_ADVISE, type Policy, type Registrar } from "./auth";
 import { AutopilotLifecycle, LifecycleClosedError } from "./autopilotLifecycle";
-import { AutopilotState, InvalidTransitionError } from "./autopilotState";
+import { AutopilotState } from "./autopilotState";
 import type { Clock } from "./clock";
 import { systemClock } from "./clock";
 import type { ServiceConfig } from "./config";
 import { configFromEnv, fetchStartupToken, resolveM2MTokenSource } from "./config";
 import { ContractRepo } from "./contractRepo";
+import { AUTOPILOT_LOCAL, clampLimit } from "./controllers/support";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients } from "./gameClients";
@@ -34,6 +36,7 @@ import { MetricsRepo } from "./metrics";
 import { MetricsScheduler } from "./metricsScheduler";
 import { ObservationRepo, priorsFromKnobs } from "./observations";
 import { Planner } from "./planner";
+import { RegisterRoutes } from "./generated/routes";
 import { FleetScheduler } from "./scheduler";
 import { ShipTaskRepo } from "./shipTaskRepo";
 import { installShutdownHandlers, shutdownGracefully, type ShutdownSteps } from "./shutdown";
@@ -50,7 +53,6 @@ import { WebhookDelivery } from "./webhookDelivery";
  */
 const SHUTDOWN_TIMEOUT_MS = 8_000;
 
-const MAX_EVENTS_LIMIT = 1000;
 const MAX_ROLLUPS_LIMIT = 200;
 const DEFAULT_CONTEXT_ROLLUP_LIMIT = 10;
 const DEFAULT_CONTEXT_EVENT_LIMIT = 20;
@@ -130,11 +132,6 @@ type AsyncHandler = (req: express.Request, res: express.Response) => Promise<voi
 // Returns void: Express 4 ignores the return value of a handler, so the promise was never used by anyone.
 const asyncHandler = (fn: AsyncHandler) => (req: express.Request, res: express.Response, next: express.NextFunction): void => {
   fn(req, res).catch(next);
-};
-
-const clampLimit = (raw: unknown, fallback: number, max: number): number => {
-  const parsed = typeof raw === "string" ? Number(raw) : NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
 };
 
 const badRequest = (res: express.Response, message: string) => res.status(400).json({ error: { message } });
@@ -232,6 +229,10 @@ export interface AppOptions {
    * token no center recognises, which fails safe rather than open. The entrypoint and `createTestApp` both supply one.
    */
   authTokenSource?: M2MTokenSource;
+  /** Replaces the policy table for the tsoa routes (tests). */
+  policy?: Policy;
+  /** Replaces tsoa's RegisterRoutes (tests); receives the declaring registrar. */
+  registerRoutes?: (registrar: Registrar) => void;
 }
 
 export function createApp(options: AppOptions) {
@@ -244,13 +245,16 @@ export function createApp(options: AppOptions) {
     anomaly,
     corsAllowedOrigin = "http://localhost:3000",
     authTokenSource,
+    policy = routePolicy,
+    registerRoutes = (r) => {
+      RegisterRoutes(r as never);
+    },
   } = options;
 
   // Every mutating route declares this; every read declares
   // ignoreCredentials(). There is no third kind of route here.
   // One literal per route (decisions 20, 22): fleet:control does not satisfy
   // the events or planner-advice routes, and those scopes do not satisfy it.
-  const requireControl = auth.requireScope(SCOPE_FLEET_CONTROL);
   const requireEventsWrite = auth.requireScope(SCOPE_EVENTS_WRITE);
   const requirePlannerAdvise = auth.requireScope(SCOPE_PLANNER_ADVISE);
   const publicRead = () => auth.ignoreCredentials();
@@ -351,20 +355,15 @@ export function createApp(options: AppOptions) {
     },
   });
 
-  const health = (_req: express.Request, res: express.Response) => {
-    res.set("Cache-Control", "no-store");
-    res.json({ status: "ok" });
-  };
-  // Resource routes live under /api/automation/v1 — health stays unversioned
-  // since it's operational tooling, not versioned API surface. Mounted both
-  // bare (local dev/compose) and under /api/automation (production CloudFront
-  // only routes requests matching a configured path pattern).
-  //
-  // ignoreCredentials(), not allowPublic(): health reads no identity, so a
-  // bearer sent here is never read and auth-service is never called. Health
-  // must not turn 401 on a stale token, or 503 while auth-service is down.
-  app.get("/health", publicRead(), health);
-  app.get("/api/automation/health", publicRead(), health);
+  // The tsoa controllers (src/controllers): health and the autopilot routes. Each
+  // route gets the declaration its routePolicy entry names, and one with no
+  // entry refuses startup. Mounted here, where those routes always sat: after
+  // the cors and body passthroughs, before the inline routes and notFound().
+  // The ship route exists only with a fleet scheduler; without one the request
+  // falls through to notFound(), as before.
+  app.locals[AUTOPILOT_LOCAL] = { state, lifecycle, events, tasks };
+  const omitted = new Set(scheduler === null ? ["GET /api/automation/v1/autopilot/ships/:shipSymbol"] : []);
+  registerRoutes(declaring(app as unknown as Registrar, auth, policy, omitted));
 
   // Every read under the API is public on purpose — the dashboard is meant to
   // be watchable without credentials, the event log especially — and none of
@@ -372,77 +371,6 @@ export function createApp(options: AppOptions) {
   // dashboard read keeps working while auth-service is down, and a stale token
   // riding along on one is never a 401.
   const api = secured(express.Router());
-
-  // --- Autopilot lifecycle ---
-
-  const lifecycleStatus = () => ({ status: state.getStatus(), mode: state.getMode() });
-
-  // Waits for the restore (milliseconds, once per process), so a status read
-  // never reports the "disarmed" a process starts with before it has looked.
-  // A failed restore leaves the process disarmed, and that is what it reports.
-  api.get(
-    "/autopilot/status",
-    publicRead(),
-    asyncHandler(async (_req, res) => {
-      await lifecycle.restored.catch(() => undefined);
-      res.json(lifecycleStatus());
-    })
-  );
-
-  // Every lifecycle change goes through `lifecycle`, which persists it and
-  // queues it behind the restore and behind any other change (Q29).
-  api.post(
-    "/autopilot/arm",
-    requireControl,
-    asyncHandler(async (req, res) => {
-      const mode: unknown = (req.body as { mode?: unknown } | undefined)?.mode ?? "live";
-      if (mode !== "live" && mode !== "shadow") {
-        badRequest(res, 'mode must be "live" or "shadow"');
-        return;
-      }
-      res.json(await lifecycle.arm(mode, actorOf(res)));
-    })
-  );
-
-  const transition = (action: "pause" | "abort") =>
-    asyncHandler(async (_req, res) => {
-      try {
-        res.json(await lifecycle[action](actorOf(res)));
-      } catch (err) {
-        if (err instanceof InvalidTransitionError) {
-          res.status(409).json({ error: { message: err.message } });
-          return;
-        }
-        throw err;
-      }
-    });
-
-  api.post("/autopilot/pause", requireControl, transition("pause"));
-  api.post("/autopilot/abort", requireControl, transition("abort"));
-
-  api.get(
-    "/autopilot/events",
-    publicRead(),
-    asyncHandler(async (req, res) => {
-      const limit = clampLimit(req.query.limit, 100, MAX_EVENTS_LIMIT);
-      res.json({ events: await events.list(limit) });
-    })
-  );
-
-  if (scheduler !== null) {
-    api.get(
-      "/autopilot/ships/:shipSymbol",
-      publicRead(),
-      asyncHandler(async (req, res) => {
-        const task = await tasks.get(req.params.shipSymbol);
-        if (task === null) {
-          res.status(404).json({ error: { message: "no task for this ship yet" } });
-          return;
-        }
-        res.json({ task });
-      })
-    );
-  }
 
   // For an external supervisor (meta#19's ai-service) to log its own rationale
   // into the same audit trail everything else here uses. `type` is restricted
@@ -646,6 +574,12 @@ export function createApp(options: AppOptions) {
     const bodyError = typeof err.type === "string" ? BODY_ERRORS[err.type] : undefined;
     if (bodyError !== undefined) {
       res.status(bodyError[0]).json({ error: { message: bodyError[1] } });
+      return;
+    }
+    // tsoa refused the input of a controller route.
+    if (err instanceof ValidateError) {
+      const message = Object.values(err.fields).map((f) => f.message).join("; ");
+      res.status(400).json({ error: { message } });
       return;
     }
     // A lifecycle change that arrived after shutdown began. Retryable against

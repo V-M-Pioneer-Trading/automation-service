@@ -76,9 +76,40 @@ jobs:
       # so branch protection's required checks are unchanged.
       - run: npm run lint
 
+      # The committed openapi.json must match the controllers. Regenerates it (no
+      # server, DB or network) and fails on any difference.
+      - name: Check openapi.json is up to date
+        run: |
+          npm run openapi
+          # git status, not git diff: a deleted or never-committed file shows as
+          # untracked, which git diff would let through.
+          test -z "$(git status --porcelain -- openapi.json)" || { git diff -- openapi.json; echo "::error file=openapi.json::openapi.json is out of date. Run 'npm run openapi' and commit the result."; exit 1; }
+
       - run: npm test
         env:
           DATABASE_URL: postgres://postgres:test@localhost:5432/automation_test
+
+  # A pull request never reaches the docker job below, yet a merge deploys what
+  # it builds: the tsoa routes are generated at build time and gitignored, so a
+  # Dockerfile that misses an input only fails after the merge. Build the same
+  # image here, without pushing and without any credential.
+  image:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
 
   docker:
     # A push to main or a tag, or a manual dispatch on main; never a pull
