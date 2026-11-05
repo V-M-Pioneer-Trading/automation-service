@@ -7,6 +7,13 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## tsoa controllers begin with health and the autopilot (meta#152)
+
+Both health routes and the six autopilot routes are tsoa controllers behind a per-route policy table (`routePolicy`,
+`declaring()` in `auth.ts`); every other route is still inline and unchanged. `openapi.json` is generated and checked
+in CI. No response, status or error body changed. Spec `x-auth` carries each route's requirement (auth-service's spec
+has prose only); `openapi-sync` is not called yet.
+
 ## Anomalies page Telegram, not Discord or Slack (#47)
 
 The owner chose Telegram. `ANOMALY_WEBHOOK_FORMAT` is now `generic|telegram`;

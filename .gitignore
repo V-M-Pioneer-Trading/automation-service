@@ -1,5 +1,6 @@
 node_modules/
 dist/
+src/generated/
 
 # Editor and in-place-edit leftovers (a perl -i run put src/planner.ts.bak in a
 # PR once; git add -A will happily sweep these in).

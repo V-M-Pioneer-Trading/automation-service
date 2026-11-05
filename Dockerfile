@@ -2,7 +2,8 @@ FROM node:24-alpine AS build
 WORKDIR /automation-service
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY tsconfig.json ./
+COPY tsconfig.json tsoa.json ./
+COPY scripts ./scripts
 COPY src ./src
 RUN npm run build
 
