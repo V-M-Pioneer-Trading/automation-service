@@ -5,7 +5,7 @@
  * (auth-design.md decision 21, meta#80). This service hands the caller's
  * `Authorization` header to it through the shared
  * `@v-m-pioneer-trading/clerk-client` package and compares the answer
- * against the scope each route declares in `server.ts`. There is no local
+ * against the scope each route requires in `routePolicy`. There is no local
  * verifier, no key and no fallback to one: a second verification path is what
  * decision 10 forbids.
  *
@@ -42,9 +42,9 @@ export type Policy = Readonly<Record<string, Tier>>;
 const KNOWN_TIERS: ReadonlySet<string> = new Set<Tier>(["ignore", SCOPE_FLEET_CONTROL, SCOPE_EVENTS_WRITE, SCOPE_PLANNER_ADVISE]);
 
 /**
- * What each tsoa-registered route requires, keyed "METHOD /path" as Express
- * registers it. The routes still written inline in server.ts declare their
- * requirement at the call site and are not listed here. Every read here is
+ * What each route requires, keyed "METHOD /path" as Express
+ * registers it. Every route of the service is a tsoa controller route and is
+ * listed here. Every read here is
  * public (`ignoreCredentials()`): the dashboard stays watchable while
  * auth-service is down.
  */
@@ -57,6 +57,13 @@ export const routePolicy: Policy = {
   "POST /api/automation/v1/autopilot/abort": SCOPE_FLEET_CONTROL,
   "GET /api/automation/v1/autopilot/events": "ignore",
   "GET /api/automation/v1/autopilot/ships/:shipSymbol": "ignore",
+  "POST /api/automation/v1/events": SCOPE_EVENTS_WRITE,
+  "GET /api/automation/v1/planner/knobs": "ignore",
+  "PUT /api/automation/v1/planner/knobs/:name": SCOPE_PLANNER_ADVISE,
+  "GET /api/automation/v1/planner/model": "ignore",
+  "POST /api/automation/v1/planner/replan": SCOPE_PLANNER_ADVISE,
+  "GET /api/automation/v1/metrics/context": "ignore",
+  "GET /api/automation/v1/anomalies/digest": "ignore",
 };
 
 export type Registrar = Record<string, unknown>;

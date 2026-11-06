@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { ValidateError } from "@tsoa/runtime";
 import { createExpressAuth } from "@v-m-pioneer-trading/clerk-client";
 import type { NextFunction, Request, Response } from "express";
@@ -53,6 +55,22 @@ describe("the tsoa routes in createApp", () => {
     expect(res.body).toEqual({ error: { message: "not found" } });
   });
 
+  it("does not register the replan route without a fleet scheduler: 404 without a header, the center never asked", async () => {
+    let asked = 0;
+    const app = build({
+      auth: createExpressAuth({
+        introspect: (token: string) => {
+          asked += 1;
+          return inProcessIntrospector.introspect(token);
+        },
+      }),
+    });
+    const res = await request(app).post(`${V1}/planner/replan`);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: { message: "not found" } });
+    expect(asked).toBe(0);
+  });
+
   it("answers a tsoa validation error in the service's error shape", async () => {
     const app = build({
       policy: { ...routePolicy, "GET /throwaway": "ignore" },
@@ -77,5 +95,12 @@ describe("the tsoa routes in createApp", () => {
     const res = await request(createTestApp(pool)).post(`${V1}/autopilot/arm`).set("Authorization", bearer()).send({ mode: "turbo" });
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: { message: 'mode must be "live" or "shadow"' } });
+  });
+});
+
+describe("server.ts", () => {
+  it("registers no route inline: every route is a controller behind the policy table", () => {
+    const source = fs.readFileSync(path.join(__dirname, "..", "server.ts"), "utf8");
+    expect(source).not.toMatch(/\b(?:app|api)\.(?:get|post|put|patch|delete)\(/);
   });
 });
