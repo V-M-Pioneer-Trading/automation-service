@@ -1,12 +1,14 @@
 {
   "entryFile": "src/server.ts",
   "noImplicitAdditionalProperties": "ignore",
-  "controllerPathGlobs": ["src/controllers/**/*.controller.ts"],
+  "controllerPathGlobs": [
+    "src/controllers/**/*.controller.ts"
+  ],
   "spec": {
     "outputDirectory": "src/generated",
     "specVersion": 3,
     "name": "Automation Service API",
-    "description": "The SpaceTraders fleet autopilot. Only the routes served by tsoa controllers are listed; x-auth names what each requires of a caller (public, or a scope).",
+    "description": "The SpaceTraders fleet autopilot. Every route of the service is listed; x-auth names what each requires of a caller (public, or a scope) and security repeats it as an OpenAPI requirement.",
     "basePath": "/",
     "specMerging": "recursive",
     "spec": {
@@ -17,12 +19,82 @@
               "required": false,
               "content": {
                 "application/json": {
-                  "schema": { "type": "object", "properties": { "mode": { "type": "string", "enum": ["live", "shadow"], "default": "live" } } }
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "type": "string",
+                        "enum": [
+                          "live",
+                          "shadow"
+                        ],
+                        "default": "live"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "/api/automation/v1/events": {
+          "post": {
+            "requestBody": {
+              "required": true,
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "required": [
+                      "type"
+                    ],
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "pattern": "^ai_",
+                        "description": "Must start with \"ai_\"."
+                      },
+                      "detail": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "Free-form object. detail.actor is overwritten with the caller's verified sub."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "/api/automation/v1/planner/knobs/{name}": {
+          "put": {
+            "requestBody": {
+              "required": true,
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "required": [
+                      "value"
+                    ],
+                    "properties": {
+                      "value": {
+                        "type": "number"
+                      }
+                    }
+                  }
                 }
               }
             }
           }
         }
+      }
+    },
+    "securityDefinitions": {
+      "clerk": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A Clerk session or machine token, verified by auth-service (never here). The scope in a security requirement is the one the token's introspected scope must contain. OpenAPI 3.0 asks for an empty array on a non-oauth2 scheme; scopes are listed anyway so a reader sees what each route needs, and tsoa emits no 3.1 yet."
       }
     }
   },

@@ -1,10 +1,8 @@
 import cors from "cors";
 import express from "express";
 import {
-  actorOf,
   type M2MTokenSource,
   createExpressAuth,
-  kindOf,
   notFound,
   passthrough,
   secured,
@@ -16,7 +14,7 @@ import type { Pool } from "pg";
 import { AnomalyChecker, AnomalyRepo } from "./anomaly";
 import type { AnomalyConfig } from "./anomalyScheduler";
 import { AnomalyScheduler } from "./anomalyScheduler";
-import { declaring, routePolicy, SCOPE_EVENTS_WRITE, SCOPE_PLANNER_ADVISE, type Policy, type Registrar } from "./auth";
+import { declaring, routePolicy, type Policy, type Registrar } from "./auth";
 import { AutopilotLifecycle, LifecycleClosedError } from "./autopilotLifecycle";
 import { AutopilotState } from "./autopilotState";
 import type { Clock } from "./clock";
@@ -24,17 +22,16 @@ import { systemClock } from "./clock";
 import type { ServiceConfig } from "./config";
 import { configFromEnv, fetchStartupToken, resolveM2MTokenSource } from "./config";
 import { ContractRepo } from "./contractRepo";
-import { AUTOPILOT_LOCAL, clampLimit } from "./controllers/support";
+import { AUTOPILOT_LOCAL, EVENTS_LOCAL, OBSERVABILITY_LOCAL, PLANNER_LOCAL } from "./controllers/support";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients } from "./gameClients";
-import type { KnobClass } from "./knobs";
 import { LegacyErrorTextScrubber } from "./legacyScrub";
-import { isKnobClass, KnobClassForbiddenError, KnobNotFoundError, KnobOutOfRangeError, KnobRepo } from "./knobs";
+import { KnobRepo } from "./knobs";
 import { MarketIntelRepo } from "./marketIntelRepo";
 import { MetricsRepo } from "./metrics";
 import { MetricsScheduler } from "./metricsScheduler";
-import { ObservationRepo, priorsFromKnobs } from "./observations";
+import { ObservationRepo } from "./observations";
 import { Planner } from "./planner";
 import { RegisterRoutes } from "./generated/routes";
 import { FleetScheduler } from "./scheduler";
@@ -52,89 +49,6 @@ import { WebhookDelivery } from "./webhookDelivery";
  * closing the lifecycle is the first step and finishes in milliseconds.
  */
 const SHUTDOWN_TIMEOUT_MS = 8_000;
-
-const MAX_ROLLUPS_LIMIT = 200;
-const DEFAULT_CONTEXT_ROLLUP_LIMIT = 10;
-const DEFAULT_CONTEXT_EVENT_LIMIT = 20;
-const MAX_CONTEXT_EVENT_LIMIT = 100;
-const MAX_ANOMALIES_LIMIT = 200;
-const DEFAULT_DIGEST_ANOMALY_LIMIT = 50;
-const DEFAULT_DIGEST_EVENT_LIMIT = 50;
-const DEFAULT_DIGEST_WINDOW_MINUTES = 60;
-const MAX_DIGEST_WINDOW_MINUTES = 7 * 24 * 60;
-
-/**
- * Event types worth surfacing in the digest alongside anomalies.
- *
- * The digest is two audiences at once: an operator's hourly review, and the AI
- * supervisor's context on its next run. The test for inclusion is therefore not
- * "is this an error" but **"would someone be wrong about the fleet without it,
- * and does nothing else tell them?"** Routine per-tick events stay out — the
- * anomaly checks already summarize those, and diluting a bounded list is how a
- * digest stops being read.
- *
- * The failure mode this list keeps having is the one the audit kept finding
- * elsewhere: the record gets written, and the page nobody built never shows it.
- * `contract_discovery_error` is the cautionary tale — decision 19's production
- * outage, the entire autonomous loop down, was eventually found by grepping the
- * raw event log for exactly this type, because the digest filtered it out.
- */
-const NOTABLE_EVENT_TYPES = [
-  // Lifecycle: what the operator last said they wanted.
-  "armed",
-  "paused",
-  "aborted",
-
-  // Terminal task outcomes — a ship gave up, or had nowhere to go.
-  "planner_no_viable_target",
-  "mining_task_failed",
-  "mining_no_market_found",
-  "mining_discarded_after_abort",
-  "planner_discarded_after_abort_or_pause",
-
-  // Failures that silently degrade something rather than stopping it, which is
-  // exactly why they need surfacing: nothing else reports them, and the fleet
-  // keeps running while quietly getting worse at its job.
-  //   contract_discovery_error — the contract loop is down; mining continues,
-  //     so credits/hour sags rather than flatlining.
-  //   observation_write_error  — calibration stopped recording. The planner
-  //     goes on scoring against the last values it measured, so it looks
-  //     confident while drifting away from reality.
-  "contract_discovery_error",
-  "observation_write_error",
-
-  // An operational condition, not a failure: another replica holds the dispatch
-  // lock and this process is standing by. Logged once per spell, not per tick.
-  // Two instances contending is something an operator should learn from the
-  // digest rather than from a ship that mysteriously never moves.
-  "dispatch_standby",
-
-  // Configuration changes, which are the most consequential thing that can
-  // happen without any ship doing anything.
-  //   knob_changed — who retuned what. The supervisor may write policy knobs,
-  //     so this is also how its next run sees its own prior tuning.
-  //   knob_clamped — a deploy silently pulled a tuned value back inside new
-  //     bounds. The audit added this event precisely so that stops being
-  //     invisible; leaving it out of the digest left the fix half-finished.
-  "knob_changed",
-  "knob_clamped",
-
-  // meta#19's ai-service supervisor logs these via POST /events — included
-  // here so both the digest (an operator's hourly review) and the
-  // supervisor's own next run (which reads this same digest for context)
-  // see prior AI actions, not just command-interface's unfiltered Event Feed.
-  "ai_intervention",
-  "ai_no_action",
-];
-
-/** Express 4 does not forward async-handler rejections to error middleware on its own. */
-type AsyncHandler = (req: express.Request, res: express.Response) => Promise<void>;
-// Returns void: Express 4 ignores the return value of a handler, so the promise was never used by anyone.
-const asyncHandler = (fn: AsyncHandler) => (req: express.Request, res: express.Response, next: express.NextFunction): void => {
-  fn(req, res).catch(next);
-};
-
-const badRequest = (res: express.Response, message: string) => res.status(400).json({ error: { message } });
 
 /** What the entrypoint needs from an app beyond the Express handler itself. */
 interface AppLifecycleHandles {
@@ -251,15 +165,7 @@ export function createApp(options: AppOptions) {
     },
   } = options;
 
-  // Every mutating route declares this; every read declares
-  // ignoreCredentials(). There is no third kind of route here.
-  // One literal per route (decisions 20, 22): fleet:control does not satisfy
-  // the events or planner-advice routes, and those scopes do not satisfy it.
-  const requireEventsWrite = auth.requireScope(SCOPE_EVENTS_WRITE);
-  const requirePlannerAdvise = auth.requireScope(SCOPE_PLANNER_ADVISE);
-  const publicRead = () => auth.ignoreCredentials();
-
-  // secured(): a route registered on the app or on `api` below without a
+  // secured(): a route registered on the app below without a
   // declaration as its first handler refuses to start. "Public" is something a
   // route says out loud, never something that happens because a lookup missed.
   const app = secured(express());
@@ -355,196 +261,24 @@ export function createApp(options: AppOptions) {
     },
   });
 
-  // The tsoa controllers (src/controllers): health and the autopilot routes. Each
-  // route gets the declaration its routePolicy entry names, and one with no
-  // entry refuses startup. Mounted here, where those routes always sat: after
-  // the cors and body passthroughs, before the inline routes and notFound().
-  // The ship route exists only with a fleet scheduler; without one the request
-  // falls through to notFound(), as before.
+  // Every route is a tsoa controller (src/controllers). Each gets the
+  // declaration its routePolicy entry names, and one with no entry refuses
+  // startup. Mounted after the cors and body passthroughs, before notFound().
+  // The ship and replan routes exist only with a fleet scheduler, metrics
+  // context only with metrics, the digest only with anomaly detection; without
+  // its collaborator the request falls through to notFound().
   app.locals[AUTOPILOT_LOCAL] = { state, lifecycle, events, tasks };
-  const omitted = new Set(scheduler === null ? ["GET /api/automation/v1/autopilot/ships/:shipSymbol"] : []);
+  app.locals[EVENTS_LOCAL] = { events };
+  app.locals[PLANNER_LOCAL] = { knobs, events, observations, scheduler };
+  app.locals[OBSERVABILITY_LOCAL] = { metrics: metricsRepo, anomalies: anomalyRepo, events, clock };
+  const omitted = new Set<string>();
+  if (scheduler === null) {
+    omitted.add("GET /api/automation/v1/autopilot/ships/:shipSymbol");
+    omitted.add("POST /api/automation/v1/planner/replan");
+  }
+  if (metricsScheduler === null) omitted.add("GET /api/automation/v1/metrics/context");
+  if (anomalyScheduler === null) omitted.add("GET /api/automation/v1/anomalies/digest");
   registerRoutes(declaring(app as unknown as Registrar, auth, policy, omitted));
-
-  // Every read under the API is public on purpose — the dashboard is meant to
-  // be watchable without credentials, the event log especially — and none of
-  // them reads identity, so they all declare ignoreCredentials() too: a
-  // dashboard read keeps working while auth-service is down, and a stale token
-  // riding along on one is never a 401.
-  const api = secured(express.Router());
-
-  // For an external supervisor (meta#19's ai-service) to log its own rationale
-  // into the same audit trail everything else here uses. `type` is restricted
-  // to the "ai_" namespace so an external caller can log its own decisions but
-  // can never spoof a lifecycle/planner event type (e.g. "armed", "knob_changed")
-  // that the rest of this service treats as authoritative.
-  //
-  // `events:write` only, from any kind of caller: `fleet:control` does not
-  // satisfy it (decision 22). ai-service presents a Clerk M2M token minted by
-  // auth-service (meta#59), like every other caller (decision 21). The shared secret
-  // this route used to take is gone; the center has no primitive for one.
-  //
-  // `detail.actor` is stamped with the verified `sub` and overrides anything
-  // the caller put there. The audit trail says who wrote a row because the
-  // center said so, not because the row said so.
-  api.post(
-    "/events",
-    requireEventsWrite,
-    asyncHandler(async (req, res) => {
-      const body = req.body as { type?: unknown; detail?: unknown } | undefined;
-      const type: unknown = body?.type;
-      const detail: unknown = body?.detail;
-      if (typeof type !== "string" || !type.startsWith("ai_")) {
-        badRequest(res, 'type must be a string starting with "ai_"');
-        return;
-      }
-      if (detail !== undefined && (typeof detail !== "object" || detail === null || Array.isArray(detail))) {
-        badRequest(res, "detail must be an object");
-        return;
-      }
-      await events.append(type, { ...((detail as Record<string, unknown> | undefined) ?? {}), actor: actorOf(res) });
-      res.status(201).json({ ok: true });
-    })
-  );
-
-  // --- Planner ---
-
-  // `?class=policy` is how the AI supervisor asks for exactly the knobs it is
-  // allowed to write. Serving the filter here rather than trusting the caller
-  // to filter means the restriction holds even if a client forgets it.
-  api.get(
-    "/planner/knobs",
-    publicRead(),
-    asyncHandler(async (req, res) => {
-      const requested = req.query.class;
-      if (requested === undefined) {
-        res.json({ knobs: await knobs.getAll() });
-        return;
-      }
-      if (!isKnobClass(requested)) {
-        badRequest(res, 'class must be "model", "policy" or "alert"');
-        return;
-      }
-      res.json({ knobs: await knobs.getByClass(requested) });
-    })
-  );
-
-  /**
-   * Two kinds of caller may tune, and they are not trusted equally.
-   *
-   * Both need `planner:advise` (not `fleet:control`; decision 22). An operator may then write any class. A
-   * machine — the AI supervisor, on its Clerk M2M token — may write `policy`
-   * only: the class model is a fence around *it*, and a fence enforced only by
-   * which knobs it is shown is not a fence: nothing stopped it naming
-   * `anomaly.errorRateThreshold` and resolving "the error alarm fired" by
-   * making the error alarm unable to fire.
-   *
-   * "Machine" is the center's `kind`, never the `sub` prefix and never which
-   * header was sent; this used to key on `X-Service-Secret` being present.
-   * Only an explicit operator is unfenced, so a `kind` this code does not
-   * know fails toward the narrower set.
-   */
-  const machineWritableClasses: readonly KnobClass[] = ["policy"];
-
-  api.put(
-    "/planner/knobs/:name",
-    requirePlannerAdvise,
-    asyncHandler(async (req, res) => {
-      const value: unknown = (req.body as { value?: unknown } | undefined)?.value;
-      if (typeof value !== "number" || !Number.isFinite(value)) {
-        badRequest(res, "value must be a finite number");
-        return;
-      }
-      const isOperator = kindOf(res) === "operator";
-      try {
-        const { knob, previousValue } = await knobs.set(req.params.name, value, isOperator ? undefined : machineWritableClasses);
-        await events.append("knob_changed", {
-          name: req.params.name,
-          previousValue,
-          newValue: knob.value,
-          // The caller's verified sub: `user_…` for an operator, `mch_…` for
-          // a machine. It used to be the literal "ai-service" for any caller
-          // holding the shared secret, which named a role, not a credential.
-          actor: actorOf(res),
-        });
-        scheduler?.requestReplan("knob_change");
-        res.json({ knob });
-      } catch (err) {
-        if (err instanceof KnobNotFoundError) {
-          res.status(404).json({ error: { message: err.message } });
-          return;
-        }
-        if (err instanceof KnobOutOfRangeError) {
-          badRequest(res, err.message);
-          return;
-        }
-        if (err instanceof KnobClassForbiddenError) {
-          // 403, not 401: the credential is valid, it simply does not reach
-          // this class of knob. Re-authenticating would not help.
-          res.status(403).json({ error: { message: err.message } });
-          return;
-        }
-        throw err;
-      }
-    })
-  );
-
-  // What the planner currently believes about the universe, and whether each
-  // belief was measured or assumed. The single most useful thing to look at
-  // when a ship goes somewhere surprising.
-  api.get(
-    "/planner/model",
-    publicRead(),
-    asyncHandler(async (_req, res) => {
-      res.json({ model: await observations.calibrate(priorsFromKnobs(await knobs.getValues())) });
-    })
-  );
-
-  if (scheduler !== null) {
-    api.post(
-      "/planner/replan",
-      requirePlannerAdvise,
-      // eslint-disable-next-line @typescript-eslint/require-await -- asyncHandler wants a promise-returning handler, and a throw from requestReplan must still reach next() as a rejection
-      asyncHandler(async (_req, res) => {
-        scheduler.requestReplan("manual");
-        res.json({ requested: true });
-      })
-    );
-  }
-
-  // --- Observability ---
-
-  if (metricsScheduler !== null) {
-    api.get(
-      "/metrics/context",
-      publicRead(),
-      asyncHandler(async (req, res) => {
-        const rollupLimit = clampLimit(req.query.rollupLimit, DEFAULT_CONTEXT_ROLLUP_LIMIT, MAX_ROLLUPS_LIMIT);
-        const eventLimit = clampLimit(req.query.eventLimit, DEFAULT_CONTEXT_EVENT_LIMIT, MAX_CONTEXT_EVENT_LIMIT);
-        const [rollups, recentEvents] = await Promise.all([metricsRepo.list(rollupLimit), events.list(eventLimit)]);
-        res.json({ rollups, events: recentEvents });
-      })
-    );
-  }
-
-  if (anomalyScheduler !== null) {
-    api.get(
-      "/anomalies/digest",
-      publicRead(),
-      asyncHandler(async (req, res) => {
-        const windowMinutes = clampLimit(req.query.windowMinutes, DEFAULT_DIGEST_WINDOW_MINUTES, MAX_DIGEST_WINDOW_MINUTES);
-        const anomalyLimit = clampLimit(req.query.anomalyLimit, DEFAULT_DIGEST_ANOMALY_LIMIT, MAX_ANOMALIES_LIMIT);
-        const eventLimit = clampLimit(req.query.eventLimit, DEFAULT_DIGEST_EVENT_LIMIT, MAX_CONTEXT_EVENT_LIMIT);
-        const since = new Date(clock.now().getTime() - windowMinutes * 60_000);
-        const [anomalies, notableEvents] = await Promise.all([
-          anomalyRepo.listSince(since, anomalyLimit),
-          events.listSince(since, eventLimit, NOTABLE_EVENT_TYPES),
-        ]);
-        res.json({ anomalies, events: notableEvents });
-      })
-    );
-  }
-
-  app.use("/api/automation/v1", api);
 
   // Express' default 404 is an HTML page; every other answer from this service
   // is JSON, so a mistyped path shouldn't be the one a caller can't parse.

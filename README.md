@@ -659,8 +659,8 @@ at the time and can't be honestly recomputed from the log.
 
 All routes are under `/api/automation/v1`. `/health` is unversioned.
 
-[`openapi.json`](openapi.json) describes the routes served by controllers so far (both health routes and the six autopilot
-routes), with the requirement of each in `x-auth` (`public`, or the scope). The other routes are listed below only.
+[`openapi.json`](openapi.json) describes every route of the service, with the requirement of each in `x-auth` and, as an OpenAPI
+`security` requirement, the scope on the `clerk` bearer scheme (none for a public read).
 
 **Autopilot**
 

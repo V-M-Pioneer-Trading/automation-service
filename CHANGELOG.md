@@ -7,6 +7,13 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Every route is a tsoa controller (meta#153)
+
+`POST /events`, the planner routes, `GET /metrics/context` and `GET /anomalies/digest` move into controllers; no inline route remains and
+`routePolicy` lists all of them. `openapi.json` covers every route and each operation carries a real `security` requirement on a
+`clerk` http-bearer scheme (derived from `x-auth` by `scripts/write-openapi.cjs`; scopes on a bearer scheme are an OpenAPI 3.0
+deviation, stated in the scheme's description). operationIds are unique. No response, status or error body changed.
+
 ## tsoa controllers begin with health and the autopilot (meta#152)
 
 Both health routes and the six autopilot routes are tsoa controllers behind a per-route policy table (`routePolicy`,
