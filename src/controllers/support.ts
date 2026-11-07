@@ -22,7 +22,7 @@ export interface ErrorBody {
 }
 
 /**
- * How a controller answers a 4xx: throw this, and `onError` (server.ts) sends
+ * How a controller answers a 4xx (meta#168): throw this, and `onError` (server.ts) sends
  * `{ error: { message } }` on `status`. The controller's return type then stays
  * the success body, and the 4xx is declared with `@Response<ErrorBody>`.
  * `message` is sent verbatim, so it must be safe for the caller to read.

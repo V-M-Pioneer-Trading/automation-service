@@ -316,7 +316,7 @@ export function createApp(options: AppOptions) {
       res.status(400).json({ error: { message } });
       return;
     }
-    // A controller's own 4xx answer (HttpError in controllers/support.ts). Matched by class, not by a
+    // A controller's own 4xx answer (meta#168; HttpError in controllers/support.ts). Matched by class, not by a
     // `status` field: body-parser errors carry one too. Not logged: it is the caller's mistake.
     if (err instanceof HttpError) {
       res.status(err.status).json({ error: { message: err.message } });

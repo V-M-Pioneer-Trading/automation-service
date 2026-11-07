@@ -7,6 +7,15 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## Error answers on their own status codes (meta#168, meta#161)
+
+Seven success responses of `openapi.json` (list knobs, pause, abort, ship task, arm, set knob at 200; append event at 201) were declared as the
+answer *or* `ErrorBody`, which a generated client must narrow on every call. They now declare the success schema only, and each 4xx stays
+on its own status code with `ErrorBody`. A controller answers a 4xx by throwing `HttpError` (`controllers/support.ts`), which `onError` renders as
+`{ error: { message } }`; this also replaces the `setStatus`/return pairs and the planner's private `fail` (meta#161's shared-helper bullet). Tests pin every
+4xx by status and exact body (`errorAnswers.test.ts`) and fail if a 2xx response references `ErrorBody` (`openapi.test.ts`). No response, status or error
+body changed.
+
 ## The spec reaches meta (meta#154)
 
 A `sync-openapi` job at the end of `container.yml` calls meta's `openapi-sync.yml` after the tests on a push or dispatch on `main`, with the
