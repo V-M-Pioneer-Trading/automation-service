@@ -5,7 +5,7 @@ import { SCOPE_FLEET_CONTROL } from "../auth";
 import { InvalidTransitionError, type AutopilotMode, type AutopilotStatus } from "../autopilotState";
 import type { EventLogEntry } from "../eventLog";
 import type { ShipTask } from "../shipTaskRepo";
-import { autopilotOf, clampLimit, type ErrorBody } from "./support";
+import { autopilotOf, clampLimit, HttpError, type ErrorBody } from "./support";
 
 export interface AutopilotSnapshot {
   status: AutopilotStatus;
@@ -49,11 +49,10 @@ export class AutopilotController extends Controller {
   @Extension("x-auth", SCOPE_FLEET_CONTROL)
   @Post("arm")
   @Response<ErrorBody>(400, 'mode must be "live" or "shadow"')
-  public async arm(@Request() req: ExpressRequest): Promise<AutopilotSnapshot | ErrorBody> {
+  public async arm(@Request() req: ExpressRequest): Promise<AutopilotSnapshot> {
     const mode: unknown = (req.body as { mode?: unknown } | undefined)?.mode ?? "live";
     if (mode !== "live" && mode !== "shadow") {
-      this.setStatus(400);
-      return { error: { message: 'mode must be "live" or "shadow"' } };
+      throw new HttpError(400, 'mode must be "live" or "shadow"');
     }
     return await autopilotOf(req).lifecycle.arm(mode, actorOf(req.res as ExpressResponse));
   }
@@ -62,7 +61,7 @@ export class AutopilotController extends Controller {
   @Extension("x-auth", SCOPE_FLEET_CONTROL)
   @Post("pause")
   @Response<ErrorBody>(409, "not armed")
-  public async pause(@Request() req: ExpressRequest): Promise<AutopilotSnapshot | ErrorBody> {
+  public async pause(@Request() req: ExpressRequest): Promise<AutopilotSnapshot> {
     return await this.transition(req, "pause");
   }
 
@@ -70,7 +69,7 @@ export class AutopilotController extends Controller {
   @Extension("x-auth", SCOPE_FLEET_CONTROL)
   @Post("abort")
   @Response<ErrorBody>(409, "neither armed nor paused")
-  public async abort(@Request() req: ExpressRequest): Promise<AutopilotSnapshot | ErrorBody> {
+  public async abort(@Request() req: ExpressRequest): Promise<AutopilotSnapshot> {
     return await this.transition(req, "abort");
   }
 
@@ -85,22 +84,20 @@ export class AutopilotController extends Controller {
   @Extension("x-auth", "public")
   @Get("ships/{shipSymbol}")
   @Response<ErrorBody>(404, "no task for this ship yet")
-  public async ship(@Request() req: ExpressRequest, @Path() shipSymbol: string): Promise<ShipTaskAnswer | ErrorBody> {
+  public async ship(@Request() req: ExpressRequest, @Path() shipSymbol: string): Promise<ShipTaskAnswer> {
     const task = await autopilotOf(req).tasks.get(shipSymbol);
     if (task === null) {
-      this.setStatus(404);
-      return { error: { message: "no task for this ship yet" } };
+      throw new HttpError(404, "no task for this ship yet");
     }
     return { task };
   }
 
-  private async transition(req: ExpressRequest, action: "pause" | "abort"): Promise<AutopilotSnapshot | ErrorBody> {
+  private async transition(req: ExpressRequest, action: "pause" | "abort"): Promise<AutopilotSnapshot> {
     try {
       return await autopilotOf(req).lifecycle[action](actorOf(req.res as ExpressResponse));
     } catch (err) {
       if (err instanceof InvalidTransitionError) {
-        this.setStatus(409);
-        return { error: { message: err.message } };
+        throw new HttpError(409, err.message);
       }
       throw err;
     }
