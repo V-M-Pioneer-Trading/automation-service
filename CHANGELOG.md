@@ -7,6 +7,12 @@ decisions were later reversed.
 
 Issues live in the [meta tracker](https://github.com/V-M-Pioneer-Trading/meta/issues).
 
+## The spec reaches meta (meta#154)
+
+A `sync-openapi` job at the end of `container.yml` calls meta's `openapi-sync.yml` after the tests on a push or dispatch on `main`, with the
+same inputs as auth-service (`spec-path: openapi.json`, the two org secrets). It does not wait for the deploy. meta accepts
+`openapi/automation-service.json`; no behaviour of the service changed.
+
 ## Every route is a tsoa controller (meta#153)
 
 `POST /events`, the planner routes, `GET /metrics/context` and `GET /anomalies/digest` move into controllers; no inline route remains and

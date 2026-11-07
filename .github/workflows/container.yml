@@ -253,3 +253,16 @@ jobs:
           done
           echo "::error::Redeploy $command_id still running after 15 minutes"
           exit 1
+
+  # Sync the committed spec to meta's openapi/ (meta#26) on a push or a manual
+  # dispatch on main; meta's workflow skips a commit that is no longer the tip.
+  # Only after the tests, which include the check that openapi.json is current.
+  sync-openapi:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    uses: V-M-Pioneer-Trading/meta/.github/workflows/openapi-sync.yml@main
+    with:
+      spec-path: openapi.json
+    secrets:
+      OPENAPI_SYNC_CLIENT_ID: ${{ secrets.OPENAPI_SYNC_CLIENT_ID }}
+      OPENAPI_SYNC_PRIVATE_KEY: ${{ secrets.OPENAPI_SYNC_PRIVATE_KEY }}

@@ -19,7 +19,7 @@ npm run replay -- --set mine.taskWeight=2 --since 6h --verbose
 
 CI (`.github/workflows/container.yml`) runs `npm run lint`, the openapi.json freshness check and `npm test` on PRs and on pushes against a fresh
 Postgres 16. The image is built, pushed and redeployed only on a push to `main`, and
-only after that test job passes. Deploy permissions (`packages`, `id-token`) are
+only after that test job passes. The `sync-openapi` job also runs only after the tests, on a push or dispatch on `main`, and proposes `openapi.json` to meta's `openapi/` (meta#154). Deploy permissions (`packages`, `id-token`) are
 declared on the `docker` job, never at workflow level. A PR-only `image` job builds the same image (arm64, no push, no credentials), because
 the tsoa routes are generated at build time and a Dockerfile that misses an input would otherwise fail only after the merge deploys.
 
