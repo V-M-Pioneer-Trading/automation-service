@@ -699,14 +699,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/KnobsAnswer"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ErrorBody"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/KnobsAnswer"
                 }
               }
             }
@@ -965,14 +958,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/AutopilotSnapshot"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ErrorBody"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/AutopilotSnapshot"
                 }
               }
             }
@@ -1012,14 +998,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/AutopilotSnapshot"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ErrorBody"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/AutopilotSnapshot"
                 }
               }
             }
@@ -1092,14 +1071,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/ShipTaskAnswer"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ErrorBody"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/ShipTaskAnswer"
                 }
               }
             }
@@ -1142,14 +1114,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/AutopilotSnapshot"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ErrorBody"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/AutopilotSnapshot"
                 }
               }
             }
@@ -1209,14 +1174,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/OkAnswer"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ErrorBody"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/OkAnswer"
                 }
               }
             }
@@ -1281,14 +1239,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/KnobAnswer"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ErrorBody"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/KnobAnswer"
                 }
               }
             }

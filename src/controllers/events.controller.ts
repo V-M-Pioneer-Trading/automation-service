@@ -2,7 +2,7 @@ import { Controller, Extension, Post, Request, Response, Route, SuccessResponse,
 import type { Request as ExpressRequest, Response as ExpressResponse } from "express";
 import { actorOf } from "@v-m-pioneer-trading/clerk-client";
 import { SCOPE_EVENTS_WRITE } from "../auth";
-import { eventsOf, type ErrorBody } from "./support";
+import { eventsOf, HttpError, type ErrorBody } from "./support";
 
 export interface OkAnswer {
   ok: true;
@@ -34,17 +34,15 @@ export class EventsController extends Controller {
   @Post("events")
   @SuccessResponse(201, "Appended")
   @Response<ErrorBody>(400, 'type must be a string starting with "ai_"; detail must be an object')
-  public async appendEvent(@Request() req: ExpressRequest): Promise<OkAnswer | ErrorBody> {
+  public async appendEvent(@Request() req: ExpressRequest): Promise<OkAnswer> {
     const body = req.body as { type?: unknown; detail?: unknown } | undefined;
     const type: unknown = body?.type;
     const detail: unknown = body?.detail;
     if (typeof type !== "string" || !type.startsWith("ai_")) {
-      this.setStatus(400);
-      return { error: { message: 'type must be a string starting with "ai_"' } };
+      throw new HttpError(400, 'type must be a string starting with "ai_"');
     }
     if (detail !== undefined && (typeof detail !== "object" || detail === null || Array.isArray(detail))) {
-      this.setStatus(400);
-      return { error: { message: "detail must be an object" } };
+      throw new HttpError(400, "detail must be an object");
     }
     await eventsOf(req).events.append(type, { ...((detail as Record<string, unknown> | undefined) ?? {}), actor: actorOf(req.res as ExpressResponse) });
     this.setStatus(201);

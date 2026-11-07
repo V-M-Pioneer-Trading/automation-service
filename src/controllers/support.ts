@@ -21,6 +21,21 @@ export interface ErrorBody {
   error: { message: string };
 }
 
+/**
+ * How a controller answers a 4xx: throw this, and `onError` (server.ts) sends
+ * `{ error: { message } }` on `status`. The controller's return type then stays
+ * the success body, and the 4xx is declared with `@Response<ErrorBody>`.
+ * `message` is sent verbatim, so it must be safe for the caller to read.
+ */
+export class HttpError extends Error {
+  constructor(
+    readonly status: 400 | 403 | 404 | 409,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
 /** What the autopilot controller needs from the app (server.ts puts it in app.locals). */
 export interface AutopilotDeps {
   state: AutopilotState;

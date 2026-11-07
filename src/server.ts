@@ -22,7 +22,7 @@ import { systemClock } from "./clock";
 import type { ServiceConfig } from "./config";
 import { configFromEnv, fetchStartupToken, resolveM2MTokenSource } from "./config";
 import { ContractRepo } from "./contractRepo";
-import { AUTOPILOT_LOCAL, EVENTS_LOCAL, OBSERVABILITY_LOCAL, PLANNER_LOCAL } from "./controllers/support";
+import { AUTOPILOT_LOCAL, EVENTS_LOCAL, HttpError, OBSERVABILITY_LOCAL, PLANNER_LOCAL } from "./controllers/support";
 import { createPool, migrate } from "./db";
 import { EventLog } from "./eventLog";
 import { createGameClients } from "./gameClients";
@@ -314,6 +314,12 @@ export function createApp(options: AppOptions) {
     if (err instanceof ValidateError) {
       const message = Object.values(err.fields).map((f) => f.message).join("; ");
       res.status(400).json({ error: { message } });
+      return;
+    }
+    // A controller's own 4xx answer (HttpError in controllers/support.ts). Matched by class, not by a
+    // `status` field: body-parser errors carry one too. Not logged: it is the caller's mistake.
+    if (err instanceof HttpError) {
+      res.status(err.status).json({ error: { message: err.message } });
       return;
     }
     // A lifecycle change that arrived after shutdown began. Retryable against

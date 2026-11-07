@@ -4,7 +4,7 @@ import { actorOf, kindOf } from "@v-m-pioneer-trading/clerk-client";
 import { SCOPE_PLANNER_ADVISE } from "../auth";
 import { isKnobClass, KnobClassForbiddenError, KnobNotFoundError, KnobOutOfRangeError, type Knob, type KnobClass } from "../knobs";
 import { priorsFromKnobs, type CalibratedModel } from "../observations";
-import { plannerOf, type ErrorBody } from "./support";
+import { HttpError, plannerOf, type ErrorBody } from "./support";
 
 export interface KnobsAnswer {
   knobs: Knob[];
@@ -55,12 +55,11 @@ export class PlannerController extends Controller {
   @Extension("x-auth", "public")
   @Get("knobs")
   @Response<ErrorBody>(400, 'class must be "model", "policy" or "alert"')
-  public async listKnobs(@Request() req: ExpressRequest, @Query("class") requested?: unknown): Promise<KnobsAnswer | ErrorBody> {
+  public async listKnobs(@Request() req: ExpressRequest, @Query("class") requested?: unknown): Promise<KnobsAnswer> {
     const { knobs } = plannerOf(req);
     if (requested === undefined) return { knobs: await knobs.getAll() };
     if (!isKnobClass(requested)) {
-      this.setStatus(400);
-      return { error: { message: 'class must be "model", "policy" or "alert"' } };
+      throw new HttpError(400, 'class must be "model", "policy" or "alert"');
     }
     return { knobs: await knobs.getByClass(requested) };
   }
@@ -71,11 +70,10 @@ export class PlannerController extends Controller {
   @Response<ErrorBody>(400, "value must be a finite number; out of range")
   @Response<ErrorBody>(403, "the caller's kind may not write this knob's class")
   @Response<ErrorBody>(404, "no such knob")
-  public async setKnob(@Request() req: ExpressRequest, @Path() name: string): Promise<KnobAnswer | ErrorBody> {
+  public async setKnob(@Request() req: ExpressRequest, @Path() name: string): Promise<KnobAnswer> {
     const value: unknown = (req.body as { value?: unknown } | undefined)?.value;
     if (typeof value !== "number" || !Number.isFinite(value)) {
-      this.setStatus(400);
-      return { error: { message: "value must be a finite number" } };
+      throw new HttpError(400, "value must be a finite number");
     }
     const res = req.res as ExpressResponse;
     const { knobs, events, scheduler } = plannerOf(req);
@@ -91,10 +89,10 @@ export class PlannerController extends Controller {
       scheduler?.requestReplan("knob_change");
       return { knob };
     } catch (err) {
-      if (err instanceof KnobNotFoundError) return this.fail(404, err);
-      if (err instanceof KnobOutOfRangeError) return this.fail(400, err);
+      if (err instanceof KnobNotFoundError) throw new HttpError(404, err.message);
+      if (err instanceof KnobOutOfRangeError) throw new HttpError(400, err.message);
       // 403, not 401: the credential is valid, it simply does not reach this class of knob. Re-authenticating would not help.
-      if (err instanceof KnobClassForbiddenError) return this.fail(403, err);
+      if (err instanceof KnobClassForbiddenError) throw new HttpError(403, err.message);
       throw err;
     }
   }
@@ -118,10 +116,5 @@ export class PlannerController extends Controller {
     // Never null here: the route is not registered without a scheduler (server.ts).
     plannerOf(req).scheduler?.requestReplan("manual");
     return { requested: true };
-  }
-
-  private fail(status: number, err: Error): ErrorBody {
-    this.setStatus(status);
-    return { error: { message: err.message } };
   }
 }

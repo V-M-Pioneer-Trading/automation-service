@@ -555,7 +555,7 @@ any `detail.actor` in the body.
   Every controller route also states its requirement in `openapi.json` (`x-auth`: `public` or the scope), and a test
   holds the two sources equal. `npm run openapi` derives each operation's `security` (`[{clerk:[scope]}]`, none for a public read) from its `x-auth` and takes the `clerk` http-bearer scheme from `tsoa.json`; never use tsoa's `@Security`, which switches on a generated authentication hook (a second auth path, and a process crash without a module). Method names are the operationIds and must stay unique across controllers. Generated code (`src/generated/`, gitignored) is built by `npm run codegen`, which
   `lint`, `test`, `typecheck` and `build` run first. Controllers read body and query themselves (bodies are documented through `tsoa.json`'s spec merge; query parameters are declared `@Query() x?: unknown`): tsoa's typed binding
-  would 400 on input this service has always accepted. A `ValidateError` is answered `400 {error:{message}}`.
+  would 400 on input this service has always accepted. A `ValidateError` is answered `400 {error:{message}}`. A controller answers its own 4xx by throwing `HttpError` (`controllers/support.ts`), declared with `@Response<ErrorBody>`; its return type is the success body only, so no 2xx response in the spec references `ErrorBody`.
 - **Messages are the package's** (`MESSAGES`): `401` `a bearer token is
   required` / `invalid or expired session`, `403` generic without the scope
   name, `503` `the authentication service could not process this request`.
